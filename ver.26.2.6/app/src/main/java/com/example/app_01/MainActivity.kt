@@ -35,15 +35,17 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.FocusMeteringAction
-import androidx.camera.core.FocusMeteringResult
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
-import androidx.camera.core.MeteringPointFactory
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
-import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
@@ -54,6 +56,8 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import android.util.Size
+import android.os.Handler
+import android.os.Looper
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -72,14 +76,19 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -87,6 +96,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Camera
+import androidx.compose.material.icons.filled.CameraFront
+import androidx.compose.material.icons.filled.CameraRear
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudUpload
@@ -94,11 +105,26 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.FlashOff
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SwitchDefaults
@@ -114,8 +140,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
+import android.content.Intent
+import android.os.IBinder
+import androidx.core.app.NotificationCompat
+import android.view.WindowManager
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
@@ -170,6 +205,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.delay
 import okhttp3.MediaType.Companion.toMediaType
@@ -177,6 +213,7 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
@@ -190,6 +227,11 @@ private const val DOWNLOAD_ENDPOINT = "/download"
 private const val DEFAULT_SERVER_ADDRESS = "192.168.0.88"
 private const val DEFAULT_SERVER_PORT = 8000
 private const val DEFAULT_USE_HTTPS = false // HTTP 기본값
+
+// SAM3 배경제거 서버 (sam3_server.py, 기본 포트 8001)
+private const val SAM3_BG_REMOVE_ENDPOINT = "/bg-remove"
+private const val SAM3_DEFAULT_PORT = 8001
+
 
 // SharedPreferences 키
 private const val PREF_SERVER_ADDRESS = "server_address"
@@ -214,6 +256,108 @@ private fun getUseHttps(context: Context): Boolean {
     return prefs.getBoolean(PREF_USE_HTTPS, DEFAULT_USE_HTTPS)
 }
 
+/** 이미지 URI의 가로·세로 픽셀 크기 반환 (inJustDecodeBounds) */
+private fun getImageDimensions(context: Context, uri: Uri): Pair<Int, Int>? {
+    return try {
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+        val w = opts.outWidth
+        val h = opts.outHeight
+        if (w <= 0 || h <= 0) return null
+
+        // EXIF 회전 확인: 90/270도 회전된 이미지는 가로/세로를 교환해야
+        // Coil이 EXIF를 반영해 표시하므로, 터치 좌표 계산도 표시 기준으로 맞춰야 함
+        val orientation = context.contentResolver.openInputStream(uri)?.use { stream ->
+            ExifInterface(stream).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_NORMAL
+            )
+        } ?: ExifInterface.ORIENTATION_NORMAL
+
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90,
+            ExifInterface.ORIENTATION_ROTATE_270,
+            ExifInterface.ORIENTATION_TRANSVERSE,
+            ExifInterface.ORIENTATION_TRANSPOSE -> h to w  // 가로/세로 교환
+            else -> w to h
+        }
+    } catch (_: Exception) {
+        null
+    }
+}
+
+/** OOM 방지: 최대 변 길이 이하로 디코딩. EXIF 회전을 적용해 표시 방향과 일치시킴 */
+private fun decodeBitmapWithMaxDimension(context: Context, uri: Uri, maxDim: Int): Bitmap? {
+    return try {
+        // 원본 크기 확인
+        val sizeOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, sizeOpts) }
+        val rawW = sizeOpts.outWidth
+        val rawH = sizeOpts.outHeight
+        if (rawW <= 0 || rawH <= 0) return null
+
+        // EXIF 회전 정보 읽기
+        val orientation = context.contentResolver.openInputStream(uri)?.use { stream ->
+            ExifInterface(stream).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_NORMAL
+            )
+        } ?: ExifInterface.ORIENTATION_NORMAL
+
+        val rotates90or270 = orientation == ExifInterface.ORIENTATION_ROTATE_90 ||
+            orientation == ExifInterface.ORIENTATION_ROTATE_270 ||
+            orientation == ExifInterface.ORIENTATION_TRANSVERSE ||
+            orientation == ExifInterface.ORIENTATION_TRANSPOSE
+
+        // 회전 후 실효 크기 기준으로 sampleSize 계산
+        val effectiveW = if (rotates90or270) rawH else rawW
+        val effectiveH = if (rotates90or270) rawW else rawH
+        var sampleSize = 1
+        if (effectiveW > maxDim || effectiveH > maxDim) {
+            val halfW = effectiveW / 2
+            val halfH = effectiveH / 2
+            while (halfW / sampleSize >= maxDim && halfH / sampleSize >= maxDim) {
+                sampleSize *= 2
+            }
+        }
+
+        val decodeOpts = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inJustDecodeBounds = false
+        }
+        val raw = context.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, decodeOpts)
+        } ?: return null
+
+        // 회전 행렬 적용 (Coil과 동일한 방향으로 보정)
+        val rotationDeg = when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90,
+            ExifInterface.ORIENTATION_TRANSVERSE  -> 90f
+            ExifInterface.ORIENTATION_ROTATE_180,
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> 180f
+            ExifInterface.ORIENTATION_ROTATE_270,
+            ExifInterface.ORIENTATION_TRANSPOSE   -> 270f
+            else -> 0f
+        }
+        val needsMirror = orientation == ExifInterface.ORIENTATION_FLIP_HORIZONTAL ||
+            orientation == ExifInterface.ORIENTATION_FLIP_VERTICAL ||
+            orientation == ExifInterface.ORIENTATION_TRANSVERSE ||
+            orientation == ExifInterface.ORIENTATION_TRANSPOSE
+
+        if (rotationDeg == 0f && !needsMirror) return raw
+
+        val matrix = Matrix().apply {
+            if (needsMirror) postScale(-1f, 1f, raw.width / 2f, raw.height / 2f)
+            if (rotationDeg != 0f) postRotate(rotationDeg, raw.width / 2f, raw.height / 2f)
+        }
+        Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, matrix, true)
+            .also { if (it !== raw) raw.recycle() }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    }
+}
+
 // SharedPreferences에 서버 설정 저장하기
 private fun saveServerSettings(context: Context, address: String, port: Int, useHttps: Boolean) {
     val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
@@ -229,13 +373,11 @@ enum class CaptureMode {
 }
 
 enum class ResolutionPreset(val width: Int, val height: Int) {
-    RESOLUTION_1920x1080(1080, 1920),  // FHD 세로 방향 (가로 1080, 세로 1920)
-    RESOLUTION_518x518(518, 518),      // VGGT 정사각형
-    RESOLUTION_1024x1024(1024, 1024)   // 사물 스캔 전용 정사각형
+    RESOLUTION_1024x1024(1024, 1024)   // 1024x1024 정사각형 (단일 해상도)
 }
 
 enum class MainTab {
-    LIBRARY, CAMERA, CREATE, PROFILE
+    LIBRARY, CLAUDE, CAMERA, CREATE, PROFILE
 }
 
 enum class LibraryTab {
@@ -243,11 +385,11 @@ enum class LibraryTab {
 }
 
 enum class LibraryDetailScreen {
-    NONE, DATASET_FOLDER, MODEL_VIEWER
+    NONE, DATASET_FOLDER, MODEL_VIEWER, OBJ_VIEWER
 }
 
 enum class CameraEntryMode {
-    OBJECT, SPACE_2D, SPACE_3D
+    OBJECT, SPACE_2D, SPACE_3D, MOBILE_SPACE
 }
 
 private fun CameraEntryMode.isSpaceMode(): Boolean = this != CameraEntryMode.OBJECT
@@ -260,6 +402,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // (삭제) 광택/반사 제거 옵션 제거에 따라 OpenCV 초기화 제거
+
         setContent {
             App_01Theme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -360,6 +505,12 @@ fun CameraApp(modifier: Modifier = Modifier) {
                         selectedMediaUri = viewingMediaList[index]
                         selectedMediaIndex = index
                     }
+                },
+                onGalleryUpdated = {
+                    loadCapturedMedia(context) { images ->
+                        capturedImages = images
+                        if (images.isNotEmpty()) lastCapturedImageUri = images.first()
+                    }
                 }
             )
         } else if (showServerSettings) {
@@ -398,6 +549,17 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                     } else {
                                         lastCapturedImageUri = null
                                     }
+                                }
+                            }
+                        )
+                    }
+                    MainTab.CLAUDE -> {
+                        ClaudeChatScreen(
+                            galleryImages = capturedImages,
+                            onGalleryUpdated = {
+                                loadCapturedMedia(context) { images ->
+                                    capturedImages = images
+                                    if (images.isNotEmpty()) lastCapturedImageUri = images.first()
                                 }
                             }
                         )
@@ -487,6 +649,16 @@ fun CameraApp(modifier: Modifier = Modifier) {
     }
 }
 
+/** 디바이스에서 발견된 개별 카메라 정보 */
+data class AvailableCameraInfo(
+    val cameraId: String,
+    val lensFacing: Int,                    // CameraCharacteristics.LENS_FACING_*
+    val focalLengths: FloatArray,
+    val label: String,                      // "후면 광각", "후면 초광각", "후면 망원", "전면 카메라"
+    val isPhysical: Boolean = false,        // 논리 카메라의 물리적 서브카메라 여부
+    val parentLogicalCameraId: String? = null  // 물리 카메라일 경우 부모 논리 카메라 ID
+)
+
 @Composable
 fun CameraScreen(
     cameraEntryMode: CameraEntryMode,
@@ -498,7 +670,6 @@ fun CameraScreen(
     val context = LocalContext.current
     val mediaActionSound = remember {
         MediaActionSound().apply {
-            load(MediaActionSound.SHUTTER_CLICK)
             load(MediaActionSound.START_VIDEO_RECORDING)
             load(MediaActionSound.STOP_VIDEO_RECORDING)
         }
@@ -517,16 +688,137 @@ fun CameraScreen(
     var previewView: PreviewView? by remember { mutableStateOf(null) }
     var camera: Camera? by remember { mutableStateOf(null) }
     var isCameraReady by remember { mutableStateOf(false) }
-    var focusPointInPreview by remember { mutableStateOf<Offset?>(null) }
-    var focusPointInRoot by remember { mutableStateOf<Offset?>(null) }
-    var isFocusLocked by remember { mutableStateOf(false) }
-    var lockedFocusPoint by remember { mutableStateOf<Offset?>(null) }
+    var isFlashOn by remember { mutableStateOf(false) }
     var previewOriginInRoot by remember { mutableStateOf<Offset?>(null) }
     var datasetDir by remember { mutableStateOf<File?>(null) }
     var isDatasetCollectionEnabled by remember { mutableStateOf(true) }
-    val focusScope = rememberCoroutineScope()
-    var selectedResolution by remember { mutableStateOf(ResolutionPreset.RESOLUTION_1920x1080) }
+    var selectedResolution by remember { mutableStateOf(ResolutionPreset.RESOLUTION_1024x1024) }
     var azimuthDegrees by remember { mutableStateOf(0f) }
+
+    // 카메라 전환 관련 상태
+    var availableCameras by remember { mutableStateOf<List<AvailableCameraInfo>>(emptyList()) }
+    var selectedCameraId by remember { mutableStateOf<String?>(null) }
+    var showCameraSelector by remember { mutableStateOf(false) }
+
+    // 앱 시작 시 디바이스에서 사용 가능한 카메라 목록 수집
+    // CameraManager로 모든 렌즈를 열거하되, CameraX의 availableCameraInfos와 비교해
+    // 논리 카메라(CameraX가 직접 바인딩 가능) / 물리 카메라(setPhysicalCameraId 필요)를 구분
+    LaunchedEffect(Unit) {
+        try {
+            val cameraProvider = withContext(Dispatchers.IO) {
+                ProcessCameraProvider.getInstance(context).get()
+            }
+            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+
+            // CameraX가 직접 접근 가능한 논리 카메라 ID 집합
+            @Suppress("UnsafeOptInUsageError")
+            val logicalCameraIds = cameraProvider.availableCameraInfos
+                .mapNotNull { runCatching { Camera2CameraInfo.from(it).cameraId }.getOrNull() }
+                .toSet()
+
+            // 물리 카메라 → 부모 논리 카메라 ID 매핑 (API 28+)
+            val physicalToLogical = mutableMapOf<String, String>()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                for (id in cameraManager.cameraIdList) {
+                    try {
+                        val chars = cameraManager.getCameraCharacteristics(id)
+                        chars.physicalCameraIds.forEach { physId ->
+                            physicalToLogical[physId] = id
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+
+            val cameras = mutableListOf<AvailableCameraInfo>()
+            for (id in cameraManager.cameraIdList) {
+                try {
+                    val chars = cameraManager.getCameraCharacteristics(id)
+                    val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: continue
+                    if (!caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE)) continue
+
+                    val facing = chars.get(CameraCharacteristics.LENS_FACING) ?: continue
+                    val focalLengths = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                        ?: floatArrayOf()
+                    val minFocal = focalLengths.minOrNull() ?: 3f
+
+                    val isPhysical = id !in logicalCameraIds
+                    val parentId = if (isPhysical) physicalToLogical[id] else null
+
+                    val label = when {
+                        facing == CameraCharacteristics.LENS_FACING_FRONT -> "전면 카메라"
+                        minFocal < 2.5f -> "후면 초광각"
+                        minFocal >= 6.0f -> "후면 망원"
+                        else -> "후면 광각"
+                    }
+                    cameras.add(AvailableCameraInfo(id, facing, focalLengths, label, isPhysical, parentId))
+                } catch (_: Exception) {}
+            }
+            // 후면 카메라를 초점거리 순(초광각→광각→망원)으로, 전면은 마지막에 정렬
+            availableCameras = cameras.sortedWith(
+                compareBy(
+                    { if (it.lensFacing == CameraCharacteristics.LENS_FACING_FRONT) 1 else 0 },
+                    { it.focalLengths.minOrNull() ?: 99f }
+                )
+            )
+            // 기본 선택: 후면 광각 주 카메라(논리 카메라 우선, 초점거리 3.5mm 근접)
+            selectedCameraId = availableCameras
+                .filter { it.lensFacing == CameraCharacteristics.LENS_FACING_BACK && !it.isPhysical }
+                .minByOrNull { Math.abs((it.focalLengths.minOrNull() ?: 3f) - 3.5f) }
+                ?.cameraId
+                ?: availableCameras
+                    .filter { it.lensFacing == CameraCharacteristics.LENS_FACING_BACK }
+                    .minByOrNull { Math.abs((it.focalLengths.minOrNull() ?: 3f) - 3.5f) }
+                    ?.cameraId
+        } catch (e: Exception) {
+            android.util.Log.e("CameraScreen", "카메라 목록 수집 실패", e)
+        }
+    }
+
+    // [추가] 촬영 중 화면 켜짐 유지
+    val view = LocalView.current
+    DisposableEffect(isRecording) {
+        if (isRecording) {
+            view.keepScreenOn = true
+        }
+        onDispose {
+            view.keepScreenOn = false
+        }
+    }
+
+    // [추가] 백그라운드 작업 유지를 위한 서비스 제어
+    LaunchedEffect(isRecording) {
+        val intent = Intent(context, AppForegroundService::class.java)
+        if (isRecording) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        } else {
+            context.stopService(intent)
+        }
+    }
+
+    // [추가] 모델링 부적합 경고 표시 상태
+    var showModelingWarning by remember { mutableStateOf(false) }
+
+    // [추가] 사물 촬영(OBJECT) 전용: 사물이 중앙 가상 사각형(1000x1000) 밖으로 벗어났는지 경고
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                ObjectOutOfFrameWarning.close()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    LaunchedEffect(isFlashOn, camera) {
+        try {
+            camera?.cameraControl?.enableTorch(isFlashOn)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
     var baseAzimuthDegrees by remember { mutableStateOf<Float?>(null) }
     // 수직(세로) 들었을 때 0도를 기준으로 하는 기울기
     var pitchDegrees by remember { mutableStateOf(0f) }
@@ -574,13 +866,6 @@ fun CameraScreen(
         derivedStateOf { relativeAzimuthDegrees % 360f }
     }
 
-    LaunchedEffect(cameraEntryMode) {
-        if (cameraEntryMode.isObjectMode()) {
-            selectedResolution = ResolutionPreset.RESOLUTION_1024x1024
-        } else if (selectedResolution == ResolutionPreset.RESOLUTION_1024x1024) {
-            selectedResolution = ResolutionPreset.RESOLUTION_1920x1080
-        }
-    }
     val currentSectorIndex by remember {
         derivedStateOf {
             ((displayAzimuthDegrees / sectorSize).toInt()).coerceIn(0, sectorCount - 1)
@@ -675,25 +960,91 @@ fun CameraScreen(
         }
     }
 
-    // 초점 고정 상태에 따라 데이터셋 수집 제어 (고정 후 3초 뒤 시작)
-    LaunchedEffect(isRecording, captureMode, isFocusLocked) {
+    // 동영상 촬영 시 데이터셋 수집 제어 (촬영 시작 3초 후 시작)
+    LaunchedEffect(isRecording, captureMode) {
         if (captureMode != CaptureMode.VIDEO || !isRecording) {
             isDatasetCollectionEnabled = true
             return@LaunchedEffect
         }
-        if (!isFocusLocked) {
-            isDatasetCollectionEnabled = false
-        } else {
-            isDatasetCollectionEnabled = false
-            delay(3000)
-            if (isRecording && isFocusLocked && captureMode == CaptureMode.VIDEO) {
-                isDatasetCollectionEnabled = true
-            }
+        isDatasetCollectionEnabled = false
+        delay(3000)
+        if (isRecording && captureMode == CaptureMode.VIDEO) {
+            isDatasetCollectionEnabled = true
         }
     }
 
     // 동영상 촬영 시 구역 체크: 1초 간격으로 현재 구역 기록 (사물/공간 모두)
     LaunchedEffect(isRecording, cameraEntryMode, captureMode, currentPitchIndex, isDatasetCollectionEnabled, datasetDir) {
+        // [수정] 이동식 공간 촬영인 경우: 촬영 시작 3초 후(isDatasetCollectionEnabled=true) 1초 간격 자동 촬영
+        if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
+            // 녹화가 아니거나 데이터셋 수집 중단 시 경고 끄기
+            if (!isRecording || !isDatasetCollectionEnabled) {
+                showModelingWarning = false
+            }
+
+            if (captureMode == CaptureMode.VIDEO && isRecording && isDatasetCollectionEnabled) {
+                var captureCount = 0
+                val dir = datasetDir
+                val capture = imageCapture
+                
+                // 직전에 저장된 데이터셋 이미지의 축소본 (유사도 비교용)
+                var lastSavedBitmapSmall: android.graphics.Bitmap? = null
+
+                if (dir != null && capture != null) {
+                    while (isRecording && isDatasetCollectionEnabled) {
+                        captureCount++
+                        val fileName = "mobile_${captureCount}.jpg"
+                        
+                        captureDatasetImage(context, 0, 0, dir, capture, fileName) { currentBitmap ->
+                            // 1. 모델링 적합성 검사 (경고 표시 업데이트)
+                            val isSuitable = checkModelingSuitability(currentBitmap)
+                            showModelingWarning = !isSuitable
+
+                            // [수정] 적합하지 않으면(경고 상태) 데이터셋 저장 중단 (파일도 삭제하는 것이 좋으나 captureDatasetImage 내부 구현상 파일은 이미 생성됨. 여기서는 리스트 관리나 후속 처리를 막음)
+                            // captureDatasetImage 함수가 파일을 이미 저장했으므로, 엄밀히는 파일을 지워야 하지만
+                            // 현재 구조상 콜백에서 파일을 지우기 어려우므로, 다음 비교 대상 갱신 등을 하지 않음으로서 논리적 제외 처리.
+                            // 하지만 파일이 남으면 안 되므로, 파일 삭제 로직 추가가 필요할 수 있음.
+                            // 일단 요청사항인 "수집이 이루어지지 않도록"을 위해 로직 흐름을 차단.
+                            if (!isSuitable) {
+                                // 생성된 파일 삭제
+                                val createdFile = File(dir, fileName)
+                                if (createdFile.exists()) {
+                                    createdFile.delete()
+                                }
+                                return@captureDatasetImage false
+                            }
+
+                            // [추가] 유사도 기반 저장 필터링
+                            if (lastSavedBitmapSmall == null) {
+                                // 첫 번째 데이터셋은 무조건 저장
+                                lastSavedBitmapSmall = android.graphics.Bitmap.createScaledBitmap(currentBitmap, 64, 64, true)
+                                true
+                            } else {
+                                // 현재 이미지와 직전 저장된 이미지 간의 구조적 유사도 비교
+                                val similarity = calculateImageSimilarity(lastSavedBitmapSmall!!, currentBitmap)
+                                
+                                // 유사도가 70% ~ 90% 사이일 경우에만 저장
+                                if (similarity >= 0.7f && similarity <= 0.9f) {
+                                    // 조건 만족: 저장하고 비교 기준 갱신
+                                    lastSavedBitmapSmall = android.graphics.Bitmap.createScaledBitmap(currentBitmap, 64, 64, true)
+                                    true
+                                } else {
+                                    // 조건 불만족: 저장하지 않음 (너무 다르거나, 너무 비슷함) -> 파일 삭제
+                                    val createdFile = File(dir, fileName)
+                                    if (createdFile.exists()) {
+                                        createdFile.delete()
+                                    }
+                                    false
+                                }
+                            }
+                        }
+                        delay(1000) // 1초 간격
+                    }
+                }
+            }
+            return@LaunchedEffect
+        }
+
         if (captureMode == CaptureMode.VIDEO && isRecording && isDatasetCollectionEnabled) {
             // 사물/공간 촬영: 피치 각도 체크 (90도 등)
             if (currentPitchIndex < pitchTargets.size) {
@@ -707,34 +1058,8 @@ fun CameraScreen(
                         val sectorIndex =
                             ((displayAzimuthDegrees / sectorSize).toInt()).coerceIn(0, sectorCount - 1)
                         if (!capturedSectors.contains(sectorIndex)) {
-                            // [수정] 촬영 전 초점 재조정 (선명한 화질 확보)
-                            val cam = camera
-                            val preview = previewView
-                            val focusPt = lockedFocusPoint
-                            
-                            if (cam != null && preview != null && focusPt != null) {
-                                try {
-                                    withContext(Dispatchers.Main) {
-                                        val factory = preview.meteringPointFactory
-                                        val point = factory.createPoint(focusPt.x, focusPt.y)
-                                        val action = FocusMeteringAction.Builder(point)
-                                            .disableAutoCancel()
-                                            .build()
-                                        
-                                        val future = cam.cameraControl.startFocusAndMetering(action)
-                                        // 초점 완료 대기 (최대 1초)
-                                        withContext(Dispatchers.IO) {
-                                            try {
-                                                future.get(1000, TimeUnit.MILLISECONDS)
-                                            } catch (e: Exception) {
-                                                // 타임아웃 등 무시하고 진행
-                                            }
-                                        }
-                                    }
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
-                            }
+                            // [수정] 선명도 보정(초점 재조정) 로직 제거됨 - 사용자 요청
+                            // Joint Reflection Removal and Depth Estimation 준비 단계
                             
                             capturedSectors = capturedSectors + sectorIndex
                             val dir = datasetDir
@@ -754,6 +1079,11 @@ fun CameraScreen(
 
     // 한 각도에서 360도 촬영 완료 시 다음 각도로 전환
     LaunchedEffect(capturedSectors, isRecording, cameraEntryMode, captureMode, currentPitchIndex) {
+        // [추가] 이동식 공간 촬영인 경우 섹터 로직 생략
+        if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
+            return@LaunchedEffect
+        }
+
         if (captureMode == CaptureMode.VIDEO &&
             isRecording &&
             currentPitchIndex < pitchTargets.size &&
@@ -761,16 +1091,6 @@ fun CameraScreen(
         ) {
             currentPitchIndex += 1
             capturedSectors = emptySet()
-        }
-    }
-
-    // 초점 UI 자동 숨김 (3초 후, 잠금 상태는 유지)
-    LaunchedEffect(focusPointInRoot) {
-        if (focusPointInRoot != null) {
-            delay(3000)
-            focusPointInPreview = null
-            focusPointInRoot = null
-            // 초점 고정 상태는 유지 (isFocusLocked는 변경하지 않음)
         }
     }
 
@@ -783,14 +1103,52 @@ fun CameraScreen(
             try {
                 val cameraProvider = cameraProviderFuture.get()
 
-                val cameraSelector = CameraSelector.Builder()
-                    .requireLensFacing(lensFacing)
-                    .build()
+                // 선택된 카메라가 물리 카메라인지 논리 카메라인지 판단
+                val selectedCamInfo = availableCameras.find { it.cameraId == selectedCameraId }
+                // 물리 카메라: setPhysicalCameraId로 유즈케이스 빌더에 직접 지정
+                // 논리 카메라: Camera2CameraInfo 필터로 CameraSelector 지정
+                val physicalIdToApply: String? = if (selectedCamInfo?.isPhysical == true) selectedCameraId else null
+
+                val cameraSelector = when {
+                    selectedCameraId == null -> {
+                        CameraSelector.Builder().requireLensFacing(lensFacing).build()
+                    }
+                    selectedCamInfo?.isPhysical == true -> {
+                        // 물리 카메라: 부모 논리 카메라로 바인딩 (렌즈 선택은 빌더에서 setPhysicalCameraId로)
+                        val parentId = selectedCamInfo.parentLogicalCameraId
+                        if (parentId != null) {
+                            CameraSelector.Builder()
+                                .addCameraFilter { cameraInfoList ->
+                                    @Suppress("UnsafeOptInUsageError")
+                                    val matched = cameraInfoList.filter { info ->
+                                        try { Camera2CameraInfo.from(info).cameraId == parentId }
+                                        catch (_: Exception) { false }
+                                    }
+                                    matched.ifEmpty { cameraInfoList.filter { it.lensFacing == lensFacing } }
+                                }
+                                .build()
+                        } else {
+                            CameraSelector.Builder().requireLensFacing(lensFacing).build()
+                        }
+                    }
+                    else -> {
+                        // 논리 카메라: ID로 직접 필터링
+                        CameraSelector.Builder()
+                            .addCameraFilter { cameraInfoList ->
+                                @Suppress("UnsafeOptInUsageError")
+                                val matched = cameraInfoList.filter { info ->
+                                    try { Camera2CameraInfo.from(info).cameraId == selectedCameraId }
+                                    catch (_: Exception) { false }
+                                }
+                                matched.ifEmpty { cameraInfoList.filter { it.lensFacing == lensFacing } }
+                            }
+                            .build()
+                    }
+                }
 
                 cameraProvider.unbindAll()
 
                 // 선택된 해상도
-                val isVggtModeInBind = selectedResolution == ResolutionPreset.RESOLUTION_518x518
                 val targetSize = Size(selectedResolution.width, selectedResolution.height)
                 
                 // ViewPort 설정으로 명시적 비율 지정
@@ -811,18 +1169,26 @@ fun CameraScreen(
                     )
                     .build()
 
-                // Preview에도 해상도 설정 적용
-                val preview = Preview.Builder()
+                // Preview 빌더: 물리 카메라 선택 시 setPhysicalCameraId 적용
+                val previewBuilder = Preview.Builder()
                     .setResolutionSelector(resolutionSelector)
-                    .build()
-                    .also {
-                        it.setSurfaceProvider(view.surfaceProvider)
-                    }
+                if (physicalIdToApply != null) {
+                    @Suppress("UnsafeOptInUsageError")
+                    Camera2Interop.Extender(previewBuilder).setPhysicalCameraId(physicalIdToApply)
+                }
+                val preview = previewBuilder.build().also {
+                    it.setSurfaceProvider(view.surfaceProvider)
+                }
 
-                val newImageCapture = ImageCapture.Builder()
+                // ImageCapture 빌더: 물리 카메라 선택 시 setPhysicalCameraId 적용
+                val imageCaptureBuilder = ImageCapture.Builder()
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                     .setResolutionSelector(resolutionSelector)
-                    .build()
+                if (physicalIdToApply != null) {
+                    @Suppress("UnsafeOptInUsageError")
+                    Camera2Interop.Extender(imageCaptureBuilder).setPhysicalCameraId(physicalIdToApply)
+                }
+                val newImageCapture = imageCaptureBuilder.build()
 
                 if (captureMode == CaptureMode.PHOTO) {
                     imageCapture = newImageCapture
@@ -845,12 +1211,10 @@ fun CameraScreen(
                 // VideoCapture에도 해상도 설정 적용
                 // Recorder는 해상도보다는 Quality를 사용하지만,
                 // 선택된 해상도에 따라 최대한 근접한 품질을 선택합니다.
-                val isVggt = selectedResolution == ResolutionPreset.RESOLUTION_518x518
                 val recorder = androidx.camera.video.Recorder.Builder()
                     .setQualitySelector(
                         androidx.camera.video.QualitySelector.from(
-                            if (isVggt) androidx.camera.video.Quality.SD 
-                            else androidx.camera.video.Quality.HIGHEST
+                            androidx.camera.video.Quality.HIGHEST
                         )
                     )
                     .build()
@@ -879,43 +1243,13 @@ fun CameraScreen(
         }, executor)
     }
 
-    // 초점 설정 함수
-    fun setFocus(x: Float, y: Float) {
-        val cameraInstance = camera
-        val previewViewInstance = previewView
-        if (cameraInstance != null && previewViewInstance != null) {
-            try {
-                // PreviewView의 스케일/크롭을 반영한 메터링 포인트 팩토리 사용
-                val point = previewViewInstance.meteringPointFactory.createPoint(x, y)
-                val action = FocusMeteringAction.Builder(point)
-                    .setAutoCancelDuration(3, TimeUnit.SECONDS)
-                    .build()
-                
-                val future = cameraInstance.cameraControl.startFocusAndMetering(action)
-                future.addListener({
-                    try {
-                        val result = future.get()
-                        if (result.isFocusSuccessful) {
-                            // 초점 성공
-                        }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-                }, ContextCompat.getMainExecutor(context))
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
-    // lensFacing, captureMode, selectedResolution 변경 시 카메라 재바인딩
-    LaunchedEffect(lensFacing, captureMode, selectedResolution, previewView) {
+    // lensFacing, captureMode, selectedResolution, selectedCameraId 변경 시 카메라 재바인딩
+    LaunchedEffect(lensFacing, captureMode, selectedResolution, previewView, selectedCameraId) {
         isCameraReady = false
         previewView?.let { bindCamera(it) }
     }
 
-    // 선택된 해상도의 비율 계산 (정사각형: 518/1024, FHD는 1920:1080)
-    val isSquareMode = selectedResolution.width == selectedResolution.height
+    // 선택된 해상도의 비율 계산 (정사각형: 1024/1024)
     val density = LocalDensity.current
 
     Box(
@@ -926,139 +1260,27 @@ fun CameraScreen(
     ) {
         // 해상도 변경 시 PreviewView를 완전히 재생성하기 위해 key 사용
         key(selectedResolution) {
-            if (isSquareMode) {
-                // 정사각형 해상도: 1:1 미리보기 강제 적용
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1f)
-                        .clip(RectangleShape)
-                        .onGloballyPositioned { coords ->
-                            previewOriginInRoot = coords.positionInRoot()
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    AndroidView(
-                        factory = { ctx ->
-                            PreviewView(ctx).apply {
-                                implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                                scaleType = PreviewView.ScaleType.FILL_CENTER
-                                previewView = this
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .pointerInput(isFocusLocked) {
-                                detectTapGestures { offset ->
-                                    val origin = previewOriginInRoot
-                                    if (!isFocusLocked) {
-                                        focusPointInPreview = offset
-                                        focusPointInRoot = if (origin != null) {
-                                            Offset(origin.x + offset.x, origin.y + offset.y)
-                                        } else {
-                                            offset
-                                        }
-                                        setFocus(offset.x, offset.y)
-                                    } else {
-                                        // 초점이 고정된 상태에서 터치하면 자물쇠 UI 다시 표시
-                                        focusPointInPreview = offset
-                                        focusPointInRoot = if (origin != null) {
-                                            Offset(origin.x + offset.x, origin.y + offset.y)
-                                        } else {
-                                            offset
-                                        }
-                                    }
-                                }
-                            }
-                    )
-                }
-            } else {
-                // FHD 모드: 9:16 세로 비율
+            // 정사각형 해상도: 1:1 미리보기 강제 적용
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f)
+                    .clip(RectangleShape)
+                    .onGloballyPositioned { coords ->
+                        previewOriginInRoot = coords.positionInRoot()
+                    },
+                contentAlignment = Alignment.Center
+            ) {
                 AndroidView(
                     factory = { ctx ->
                         PreviewView(ctx).apply {
                             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                            scaleType = PreviewView.ScaleType.FIT_CENTER
+                            scaleType = PreviewView.ScaleType.FILL_CENTER
                             previewView = this
                         }
                     },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1080f / 1920f)
-                        .onGloballyPositioned { coords ->
-                            previewOriginInRoot = coords.positionInRoot()
-                        }
-                        .pointerInput(isFocusLocked) {
-                            detectTapGestures { offset ->
-                                val origin = previewOriginInRoot
-                                if (!isFocusLocked) {
-                                    focusPointInPreview = offset
-                                    focusPointInRoot = if (origin != null) {
-                                        Offset(origin.x + offset.x, origin.y + offset.y)
-                                    } else {
-                                        offset
-                                    }
-                                    setFocus(offset.x, offset.y)
-                                } else {
-                                    // 초점이 고정된 상태에서 터치하면 자물쇠 UI 다시 표시
-                                    focusPointInPreview = offset
-                                    focusPointInRoot = if (origin != null) {
-                                        Offset(origin.x + offset.x, origin.y + offset.y)
-                                    } else {
-                                        offset
-                                    }
-                                }
-                            }
-                        }
+                    modifier = Modifier.fillMaxSize()
                 )
-            }
-        }
-
-        // 초점 표시 - 원형 테두리와 자물쇠 UI
-        focusPointInRoot?.let { point ->
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .offset {
-                        with(density) {
-                            IntOffset(
-                                (point.x - 40.dp.toPx()).toInt(),
-                                (point.y - 40.dp.toPx()).toInt()
-                            )
-                        }
-                    }
-                    .size(80.dp)
-            ) {
-                // 원형 테두리 (얇은 선)
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .border(1.5.dp, Color.White, CircleShape)
-                )
-                
-                // 자물쇠 아이콘 (오른쪽 위에 배치)
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .offset(x = 4.dp, y = (-4).dp)
-                        .size(20.dp)
-                        .clickable {
-                            isFocusLocked = !isFocusLocked
-                            if (isFocusLocked) {
-                                lockedFocusPoint = focusPointInPreview
-                            } else {
-                                lockedFocusPoint = null
-                            }
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = if (isFocusLocked) Icons.Filled.Lock else Icons.Filled.LockOpen,
-                        contentDescription = if (isFocusLocked) "초점 잠금" else "초점 해제",
-                        tint = if (isFocusLocked) Color(0xFFFFD700) else Color.White,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
             }
         }
 
@@ -1089,20 +1311,59 @@ fun CameraScreen(
             }
         }
 
-        if (captureMode == CaptureMode.VIDEO && isRecording && !isFocusLocked) {
-            Box(
+        // 통합 경고 메시지 영역 (기울기/모델링 적합성)
+        val shouldShowWarningColumn = captureMode == CaptureMode.VIDEO && isRecording
+        if (shouldShowWarningColumn) {
+            Column(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 110.dp)
-                    .background(Color.Red, RoundedCornerShape(8.dp))
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                    .padding(top = 110.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                Text(
-                    text = "초점을 고정하지 않았습니다.\n초점 설정 후 고정해주세요.",
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                if (captureMode == CaptureMode.VIDEO && isRecording) {
+                    // 기울기 경고 (이동식 공간 촬영 제외)
+                    if (cameraEntryMode != CameraEntryMode.MOBILE_SPACE) {
+                        val isAllPitchCompleted = currentPitchIndex >= pitchTargets.size
+                        if (!isAllPitchCompleted && !isPitchAligned) {
+                            val targetPitch = currentTargetPitch
+                            val warningMsg = if (targetPitch != null) {
+                                val delta = effectivePitchDegrees - targetPitch
+                                when {
+                                    delta < -pitchTolerance -> "기기를 아래쪽으로 기울여주세요."
+                                    delta > pitchTolerance -> "기기를 위쪽으로 기울여주세요."
+                                    else -> null
+                                }
+                            } else null
+
+                            if (warningMsg != null) {
+                                Text(
+                                    text = warningMsg,
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .background(Color.Red, RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // 모델링 적합성 경고 (깊이 데이터 부족)
+                    // 이동식 공간 촬영인 경우에만 표시 (showModelingWarning은 이동식 공간 촬영에서만 갱신됨)
+                    if (showModelingWarning) {
+                        Text(
+                            text = "공간에 대한 깊이 데이터가 부족합니다.",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .background(Color.Red, RoundedCornerShape(8.dp))
+                                .padding(horizontal = 12.dp, vertical = 4.dp)
+                        )
+                    }
+                }
             }
         }
 
@@ -1123,33 +1384,130 @@ fun CameraScreen(
                 onLeftClick = { captureMode = CaptureMode.PHOTO },
                 onRightClick = { captureMode = CaptureMode.VIDEO }
             )
-            if (cameraEntryMode.isObjectMode()) {
-                Box(
-                    modifier = Modifier
-                        .background(Color(0xFF1A1A1A), RoundedCornerShape(16.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = "1024x1024",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
+            
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { isFlashOn = !isFlashOn }) {
+                    Icon(
+                        imageVector = if (isFlashOn) Icons.Filled.FlashOn else Icons.Filled.FlashOff,
+                        contentDescription = "Flash",
+                        tint = Color.White
                     )
                 }
-            } else {
-                TopMenuSegmented(
-                    leftText = "FHD",
-                    rightText = "VGGT",
-                    isLeftSelected = selectedResolution == ResolutionPreset.RESOLUTION_1920x1080,
-                    onLeftClick = { selectedResolution = ResolutionPreset.RESOLUTION_1920x1080 },
-                    onRightClick = { selectedResolution = ResolutionPreset.RESOLUTION_518x518 }
-                )
+                
+                // 카메라 선택 버튼 (설정 아이콘 클릭 → 카메라 목록 팝업)
+                Box {
+                    IconButton(onClick = { showCameraSelector = !showCameraSelector }) {
+                        Icon(
+                            imageVector = Icons.Filled.Settings,
+                            contentDescription = "카메라 설정",
+                            tint = if (showCameraSelector) Color(0xFF9CD83B) else Color.White
+                        )
+                    }
+
+                    // 카메라 선택 드롭다운 패널
+                    if (showCameraSelector) {
+                        Box(
+                            modifier = Modifier
+                                .offset(x = (-160).dp, y = 48.dp)
+                                .zIndex(10f)
+                                .background(Color(0xEE1E1E1E), RoundedCornerShape(12.dp))
+                                .border(1.dp, Color(0xFF9CD83B), RoundedCornerShape(12.dp))
+                                .padding(vertical = 8.dp, horizontal = 4.dp)
+                                .width(180.dp)
+                        ) {
+                            Column {
+                                val currentFacingCameras = availableCameras.filter {
+                                    it.lensFacing == lensFacing
+                                }
+                                val facingLabel = if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT)
+                                    "전면" else "후면"
+                                Text(
+                                    text = "$facingLabel 카메라 선택 (${currentFacingCameras.size}개)",
+                                    color = Color(0xFF9CD83B),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                currentFacingCameras.forEach { camInfo ->
+                                    val isSelected = camInfo.cameraId == selectedCameraId
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(
+                                                if (isSelected) Color(0x339CD83B)
+                                                else Color.Transparent
+                                            )
+                                            .clickable {
+                                                selectedCameraId = camInfo.cameraId
+                                                lensFacing = camInfo.lensFacing
+                                                showCameraSelector = false
+                                            }
+                                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (camInfo.lensFacing == CameraCharacteristics.LENS_FACING_FRONT)
+                                                Icons.Filled.CameraFront
+                                            else
+                                                Icons.Filled.CameraRear,
+                                            contentDescription = null,
+                                            tint = if (isSelected) Color(0xFF9CD83B) else Color.White,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Column {
+                                            Text(
+                                                text = camInfo.label,
+                                                color = if (isSelected) Color(0xFF9CD83B) else Color.White,
+                                                fontSize = 13.sp,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                            )
+                                            val fMin = camInfo.focalLengths.minOrNull()
+                                            if (fMin != null) {
+                                                Text(
+                                                    text = "${"%.1f".format(fMin)}mm · ID ${camInfo.cameraId}",
+                                                    color = Color.Gray,
+                                                    fontSize = 10.sp
+                                                )
+                                            }
+                                        }
+                                        if (isSelected) {
+                                            Spacer(Modifier.weight(1f))
+                                            Icon(
+                                                imageVector = Icons.Filled.Check,
+                                                contentDescription = null,
+                                                tint = Color(0xFF9CD83B),
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // 동영상 촬영 중 구역 수집 정보 표시 (사물/공간 모두)
-        if (captureMode == CaptureMode.VIDEO && isRecording) {
+        // 카메라 선택 패널 외부 탭 시 닫기
+        if (showCameraSelector) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                        indication = null
+                    ) { showCameraSelector = false }
+            )
+        }
+
+        // 동영상 촬영 중 구역 수집 정보 표시 (사물/공간 모두) - 이동식 공간 촬영은 제외
+        if (captureMode == CaptureMode.VIDEO && isRecording && cameraEntryMode != CameraEntryMode.MOBILE_SPACE) {
             // 구역 수집 진행률 표시
             Text(
                 text = "${capturedSectors.size} / ${sectorCount}장",
@@ -1184,41 +1542,8 @@ fun CameraScreen(
                     )
                     .padding(horizontal = 10.dp, vertical = 4.dp)
             )
-            if (!isAllPitchCompleted && !isPitchAligned) {
-                val targetPitch = currentTargetPitch
-                val warningText = if (targetPitch == null) {
-                    null
-                } else {
-                    val delta = effectivePitchDegrees - targetPitch
-                    when {
-                        delta < -pitchTolerance -> "기기를 아래쪽으로 기울여주세요"
-                        delta > pitchTolerance -> "기기를 위쪽으로 기울여주세요"
-                        else -> null
-                    }
-                }
-                if (warningText != null) {
-                    Text(
-                        text = warningText,
-                        color = Color(0xFFFF5252),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .padding(
-                                top = when {
-                                    isRecording && selectedResolution == ResolutionPreset.RESOLUTION_518x518 -> 140.dp
-                                    isRecording -> 190.dp
-                                    selectedResolution == ResolutionPreset.RESOLUTION_518x518 -> 120.dp
-                                    else -> 160.dp
-                                }
-                            )
-                            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                    )
-                }
             }
-        }
-
+        
         // 하단 컨트롤 바
         Row(
             modifier = Modifier
@@ -1314,8 +1639,8 @@ fun CameraScreen(
                 }
             }
 
-            // 동영상 촬영 중 구역 링 표시 (사물/공간 모두)
-            val showRing = captureMode == CaptureMode.VIDEO && isRecording
+            // 동영상 촬영 중 구역 링 표시 (사물/공간 모두) - 이동식 공간 촬영은 제외
+            val showRing = captureMode == CaptureMode.VIDEO && isRecording && cameraEntryMode != CameraEntryMode.MOBILE_SPACE
             val captureButtonSize = if (isRecording) 64.dp else 72.dp
 
             // 촬영 버튼 + 링 (중심 일치)
@@ -1358,7 +1683,8 @@ fun CameraScreen(
                         .clickable(enabled = !isRecording || captureMode == CaptureMode.VIDEO) {
                             if (captureMode == CaptureMode.PHOTO) {
                                 imageCapture?.let { capture ->
-                                    mediaActionSound.play(MediaActionSound.SHUTTER_CLICK)
+                                    // 셔터 소리를 약 30% 수준으로 낮춤 (MediaActionSound는 볼륨 조절 불가)
+                                    SoftShutterSound.play(volume = 0.3f)
                                     takePhoto(context, capture) { uri ->
                                         onImageCaptured(uri)
                                     }
@@ -1406,6 +1732,17 @@ fun CameraScreen(
                                     recording = null
                                     isRecording = false
                                     recordingTime = 0L
+
+                                    // [추가] 빈 데이터셋 폴더 정리
+                                    // 데이터셋 폴더에 이미지가 하나도 없으면 폴더 자동 삭제
+                                    val targetDir = datasetDir
+                                    if (targetDir != null && targetDir.exists() && targetDir.isDirectory) {
+                                        val files = targetDir.listFiles()
+                                        if (files == null || files.isEmpty()) {
+                                            targetDir.delete()
+                                        }
+                                    }
+
                                     datasetDir = null
                                     // 동영상 촬영 종료 시 상태 초기화
                                     baseAzimuthDegrees = null
@@ -1444,7 +1781,7 @@ fun CameraScreen(
                 }
             }
 
-            // 전면/후면 카메라 전환 버튼
+            // 전면/후면 카메라 전환 버튼 (후면↔전면 첫 번째 카메라로 토글)
             Icon(
                 imageVector = Icons.Filled.Cameraswitch,
                 contentDescription = "카메라 전환",
@@ -1452,11 +1789,19 @@ fun CameraScreen(
                 modifier = Modifier
                     .size(48.dp)
                     .clickable {
-                        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
+                        val targetFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK)
                             CameraSelector.LENS_FACING_FRONT
-                        } else {
+                        else
                             CameraSelector.LENS_FACING_BACK
-                        }
+                        lensFacing = targetFacing
+                        // 전환된 방향의 대표 카메라 선택
+                        // 논리 카메라(isPhysical=false) 중 초점거리 3.5mm 근접 광각 주 카메라를 우선
+                        val facingCameras = availableCameras.filter { it.lensFacing == targetFacing }
+                        selectedCameraId = facingCameras
+                            .filter { !it.isPhysical }
+                            .minByOrNull { Math.abs((it.focalLengths.minOrNull() ?: 3f) - 3.5f) }
+                            ?.cameraId
+                            ?: facingCameras.firstOrNull()?.cameraId
                     }
             )
         }
@@ -1499,6 +1844,12 @@ fun CameraEntryScreen(
             text = "3차원 공간 스캔",
             isSelected = selectedMode == CameraEntryMode.SPACE_3D,
             onClick = { onModeSelected(CameraEntryMode.SPACE_3D) }
+        )
+        Spacer(modifier = Modifier.height(20.dp))
+        CameraModeButton(
+            text = "이동식 공간 촬영",
+            isSelected = selectedMode == CameraEntryMode.MOBILE_SPACE,
+            onClick = { onModeSelected(CameraEntryMode.MOBILE_SPACE) }
         )
     }
 }
@@ -1646,6 +1997,456 @@ fun LibraryTabButton(
 }
 
 @Composable
+fun ClaudeChatScreen(
+    galleryImages: List<Uri>,
+    onGalleryUpdated: () -> Unit = {}
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var messageText by remember { mutableStateOf("") }
+    var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
+    var isWaiting by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var showImageSelectDialog by remember { mutableStateOf(false) }
+    var datasetFolders by remember { mutableStateOf<List<DatasetFolder>>(emptyList()) }
+    var attachedImages by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    val listState = rememberLazyListState()
+
+    // 갤러리: 이미지만 (동영상 제외)
+    val galleryImageUris = remember(galleryImages) {
+        galleryImages.filter { uri ->
+            val path = uri.path ?: ""
+            path.endsWith(".jpg", true) || path.endsWith(".jpeg", true) ||
+                path.endsWith(".png", true) || path.endsWith(".webp", true) ||
+                path.endsWith(".heic", true) || path.endsWith(".heif", true)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        loadDatasetFolders(context) { datasetFolders = it }
+    }
+
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(AppBackgroundColor)
+    ) {
+        Text(
+            text = "Claude",
+            color = Color.White,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(16.dp)
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(Color.White.copy(alpha = 0.3f))
+        )
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            state = listState,
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(messages) { msg ->
+                ChatBubble(
+                    message = msg,
+                    isUser = msg.isUser
+                )
+            }
+            if (isWaiting) {
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.Start
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .background(Color(0xFF2A2A2A), RoundedCornerShape(16.dp))
+                                .padding(16.dp)
+                        ) {
+                            Text(
+                                text = "답변 생성 중...",
+                                color = Color.White.copy(alpha = 0.8f),
+                                fontSize = 14.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        errorMessage?.let { err ->
+            Text(
+                text = err,
+                color = Color(0xFFFF6B6B),
+                fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1A1A1A))
+                .padding(12.dp),
+            verticalAlignment = Alignment.Bottom
+        ) {
+            IconButton(
+                onClick = { showImageSelectDialog = true }
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.AddPhotoAlternate,
+                    contentDescription = "이미지 첨부",
+                    tint = if (attachedImages.isNotEmpty()) Color(0xFF9CD83B) else Color.White.copy(alpha = 0.8f)
+                )
+            }
+            OutlinedTextField(
+                value = messageText,
+                onValueChange = { messageText = it },
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 4.dp),
+                placeholder = { Text("메시지 입력...", color = Color.Gray) },
+                maxLines = 4,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    focusedBorderColor = Color.White.copy(alpha = 0.5f),
+                    unfocusedBorderColor = Color.White.copy(alpha = 0.3f),
+                    cursorColor = Color.White
+                )
+            )
+            IconButton(
+                onClick = {
+                    if (isWaiting) return@IconButton
+                    val text = messageText.trim()
+                    val images = attachedImages
+                    if (text.isEmpty() && images.isEmpty()) return@IconButton
+
+                    val displayText = when {
+                        images.size > 1 -> "[${images.size}장의 이미지]"
+                        images.size == 1 -> "[이미지 1장]"
+                        else -> ""
+                    }
+                    messages = messages + ChatMessage(
+                        text = if (text.isNotEmpty()) text else displayText,
+                        isUser = true,
+                        imageUris = images
+                    )
+                    messageText = ""
+                    attachedImages = emptyList()
+                    isWaiting = true
+                    errorMessage = null
+
+                    scope.launch {
+                        val imageBase64List = images.mapNotNull { uri ->
+                            try {
+                                context.contentResolver.openInputStream(uri)?.use { stream ->
+                                    val bitmap = BitmapFactory.decodeStream(stream)
+                                    bitmap?.let { ClaudeChatClient.bitmapToBase64(it) }
+                                }
+                            } catch (e: Exception) { null }
+                        }
+                        val result = ClaudeChatClient.sendMessage(
+                            text = text.ifBlank { if (imageBase64List.size > 1) "이 이미지들에 대해 설명해 주세요." else "이 이미지에 대해 설명해 주세요." },
+                            imageBase64List = imageBase64List
+                        )
+                        isWaiting = false
+                        when (result) {
+                            is ClaudeChatClient.ChatResult.Success ->
+                                messages = messages + ChatMessage(text = result.text, isUser = false, imageUris = emptyList())
+                            is ClaudeChatClient.ChatResult.Error ->
+                                errorMessage = result.message
+                        }
+                    }
+                }
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Send,
+                    contentDescription = "전송",
+                    tint = Color(0xFF9CD83B)
+                )
+            }
+        }
+
+        // 이미지 선택 다이얼로그 (갤러리·데이터셋 폴더)
+        if (showImageSelectDialog) {
+            ClaudeImageSelectDialog(
+                galleryImages = galleryImageUris,
+                datasetFolders = datasetFolders,
+                onGalleryImageSelected = { uri ->
+                    attachedImages = listOf(uri)
+                    showImageSelectDialog = false
+                },
+                onDatasetFolderSelected = { folder ->
+                    val imageExts = setOf("jpg", "jpeg", "png", "webp")
+                    val uris = folder.dir.listFiles { f ->
+                        f.isFile && imageExts.contains(f.extension.lowercase())
+                    }?.sortedBy { it.nameWithoutExtension.toIntOrNull() ?: Int.MAX_VALUE }
+                        ?.map { Uri.fromFile(it) } ?: emptyList()
+                    attachedImages = uris
+                    showImageSelectDialog = false
+                },
+                onDismiss = { showImageSelectDialog = false }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ClaudeImageSelectDialog(
+    galleryImages: List<Uri>,
+    datasetFolders: List<DatasetFolder>,
+    onGalleryImageSelected: (Uri) -> Unit,
+    onDatasetFolderSelected: (DatasetFolder) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedTab by remember { mutableStateOf(0) } // 0: 갤러리, 1: 데이터셋(폴더)
+
+    Dialog(onDismissRequest = onDismiss) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.7f)
+                .background(Color(0xFF1E1E1E), RoundedCornerShape(16.dp))
+                .padding(16.dp)
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "이미지 선택 (갤러리·데이터셋 폴더)",
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "닫기",
+                        tint = Color.White,
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clickable { onDismiss() }
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf("갤러리 (${galleryImages.size})" to 0, "데이터셋 폴더 (${datasetFolders.size})" to 1).forEach { (label, index) ->
+                        val isSelected = selectedTab == index
+                        Text(
+                            text = label,
+                            color = if (isSelected) Color.Black else Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(
+                                    if (isSelected) Color(0xFF9CD83B) else Color.White.copy(alpha = 0.2f)
+                                )
+                                .clickable { selectedTab = index }
+                                .padding(horizontal = 14.dp, vertical = 8.dp)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                when (selectedTab) {
+                    0 -> {
+                        if (galleryImages.isEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "갤러리에 이미지가 없습니다.",
+                                    color = Color.White.copy(alpha = 0.7f),
+                                    fontSize = 14.sp
+                                )
+                            }
+                        } else {
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(3),
+                                modifier = Modifier.weight(1f),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                items(galleryImages) { uri ->
+                                    Image(
+                                        painter = rememberAsyncImagePainter(uri),
+                                        contentDescription = null,
+                                        modifier = Modifier
+                                            .aspectRatio(1f)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .clickable { onGalleryImageSelected(uri) }
+                                            .border(1.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(8.dp)),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    1 -> {
+                        if (datasetFolders.isEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "데이터셋 폴더가 없습니다.",
+                                    color = Color.White.copy(alpha = 0.7f),
+                                    fontSize = 14.sp
+                                )
+                            }
+                        } else {
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(2),
+                                modifier = Modifier.weight(1f),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                items(datasetFolders) { folder ->
+                                    Column(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .border(1.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                                            .clickable { onDatasetFolderSelected(folder) }
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .aspectRatio(1f)
+                                        ) {
+                                            folder.coverUri?.let { uri ->
+                                                Image(
+                                                    painter = rememberAsyncImagePainter(uri),
+                                                    contentDescription = null,
+                                                    modifier = Modifier.fillMaxSize(),
+                                                    contentScale = ContentScale.Crop
+                                                )
+                                            }
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.BottomCenter)
+                                                    .fillMaxWidth()
+                                                    .background(Color.Black.copy(alpha = 0.6f))
+                                                    .padding(4.dp)
+                                            ) {
+                                                Text(
+                                                    text = "${folder.name} (${folder.count}장)",
+                                                    color = Color.White,
+                                                    fontSize = 12.sp,
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    textAlign = TextAlign.Center
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private data class ChatMessage(
+    val text: String,
+    val isUser: Boolean,
+    val imageUris: List<Uri> = emptyList()
+)
+
+@Composable
+private fun ChatBubble(
+    message: ChatMessage,
+    isUser: Boolean
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+    ) {
+        Box(
+            modifier = Modifier
+                .widthIn(max = 280.dp)
+                .background(
+                    if (isUser) Color(0xFF9CD83B) else Color(0xFF2A2A2A),
+                    RoundedCornerShape(
+                        topStart = 16.dp,
+                        topEnd = 16.dp,
+                        bottomStart = if (isUser) 16.dp else 4.dp,
+                        bottomEnd = if (isUser) 4.dp else 16.dp
+                    )
+                )
+                .padding(14.dp)
+        ) {
+            Column {
+                if (message.imageUris.isNotEmpty()) {
+                    val showUris = message.imageUris.take(6)
+                    Column {
+                        showUris.chunked(3).forEach { rowUris ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                rowUris.forEach { uri ->
+                                    Image(
+                                        painter = rememberAsyncImagePainter(uri),
+                                        contentDescription = null,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .aspectRatio(1f)
+                                            .clip(RoundedCornerShape(4.dp)),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
+                            }
+                        }
+                        if (message.imageUris.size > 6) {
+                            Text(
+                                text = "외 ${message.imageUris.size - 6}장",
+                                color = if (isUser) Color.Black.copy(alpha = 0.7f) else Color.White.copy(alpha = 0.7f),
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                    if (message.text.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                }
+                if (message.text.isNotEmpty()) {
+                    Text(
+                        text = message.text,
+                        color = if (isUser) Color.Black else Color.White,
+                        fontSize = 14.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun CreatePlaceholderScreen() {
     Box(
         modifier = Modifier
@@ -1751,7 +2552,8 @@ fun SensorCheckScreen(onBack: () -> Unit) {
     // 어플 구동(공간 촬영 및 기울기 측정)에 필수적인 센서만 구성
     val sensorItems = remember {
         listOf(
-            SensorInfo("회전 벡터", Sensor.TYPE_ROTATION_VECTOR, Icons.Default.Explore),
+            // 앱에서는 GAME_ROTATION_VECTOR를 우선 사용하고, 없으면 ROTATION_VECTOR로 대체함
+            SensorInfo("회전 벡터(게임/일반)", Sensor.TYPE_ROTATION_VECTOR, Icons.Default.Explore),
             SensorInfo("자이로스코프", Sensor.TYPE_GYROSCOPE, Icons.Default.Public),
             SensorInfo("가속도계", Sensor.TYPE_ACCELEROMETER, Icons.Default.Speed),
             SensorInfo("자기장 센서", Sensor.TYPE_MAGNETIC_FIELD, Icons.Default.Public)
@@ -1796,7 +2598,12 @@ fun SensorCheckScreen(onBack: () -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             items(sensorItems) { item ->
-                val isPresent = sensorManager.getDefaultSensor(item.type) != null
+                val isPresent = if (item.type == Sensor.TYPE_ROTATION_VECTOR) {
+                    sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR) != null ||
+                        sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR) != null
+                } else {
+                    sensorManager.getDefaultSensor(item.type) != null
+                }
                 SensorGridItem(item.name, item.icon, isPresent)
             }
         }
@@ -1890,6 +2697,12 @@ fun BottomNavigationBar(
             onClick = { onTabSelected(MainTab.LIBRARY) }
         )
         BottomNavItem(
+            label = "클로드",
+            icon = Icons.Filled.AutoAwesome,
+            isSelected = selectedTab == MainTab.CLAUDE,
+            onClick = { onTabSelected(MainTab.CLAUDE) }
+        )
+        BottomNavItem(
             label = "카메라",
             icon = Icons.Filled.Camera,
             isSelected = selectedTab == MainTab.CAMERA,
@@ -1957,13 +2770,7 @@ fun GalleryScreen(
     var uploadSourceTab by remember { mutableStateOf<LibraryTab?>(null) }
     var showUploadResultPopup by remember { mutableStateOf(false) }
     var uploadResultPopupMessage by remember { mutableStateOf<String?>(null) }
-    var isEnhancing by remember { mutableStateOf(false) }
-    var enhanceProgress by remember { mutableStateOf(0 to 100) } // (current, total)
-    var enhanceMessage by remember { mutableStateOf<String?>(null) }
-    var enhanceEtaMs by remember { mutableStateOf<Long?>(null) }
-    var enhanceSourceTab by remember { mutableStateOf<LibraryTab?>(null) }
-    var showEnhanceResultPopup by remember { mutableStateOf(false) }
-    var enhanceResultPopupMessage by remember { mutableStateOf<String?>(null) }
+    
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showDeleteAllConfirm by remember { mutableStateOf(false) }
     var isDatasetEditMode by remember { mutableStateOf(false) }
@@ -1975,6 +2782,48 @@ fun GalleryScreen(
     var libraryDetailScreen by remember { mutableStateOf(LibraryDetailScreen.NONE) }
     var plyModels by remember { mutableStateOf<List<PlyModel>>(emptyList()) }
     var currentPlyModel by remember { mutableStateOf<PlyModel?>(null) }
+
+    // [추가] 내보내기/가져오기 작업 상태
+    var isTransferring by remember { mutableStateOf(false) }
+    val transferScope = rememberCoroutineScope()
+
+    // [추가] 1차 배경제거 작업 상태
+    var isBgRemoving by remember { mutableStateOf(false) }
+    var showBgRemoveDialog by remember { mutableStateOf(false) }
+    var bgRemovePrompt by remember { mutableStateOf("") }
+    var bgRemovePromptError by remember { mutableStateOf(false) }
+    var sam3ProgressPercent by remember { mutableStateOf(0) }
+    var sam3ProgressMessage by remember { mutableStateOf("") }
+    var sam3ResultMessage by remember { mutableStateOf<String?>(null) }
+
+    // [추가] 가져오기 런처 (시스템 갤러리/파일 선택)
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
+        if (uris.isNullOrEmpty()) {
+            uploadSourceTab = LibraryTab.GALLERY
+            uploadMessage = "가져오기가 취소되었습니다."
+            return@rememberLauncherForActivityResult
+        }
+        if (isUploading || isTransferring) {
+            uploadSourceTab = LibraryTab.GALLERY
+            uploadMessage = "다른 작업이 진행 중입니다."
+            return@rememberLauncherForActivityResult
+        }
+        isTransferring = true
+        uploadSourceTab = LibraryTab.GALLERY
+        uploadMessage = "가져오는 중..."
+        transferScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                importImagesToAppLibrary(context, uris)
+            }
+            uploadMessage = result.message
+            isTransferring = false
+            if (result.successCount > 0) {
+                onImageDeleted() // 목록 갱신
+            }
+        }
+    }
 
     // 뒤로가기 버튼 처리 (편집 모드에서만)
     BackHandler(enabled = isEditMode || isDatasetEditMode) {
@@ -2005,6 +2854,19 @@ fun GalleryScreen(
             loadPlyModels(context) { models ->
                 plyModels = models
             }
+        }
+    }
+
+    // [추가] 데이터셋 탭에서 0장(빈) 폴더 주기적 자동 삭제/갱신
+    // - 폴더 상세 화면에서는 폴더가 사라지면 UX가 깨질 수 있어 제외
+    LaunchedEffect(libraryTab, libraryDetailScreen) {
+        if (libraryTab != LibraryTab.DATASET) return@LaunchedEffect
+        if (libraryDetailScreen == LibraryDetailScreen.DATASET_FOLDER) return@LaunchedEffect
+
+        while (true) {
+            val folders = withContext(Dispatchers.IO) { loadDatasetFoldersSync(context) }
+            datasetFolders = folders
+            delay(10_000) // 10초마다 정리/갱신
         }
     }
 
@@ -2072,20 +2934,68 @@ fun GalleryScreen(
         }
 
         if (libraryTab == LibraryTab.MODEL_3D) {
-            if (libraryDetailScreen == LibraryDetailScreen.MODEL_VIEWER && currentPlyModel != null) {
+            if (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER && currentPlyModel != null) {
                 BackHandler {
                     libraryDetailScreen = LibraryDetailScreen.NONE
                     currentPlyModel = null
                 }
+                val plyFile = currentPlyModel!!.file
+                var isConverting by remember(plyFile) { mutableStateOf(true) }
+                var objFile by remember(plyFile) { mutableStateOf<File?>(null) }
+                var convertError by remember(plyFile) { mutableStateOf<String?>(null) }
+
+                LaunchedEffect(plyFile) {
+                    isConverting = true
+                    convertError = null
+                    objFile = null
+                    val result = withContext(Dispatchers.IO) {
+                        convertPlyToObjCached(context, plyFile)
+                    }
+                    val out = result.file
+                    if (out == null || !out.exists()) {
+                        convertError = result.error ?: "OBJ 변환에 실패했습니다."
+                        isConverting = false
+                    } else {
+                        objFile = out
+                        isConverting = false
+                    }
+                }
+
                 Box(modifier = Modifier.fillMaxSize()) {
-                    AndroidView(
-                        factory = { ctx ->
-                            PlySurfaceView(ctx).apply {
-                                loadModel(currentPlyModel!!.file)
+                    when {
+                        isConverting -> {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = "OBJ 변환 중...",
+                                    color = Color.White,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
+                        }
+                        convertError != null -> {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = convertError ?: "오류",
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                        objFile != null -> {
+                            AndroidView(
+                                factory = { ctx ->
+                                    ObjSurfaceView(ctx).apply {
+                                        loadModel(objFile!!)
+                                    }
+                                },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
+
                     Icon(
                         imageVector = Icons.Filled.Close,
                         contentDescription = "닫기",
@@ -2127,7 +3037,7 @@ fun GalleryScreen(
                                 modifier = Modifier
                                     .clickable {
                                         currentPlyModel = model
-                                        libraryDetailScreen = LibraryDetailScreen.MODEL_VIEWER
+                                        libraryDetailScreen = LibraryDetailScreen.OBJ_VIEWER
                                     }
                             ) {
                                 Box(
@@ -2237,9 +3147,6 @@ fun GalleryScreen(
                                             isUploading -> {
                                                 uploadMessage = "이미 업로드 중입니다"
                                             }
-                                            isEnhancing -> {
-                                                uploadMessage = "선명도 보정 중에는 업로드할 수 없습니다"
-                                            }
                                             selectedDatasetFolders.isEmpty() -> {
                                                 uploadMessage = "선택된 폴더가 없습니다"
                                             }
@@ -2296,77 +3203,6 @@ fun GalleryScreen(
                                             }
                                         }
                                     }
-                            )
-                            Text(
-                                text = "선명도 보정",
-                                color = if (selectedDatasetFolders.isNotEmpty()) Color.White else Color.White.copy(alpha = 0.6f),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(
-                                        if (selectedDatasetFolders.isNotEmpty()) Color(0xFF7ED321)
-                                        else Color(0xFF7ED321).copy(alpha = 0.4f)
-                                    )
-                                    .clickable {
-                                        enhanceSourceTab = LibraryTab.DATASET
-                                        when {
-                                            isUploading || isEnhancing -> {
-                                                enhanceMessage = "다른 작업이 진행 중입니다"
-                                            }
-                                            selectedDatasetFolders.isEmpty() -> {
-                                                enhanceMessage = "선택된 폴더가 없습니다"
-                                            }
-                                            else -> {
-                                                isEnhancing = true
-                                                enhanceProgress = 0 to 100
-                                                enhanceMessage = "선명도 보정 준비 중..."
-                                                enhanceEtaMs = null
-
-                                                CoroutineScope(Dispatchers.IO).launch {
-                                                    try {
-                                                        val folders = selectedDatasetFolders
-                                                            .map { File(it) }
-                                                            .filter { it.exists() && it.isDirectory }
-                                                        val ok = enhanceDatasetFolders(
-                                                            context = context,
-                                                            folders = folders,
-                                                            onProgress = { processed, total, msg, eta ->
-                                                                CoroutineScope(Dispatchers.Main).launch {
-                                                                    enhanceProgress = processed to total
-                                                                    enhanceMessage = msg
-                                                                    enhanceEtaMs = eta
-                                                                }
-                                                            }
-                                                        )
-                                                        withContext(Dispatchers.Main) {
-                                                            isEnhancing = false
-                                                            if (ok) {
-                                                                enhanceResultPopupMessage = "선명도 보정이 완료되었습니다."
-                                                                showEnhanceResultPopup = true
-                                                                selectedDatasetFolders = emptySet()
-                                                                isDatasetEditMode = false
-                                                                loadDatasetFolders(context) { folders2 ->
-                                                                    datasetFolders = folders2
-                                                                }
-                                                            } else {
-                                                                enhanceResultPopupMessage = "선명도 보정 실패"
-                                                                showEnhanceResultPopup = true
-                                                            }
-                                                        }
-                                                    } catch (e: Exception) {
-                                                        e.printStackTrace()
-                                                        withContext(Dispatchers.Main) {
-                                                            isEnhancing = false
-                                                            enhanceResultPopupMessage = "선명도 보정 실패"
-                                                            showEnhanceResultPopup = true
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    .padding(horizontal = 12.dp, vertical = 6.dp)
                             )
                             Text(
                                 text = "삭제",
@@ -2477,21 +3313,21 @@ fun GalleryScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // 업로드 버튼
                     Icon(
                         imageVector = Icons.Filled.CloudUpload,
                         contentDescription = "업로드",
-                        tint = if (selectedItems.isNotEmpty()) Color.Green else Color.Green.copy(alpha = 0.4f),
+                        tint = if (selectedItems.isNotEmpty()) Color(0xFF9CD83B) else Color(0xFF9CD83B).copy(alpha = 0.4f),
                         modifier = Modifier
-                            .size(32.dp)
+                            .size(20.dp)
                             .clickable {
                                 uploadSourceTab = LibraryTab.GALLERY
                                 when {
-                                    isUploading -> {
+                                    isUploading || isTransferring -> {
                                         uploadMessage = "이미 업로드 중입니다"
                                     }
                                     selectedItems.isEmpty() -> {
@@ -2551,33 +3387,115 @@ fun GalleryScreen(
                                 }
                             }
                     )
+
+                    // [추가] 1차 배경제거 버튼
+                    Text(
+                        text = "1차 배경제거",
+                        color = if (selectedItems.isNotEmpty() && !isUploading && !isTransferring && !isBgRemoving) Color.White else Color.White.copy(alpha = 0.4f),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(
+                                if (selectedItems.isNotEmpty() && !isUploading && !isTransferring && !isBgRemoving) Color(0xFF1A6B2F)
+                                else Color(0xFF1A6B2F).copy(alpha = 0.4f)
+                            )
+                            .clickable(enabled = selectedItems.isNotEmpty() && !isUploading && !isTransferring && !isBgRemoving) {
+                                bgRemovePrompt = ""
+                                bgRemovePromptError = false
+                                showBgRemoveDialog = true
+                            }
+                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                    )
+
+                    // [추가] 내보내기 버튼 (선택된 사진을 휴대폰 갤러리로)
+                    Text(
+                        text = "내보내기",
+                        color = if (selectedItems.isNotEmpty() && !isUploading && !isTransferring) Color.White else Color.White.copy(alpha = 0.4f),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(
+                                if (selectedItems.isNotEmpty() && !isUploading && !isTransferring) Color(0xFF2F2F2F)
+                                else Color(0xFF2F2F2F).copy(alpha = 0.4f)
+                            )
+                            .clickable(enabled = selectedItems.isNotEmpty() && !isUploading && !isTransferring) {
+                                isTransferring = true
+                                uploadSourceTab = LibraryTab.GALLERY
+                                uploadMessage = "내보내는 중..."
+                                val items = selectedItems.toList()
+                                transferScope.launch {
+                                    val result = withContext(Dispatchers.IO) {
+                                        exportImagesToSystemGallery(context, items)
+                                    }
+                                    uploadMessage = result.message
+                                    isTransferring = false
+                                }
+                            }
+                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                    )
+
+                    // [추가] 가져오기 버튼 (휴대폰 갤러리에서 앱으로)
+                    Text(
+                        text = "가져오기",
+                        color = if (!isUploading && !isTransferring) Color.White else Color.White.copy(alpha = 0.4f),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(
+                                if (!isUploading && !isTransferring) Color(0xFF2F2F2F)
+                                else Color(0xFF2F2F2F).copy(alpha = 0.4f)
+                            )
+                            .clickable(enabled = !isUploading && !isTransferring) {
+                                importLauncher.launch("image/*")
+                            }
+                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                    )
+
                     // 선택 삭제 버튼
                     Text(
                         text = "삭제",
                         color = if (selectedItems.isNotEmpty()) Color.White else Color.White.copy(alpha = 0.4f),
-                        fontSize = 12.sp,
+                        fontSize = 9.sp,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
+                            .clip(RoundedCornerShape(8.dp))
                             .background(if (selectedItems.isNotEmpty()) Color.Red else Color.Red.copy(alpha = 0.4f))
-                            .clickable(enabled = !isUploading && selectedItems.isNotEmpty()) {
+                            .clickable(enabled = !isUploading && !isTransferring && selectedItems.isNotEmpty()) {
                                 showDeleteConfirm = true
                             }
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .padding(horizontal = 6.dp, vertical = 4.dp)
                     )
                     // 전체 삭제 버튼 (빨간색 채움)
                     Text(
                         text = "전체 삭제",
                         color = Color.White,
-                        fontSize = 12.sp,
+                        fontSize = 9.sp,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
+                            .clip(RoundedCornerShape(8.dp))
                             .background(Color.Red)
-                            .clickable(enabled = !isUploading) {
+                            .clickable(enabled = !isUploading && !isTransferring) {
                                 showDeleteAllConfirm = true
                             }
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .padding(horizontal = 6.dp, vertical = 4.dp)
                     )
                 }
             }
@@ -2871,140 +3789,59 @@ fun GalleryScreen(
             }
         }
 
-        // 선명도 보정 진행/결과 팝업(UI) - 데이터셋 탭에서만 표시
-        if (enhanceSourceTab == libraryTab) {
-            if (isEnhancing) {
-                val total = enhanceProgress.second.takeIf { it > 0 } ?: 100
-                val current = enhanceProgress.first.coerceIn(0, total)
-                val percent = ((current.toFloat() / total.toFloat()) * 100f).toInt().coerceIn(0, 100)
-                val progressFraction = current.toFloat() / total.toFloat()
+        // --- 다이얼로그 구역 (어떤 탭에서도 보일 수 있도록 탭 분기 바깥에 배치) ---
 
-                fun formatEta(ms: Long): String {
-                    val sec = (ms / 1000L).coerceAtLeast(0L)
-                    val m = sec / 60L
-                    val s = sec % 60L
-                    return String.format("%02d:%02d", m, s)
-                }
-
-                Dialog(onDismissRequest = { /* 처리 중에는 닫지 않음 */ }) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                            .padding(20.dp)
-                    ) {
-                        Column {
-                            Text(
-                                text = "선명도 보정 중",
-                                color = Color.White,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Text(
-                                text = "${percent}%",
-                                color = Color.White,
-                                fontSize = 28.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(10.dp)
-                                    .background(Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxHeight()
-                                        .fillMaxWidth(progressFraction.coerceIn(0f, 1f))
-                                        .background(Color(0xFF4FC3F7), RoundedCornerShape(6.dp))
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(10.dp))
-                            enhanceEtaMs?.let { eta ->
-                                Text(
-                                    text = "예상 남은 시간: ${formatEta(eta)}",
-                                    color = Color.White.copy(alpha = 0.85f),
-                                    fontSize = 13.sp
-                                )
-                                Spacer(modifier = Modifier.height(6.dp))
-                            }
-                            Text(
-                                text = enhanceMessage ?: "처리 중...",
-                                color = Color.White.copy(alpha = 0.85f),
-                                fontSize = 13.sp
-                            )
-                        }
-                    }
-                }
-            } else {
-                if (showEnhanceResultPopup && enhanceResultPopupMessage != null) {
-                    Dialog(
-                        onDismissRequest = {
-                            showEnhanceResultPopup = false
-                            enhanceResultPopupMessage = null
-                        }
-                    ) {
+        // [추가] 1차 배경제거 진행률 팝업 (온디바이스)
+        if (isBgRemoving) {
+            val fraction = (sam3ProgressPercent.coerceIn(0, 100) / 100f)
+            Dialog(onDismissRequest = { /* 처리 중 닫기 불가 */ }) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
+                        .padding(24.dp)
+                ) {
+                    Column {
+                        Text(
+                            text = "1차 배경 제거 중",
+                            color = Color.White,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "MediaPipe Image Segmentation",
+                            color = Color(0xFF9CD83B),
+                            fontSize = 11.sp
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        // 퍼센트 숫자
+                        Text(
+                            text = "${sam3ProgressPercent.coerceIn(0, 100)}%",
+                            color = Color(0xFF9CD83B),
+                            fontSize = 32.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        // 진행 바
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                                .padding(20.dp)
+                                .height(10.dp)
+                                .background(Color.White.copy(alpha = 0.15f), RoundedCornerShape(6.dp))
                         ) {
-                            Column {
-                                Text(
-                                    text = "알림",
-                                    color = Color.White,
-                                    fontSize = 18.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = enhanceResultPopupMessage!!,
-                                    color = Color.White.copy(alpha = 0.9f),
-                                    fontSize = 14.sp
-                                )
-                                Spacer(modifier = Modifier.height(16.dp))
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.End
-                                ) {
-                                    Text(
-                                        text = "확인",
-                                        color = Color.White,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(12.dp))
-                                            .background(Color(0xFF7ED321))
-                                            .clickable {
-                                                showEnhanceResultPopup = false
-                                                enhanceResultPopupMessage = null
-                                            }
-                                            .padding(horizontal = 16.dp, vertical = 8.dp)
-                                    )
-                                }
-                            }
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .fillMaxWidth(fraction)
+                                    .background(Color(0xFF9CD83B), RoundedCornerShape(6.dp))
+                            )
                         }
-                    }
-                }
-
-                // 간단 메시지 배너(선택 없음 등)
-                enhanceMessage?.let { message ->
-                    LaunchedEffect(message) {
-                        delay(3000)
-                        enhanceMessage = null
-                    }
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 10.dp)
-                            .background(Color(0xFF2F2F2F), RoundedCornerShape(12.dp))
-                            .padding(12.dp)
-                    ) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        // 단계 메시지
                         Text(
-                            text = message,
-                            color = Color.White.copy(alpha = 0.9f),
+                            text = sam3ProgressMessage,
+                            color = Color.White.copy(alpha = 0.8f),
                             fontSize = 13.sp
                         )
                     }
@@ -3012,7 +3849,239 @@ fun GalleryScreen(
             }
         }
 
-        // --- 다이얼로그 구역 (어떤 탭에서도 보일 수 있도록 탭 분기 바깥에 배치) ---
+        // [추가] SAM3 완료 결과 팝업
+        sam3ResultMessage?.let { resultMsg ->
+            Dialog(onDismissRequest = { sam3ResultMessage = null }) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
+                        .padding(24.dp)
+                ) {
+                    Column {
+                        Text(
+                            text = if (resultMsg.contains("실패")) "처리 결과" else "완료",
+                            color = Color.White,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = resultMsg,
+                            color = Color.White.copy(alpha = 0.9f),
+                            fontSize = 14.sp,
+                            lineHeight = 20.sp
+                        )
+                        Spacer(modifier = Modifier.height(20.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            Text(
+                                text = "확인",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        if (resultMsg.contains("실패")) Color.Red
+                                        else Color(0xFF1A6B2F)
+                                    )
+                                    .clickable { sam3ResultMessage = null }
+                                    .padding(horizontal = 20.dp, vertical = 10.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // [추가] 1차 배경제거 프롬프트 입력 다이얼로그
+        if (showBgRemoveDialog) {
+            val isPromptValid = !bgRemovePromptError
+            val canApply = isPromptValid
+
+            Dialog(onDismissRequest = { showBgRemoveDialog = false }) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
+                        .padding(20.dp)
+                ) {
+                    Column {
+                        Text(
+                            text = "어떤 사물을 추출하시겠습니까?",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        androidx.compose.material3.OutlinedTextField(
+                            value = bgRemovePrompt,
+                            onValueChange = { input ->
+                                bgRemovePrompt = input
+                                bgRemovePromptError = input.isNotEmpty() && !input.all { it.isLetter() && it.code < 128 || it == ' ' }
+                            },
+                            placeholder = {
+                                Text(
+                                    text = "예: cup, mouse, bottle",
+                                    color = Color.White.copy(alpha = 0.35f),
+                                    fontSize = 13.sp
+                                )
+                            },
+                            singleLine = true,
+                            isError = bgRemovePromptError,
+                            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedBorderColor = if (bgRemovePromptError) Color(0xFFFF5252) else Color(0xFF9CD83B),
+                                unfocusedBorderColor = if (bgRemovePromptError) Color(0xFFFF5252) else Color.White.copy(alpha = 0.4f),
+                                cursorColor = Color(0xFF9CD83B),
+                                focusedContainerColor = Color(0xFF1E1E1E),
+                                unfocusedContainerColor = Color(0xFF1E1E1E),
+                                errorBorderColor = Color(0xFFFF5252),
+                                errorContainerColor = Color(0xFF1E1E1E),
+                                errorTextColor = Color.White,
+                                errorCursorColor = Color(0xFFFF5252)
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        if (bgRemovePromptError) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "영어로 입력해 주세요",
+                                color = Color(0xFFFF5252),
+                                fontSize = 12.sp
+                            )
+                        } else {
+                            Spacer(modifier = Modifier.height(6.dp + 18.sp.value.dp))
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            Text(
+                                text = "취소",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                                    .clickable { showBgRemoveDialog = false }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "적용",
+                                color = if (canApply) Color.White else Color.White.copy(alpha = 0.35f),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        if (canApply) Color(0xFF1A6B2F)
+                                        else Color(0xFF1A6B2F).copy(alpha = 0.3f)
+                                    )
+                                    .clickable(enabled = canApply) {
+                                        showBgRemoveDialog = false
+                                        isBgRemoving = true
+                                        sam3ProgressPercent = 0
+                                        sam3ProgressMessage = "준비 중..."
+                                        val prompt = bgRemovePrompt.trim()
+                                        val items = selectedItems.toList()
+                                        val total = items.size
+                                        val outputDir = context.getExternalFilesDir(null)
+                                        transferScope.launch {
+                                            var successCount = 0
+                                            var failCount = 0
+                                            val savedUris = mutableListOf<Uri>()
+                                            items.forEachIndexed { index, uri ->
+                                                val itemLabel = if (total > 1) " (${index + 1}/$total)" else ""
+                                                val basePercent = index * 95 / total
+                                                val nextPercent  = (index + 1) * 95 / total
+                                                val itemRange = (nextPercent - basePercent).coerceAtLeast(1)
+
+                                                sam3ProgressPercent = basePercent
+                                                sam3ProgressMessage = "이미지 로드 중...$itemLabel"
+
+                                                // 비트맵 디코딩
+                                                val bitmap = withContext(Dispatchers.IO) {
+                                                    decodeBitmapWithMaxDimension(context, uri, 1024)
+                                                }
+                                                if (bitmap == null) {
+                                                    failCount++
+                                                    return@forEachIndexed
+                                                }
+
+                                                sam3ProgressPercent = basePercent + itemRange / 8
+                                                sam3ProgressMessage = "MediaPipe 세그멘테이션 준비 중...$itemLabel"
+
+                                                // MediaPipe Image Segmentation 기반 온디바이스 배경 제거
+                                                val result = withContext(Dispatchers.IO) {
+                                                    BackgroundRemovalProcessor.removeBackground(
+                                                        context    = context,
+                                                        sourceBitmap = bitmap,
+                                                        userPrompt = prompt,
+                                                        outputDir  = outputDir,
+                                                        onProgress = { iter, totalIter ->
+                                                            if (totalIter > 0) {
+                                                                val frac = iter.toFloat() / totalIter
+                                                                val mapped = basePercent +
+                                                                    (itemRange * 0.15f + frac * itemRange * 0.75f).toInt()
+                                                                sam3ProgressPercent = mapped.coerceIn(basePercent, nextPercent - 1)
+                                                                sam3ProgressMessage =
+                                                                    "MediaPipe 처리 중 ${"%.0f".format(frac * 100)}%$itemLabel"
+                                                            }
+                                                        }
+                                                    )
+                                                }
+                                                bitmap.recycle()
+
+                                                when (result) {
+                                                    is BackgroundRemovalProcessor.Result.Success -> {
+                                                        result.savedUri?.let { savedUris.add(it) }
+                                                        successCount++
+                                                        sam3ProgressPercent = nextPercent
+                                                        sam3ProgressMessage = "완료$itemLabel"
+                                                    }
+                                                    is BackgroundRemovalProcessor.Result.Error -> {
+                                                        failCount++
+                                                        sam3ProgressMessage = "오류: ${result.message}"
+                                                    }
+                                                }
+                                            }
+                                            // 결과를 시스템 갤러리(사진 앱)에도 저장
+                                            if (savedUris.isNotEmpty()) {
+                                                sam3ProgressPercent = 97
+                                                sam3ProgressMessage = "갤러리에 저장 중..."
+                                                exportImagesToSystemGallery(context, savedUris)
+                                            }
+                                            sam3ProgressPercent = 100
+                                            isBgRemoving = false
+                                            sam3ResultMessage = when {
+                                                successCount > 0 && failCount == 0 ->
+                                                    "배경 제거 완료\n${successCount}장이 갤러리에 저장되었습니다."
+                                                successCount > 0 ->
+                                                    "배경 제거 완료\n${successCount}장 성공, ${failCount}장 실패"
+                                                else ->
+                                                    "배경 제거 실패\n객체를 찾지 못했거나 모델이 없습니다.\n(assets/models/ 폴더를 확인하세요)"
+                                            }
+                                            if (successCount > 0) {
+                                                selectedItems = emptySet()
+                                                isEditMode = false
+                                                onImageDeleted()
+                                            }
+                                        }
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         if (showDeleteConfirm) {
             Dialog(onDismissRequest = { showDeleteConfirm = false }) {
                 Box(
@@ -3212,22 +4281,41 @@ fun MediaDetailScreen(
     mediaList: List<Uri>,
     initialIndex: Int,
     onBack: () -> Unit,
-    onMediaChanged: (Int) -> Unit
+    onMediaChanged: (Int) -> Unit,
+    onGalleryUpdated: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var currentIndex by remember { mutableStateOf(initialIndex.coerceIn(0, mediaList.size - 1)) }
+
+    // 삼성 갤러리 방식: 길게 누르면 객체 분리
+    var objectExtractionLoading by remember { mutableStateOf(false) }
+    var objectExtractionResult by remember { mutableStateOf<Bitmap?>(null) }
+    var objectExtractionError by remember { mutableStateOf<String?>(null) }
+    var imageSize by remember { mutableStateOf<Pair<Int, Int>?>(null) }
 
     // 인덱스 변경 시 콜백 호출
     LaunchedEffect(currentIndex) {
         onMediaChanged(currentIndex)
     }
 
+    val currentMediaUri = if (currentIndex in mediaList.indices) mediaList[currentIndex] else null
+    val isVideo = currentMediaUri?.let { isVideoUri(context, it) } ?: false
+
+    // 이미지 크기 로드 + ML Kit 모델 사전 준비 (좌표 변환 및 첫 사용 지연 방지)
+    LaunchedEffect(currentMediaUri) {
+        if (currentMediaUri != null && !isVideoUri(context, currentMediaUri!!)) {
+            imageSize = withContext(Dispatchers.IO) { getImageDimensions(context, currentMediaUri!!) }
+            // InteractiveSegmenter 모델 사전 로드 (첫 사용 지연 방지)
+            withContext(Dispatchers.IO) { BackgroundRemovalProcessor.warmUpSubjectSegmentation(context) }
+        } else {
+            imageSize = null
+        }
+    }
+
     BackHandler {
         onBack()
     }
-
-    val currentMediaUri = if (currentIndex in mediaList.indices) mediaList[currentIndex] else null
-    val isVideo = currentMediaUri?.let { isVideoUri(context, it) } ?: false
 
     Box(modifier = Modifier.fillMaxSize()) {
         // 현재 미디어 표시
@@ -3235,23 +4323,85 @@ fun MediaDetailScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
+                    // imageSize를 키에 포함: 이미지 크기 로드 완료 후 제스처 핸들러 재등록
+                    .pointerInput(currentMediaUri, isVideo, imageSize) {
+                        if (!isVideo && imageSize != null) {
+                            detectTapGestures(
+                                onLongPress = { offset ->
+                                    // 처리 중이거나 결과 다이얼로그가 표시 중이면 무시
+                                    // (표시 중인 비트맵을 recycle하면 렌더링 크래시 발생)
+                                    if (objectExtractionLoading || objectExtractionResult != null) return@detectTapGestures
+                                    val (boxW, boxH) = size.width to size.height
+                                    val (imgW, imgH) = imageSize!!
+                                    val scale = minOf(boxW / imgW, boxH / imgH)
+                                    val displayW = imgW * scale
+                                    val displayH = imgH * scale
+                                    val offsetX = (boxW - displayW) / 2
+                                    val offsetY = (boxH - displayH) / 2
+                                    val tx = offset.x
+                                    val ty = offset.y
+                                    if (tx >= offsetX && tx < offsetX + displayW && ty >= offsetY && ty < offsetY + displayH) {
+                                        val imgX = (tx - offsetX) / scale
+                                        val imgY = (ty - offsetY) / scale
+                                        val normX = (imgX / imgW).coerceIn(0f, 1f)
+                                        val normY = (imgY / imgH).coerceIn(0f, 1f)
+                                        val capturedUri = currentMediaUri
+                                        // 로딩 플래그를 scope.launch 전에 동기 설정 (레이스 컨디션 방지)
+                                        objectExtractionLoading = true
+                                        objectExtractionError = null
+                                        scope.launch {
+                                            try {
+                                                // 512px로 로드 (ML Kit 네이티브 메모리 절약)
+                                                val bitmap = withContext(Dispatchers.IO) {
+                                                    decodeBitmapWithMaxDimension(context, capturedUri!!, 512)
+                                                }
+                                                if (bitmap != null) {
+                                                    val result = withContext(Dispatchers.IO) {
+                                                        BackgroundRemovalProcessor.removeBackgroundWithPoint(
+                                                            context = context,
+                                                            sourceBitmap = bitmap,
+                                                            normX = normX,
+                                                            normY = normY
+                                                        )
+                                                    }
+                                                    bitmap.recycle()
+                                                    when (result) {
+                                                        is BackgroundRemovalProcessor.Result.Success -> {
+                                                            objectExtractionResult = result.bitmap
+                                                        }
+                                                        is BackgroundRemovalProcessor.Result.Error -> {
+                                                            objectExtractionError = result.message
+                                                        }
+                                                    }
+                                                } else {
+                                                    objectExtractionError = "이미지를 로드할 수 없습니다."
+                                                }
+                                            } catch (e: OutOfMemoryError) {
+                                                objectExtractionError = "메모리 부족입니다.\n잠시 후 다시 시도해 주세요."
+                                            } catch (e: Exception) {
+                                                objectExtractionError = "처리 중 오류가 발생했습니다.\n(${e.message ?: "알 수 없음"})"
+                                            } finally {
+                                                objectExtractionLoading = false
+                                            }
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                    }
                     .pointerInput(Unit) {
                         var totalDragX = 0f
                         detectDragGestures(
                             onDragEnd = {
-                                // 드래그 종료 시 인덱스 변경
                                 val threshold = size.width * 0.3f
                                 if (totalDragX > threshold && currentIndex > 0) {
-                                    // 오른쪽으로 스와이프 (이전 이미지)
                                     currentIndex--
                                 } else if (totalDragX < -threshold && currentIndex < mediaList.size - 1) {
-                                    // 왼쪽으로 스와이프 (다음 이미지)
                                     currentIndex++
                                 }
                                 totalDragX = 0f
                             },
                             onDrag = { _: PointerInputChange, dragAmount: Offset ->
-                                // 수평 드래그만 처리
                                 totalDragX += dragAmount.x
                             }
                         )
@@ -3289,13 +4439,23 @@ fun MediaDetailScreen(
                         }
                     )
                 } else {
-                    // 이미지 보기
+                    // 이미지 보기 (삼성 갤러리 방식: 사물을 길게 누르면 객체 분리)
                     Image(
                         painter = rememberAsyncImagePainter(currentMediaUri),
                         contentDescription = "미디어 상세",
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Fit
                     )
+                    if (!objectExtractionLoading) {
+                        Text(
+                            text = "사물을 길게 누르면 객체 분리",
+                            color = Color.White.copy(alpha = 0.7f),
+                            fontSize = 12.sp,
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 48.dp)
+                        )
+                    }
                 }
             }
         }
@@ -3313,6 +4473,107 @@ fun MediaDetailScreen(
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .padding(bottom = 16.dp)
             )
+        }
+
+        // 객체 분리 중 로딩
+        if (objectExtractionLoading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(32.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = Color(0xFF9CD83B))
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("객체 경계 추론 중...", color = Color.White, fontSize = 16.sp)
+                }
+            }
+        }
+
+        // 객체 분리 결과 다이얼로그
+        if (objectExtractionResult != null) {
+            Dialog(onDismissRequest = {
+                objectExtractionResult?.recycle()
+                objectExtractionResult = null
+            }) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
+                        .padding(20.dp)
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("객체 분리 완료", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(12.dp))
+                        objectExtractionResult?.let { bmp ->
+                            Image(
+                                bitmap = bmp.asImageBitmap(),
+                                contentDescription = "분리된 객체",
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 400.dp)
+                                    .clip(RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Fit
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Button(
+                                onClick = {
+                                    objectExtractionResult?.let { bmp ->
+                                        scope.launch(Dispatchers.IO) {
+                                            saveCutoutToAppGallery(context, bmp)
+                                            withContext(Dispatchers.Main) {
+                                                onGalleryUpdated()
+                                                objectExtractionResult?.recycle()
+                                                objectExtractionResult = null
+                                            }
+                                        }
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF9CD83B))
+                            ) {
+                                Text("갤러리에 저장")
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    objectExtractionResult?.recycle()
+                                    objectExtractionResult = null
+                                }
+                            ) {
+                                Text("닫기", color = Color.White)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 객체 분리 실패 메시지
+        if (objectExtractionError != null) {
+            Dialog(onDismissRequest = { objectExtractionError = null }) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
+                        .padding(20.dp)
+                ) {
+                    Column {
+                        Text("객체 분리 실패", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(objectExtractionError!!, color = Color.White.copy(alpha = 0.9f), fontSize = 14.sp)
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(
+                            onClick = { objectExtractionError = null },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF9CD83B))
+                        ) {
+                            Text("확인")
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -3398,29 +4659,266 @@ private fun startVideoRecording(
     }
 }
 
+// (삭제) TFLite 기반 광택/반사 제거 기능: 요청에 따라 Inpainting 기반으로 전면 교체됨
+
+// [추가] 이미지 유사도 계산 (픽셀 기반 구조 비교, 0.0 ~ 1.0)
+private fun calculateImageSimilarity(bitmap1: android.graphics.Bitmap, bitmap2: android.graphics.Bitmap): Float {
+    val width = 64
+    val height = 64
+    // 성능을 위해 리사이징하여 비교
+    val s1 = android.graphics.Bitmap.createScaledBitmap(bitmap1, width, height, true)
+    val s2 = android.graphics.Bitmap.createScaledBitmap(bitmap2, width, height, true)
+    
+    val pixels1 = IntArray(width * height)
+    val pixels2 = IntArray(width * height)
+    
+    s1.getPixels(pixels1, 0, width, 0, 0, width, height)
+    s2.getPixels(pixels2, 0, width, 0, 0, width, height)
+    
+    var similaritySum = 0.0
+    val maxDist = Math.sqrt(255.0 * 255.0 * 3.0) // 가능한 최대 색상 거리
+    
+    for (i in pixels1.indices) {
+        val c1 = pixels1[i]
+        val c2 = pixels2[i]
+        
+        val r1 = (c1 shr 16) and 0xFF
+        val g1 = (c1 shr 8) and 0xFF
+        val b1 = c1 and 0xFF
+        
+        val r2 = (c2 shr 16) and 0xFF
+        val g2 = (c2 shr 8) and 0xFF
+        val b2 = c2 and 0xFF
+        
+        // 유클리드 거리 기반 색상 차이
+        val dist = Math.sqrt(
+            ((r1 - r2) * (r1 - r2) + (g1 - g2) * (g1 - g2) + (b1 - b2) * (b1 - b2)).toDouble()
+        )
+        // 유사도 누적 (1.0 = 일치, 0.0 = 불일치)
+        similaritySum += (1.0 - (dist / maxDist))
+    }
+    
+    if (s1 != bitmap1) s1.recycle()
+    if (s2 != bitmap2) s2.recycle()
+    
+    return (similaritySum / (width * height)).toFloat()
+}
+
+// [수정] 모델링 적합성 판단 (이동식 공간 촬영용)
+// - 기존: "가상 점 5개가 모두 같은 공간"과 유사한 개념을 십자선 전체 표준편차로 간접 판단
+// - 변경: 3x3 배열(9개)의 "가상 점(샘플 포인트)"을 중앙 주변에 배치하고,
+//        9개 중 7개 이상이 동일한 공간(=주변 RGB/밝기 특성이 동일한 영역)으로 판정되면 경고(false)
+// true: 적합, false: 부적합(경고 필요)
+private fun checkModelingSuitability(bitmap: android.graphics.Bitmap): Boolean {
+    val width = bitmap.width
+    val height = bitmap.height
+    if (width <= 2 || height <= 2) return true
+
+    val cx = width / 2
+    val cy = height / 2
+
+    // 3x3 샘플 포인트 배치 (중앙 기준)
+    // - 화면 해상도에 따라 자동 스케일
+    val spacing = (minOf(width, height) * 0.18f).toInt().coerceIn(80, 260)
+    val offsets = intArrayOf(-spacing, 0, spacing)
+
+    // 각 포인트에서 작은 패치(주변 픽셀) 평균 밝기를 구해 "공간 ID"로 사용
+    // - quantStep이 작을수록 민감 (동일 판정이 어려움), 클수록 둔감
+    val patchRadius = 10 // 21x21
+    val quantStep = 16   // 0~255 -> 16단계(0~15)
+
+    val spaceIdCounts = HashMap<Int, Int>(16)
+    var totalPoints = 0
+
+    fun lumaOf(pixel: Int): Int {
+        val r = (pixel shr 16) and 0xFF
+        val g = (pixel shr 8) and 0xFF
+        val b = pixel and 0xFF
+        return (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+    }
+
+    for (dy in offsets) {
+        for (dx in offsets) {
+            val px = (cx + dx).coerceIn(0, width - 1)
+            val py = (cy + dy).coerceIn(0, height - 1)
+
+            var sum = 0L
+            var count = 0
+            val y0 = (py - patchRadius).coerceIn(0, height - 1)
+            val y1 = (py + patchRadius).coerceIn(0, height - 1)
+            val x0 = (px - patchRadius).coerceIn(0, width - 1)
+            val x1 = (px + patchRadius).coerceIn(0, width - 1)
+
+            for (y in y0..y1) {
+                for (x in x0..x1) {
+                    sum += lumaOf(bitmap.getPixel(x, y)).toLong()
+                    count++
+                }
+            }
+
+            if (count <= 0) continue
+            val meanLuma = (sum / count).toInt().coerceIn(0, 255)
+            val spaceId = (meanLuma / quantStep).coerceIn(0, 255 / quantStep)
+
+            spaceIdCounts[spaceId] = (spaceIdCounts[spaceId] ?: 0) + 1
+            totalPoints++
+        }
+    }
+
+    if (totalPoints <= 0) return true
+
+    // 9개 중 7개 이상이 동일 공간이면 "깊이/텍스처 정보 부족"으로 간주
+    val maxSame = spaceIdCounts.values.maxOrNull() ?: 0
+    if (maxSame >= 7) return false
+
+    // 보조 안전장치: 중앙 십자선 영역의 텍스처(표준편차)도 너무 낮으면 부적합 처리
+    // (샘플링만으로 놓치는 케이스 방지)
+    val halfLen = 350
+    val halfThick = 10
+    val lumValues = ArrayList<Int>(4000)
+    for (x in (cx - halfLen) until (cx + halfLen)) {
+        for (y in (cy - halfThick) until (cy + halfThick)) {
+            if (x in 0 until width && y in 0 until height) lumValues.add(lumaOf(bitmap.getPixel(x, y)))
+        }
+    }
+    for (y in (cy - halfLen) until (cy + halfLen)) {
+        for (x in (cx - halfThick) until (cx + halfThick)) {
+            if (x in 0 until width && y in 0 until height) lumValues.add(lumaOf(bitmap.getPixel(x, y)))
+        }
+    }
+    if (lumValues.isEmpty()) return true
+    val mean = lumValues.sum().toDouble() / lumValues.size
+    var varianceSum = 0.0
+    for (lum in lumValues) varianceSum += (lum - mean) * (lum - mean)
+    val stdDev = Math.sqrt(varianceSum / lumValues.size)
+
+    return stdDev > 30.0
+}
+
+// (삭제) IID/MSA 기반 광택 제거 기능: 요청에 따라 Inpainting 기반으로 전면 교체됨
+
+// [추가] 이미지 파일 로드 시 EXIF 회전 정보 반영
+private fun loadBitmapWithRotation(path: String): android.graphics.Bitmap? {
+    return try {
+        val bitmap = BitmapFactory.decodeFile(path) ?: return null
+        val exif = ExifInterface(path)
+        val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        
+        val rotation = when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+            else -> 0f
+        }
+        
+        if (rotation != 0f) {
+            val matrix = Matrix()
+            matrix.postRotate(rotation)
+            android.graphics.Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        } else {
+            bitmap
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    }
+}
+
+// (삭제) 픽셀 억제/금속/반광/통합 파이프라인: 요청에 따라 Inpainting 기반으로 전면 교체됨
+
+
+private fun saveBitmapToFile(bitmap: android.graphics.Bitmap, file: File) {
+    try {
+        java.io.FileOutputStream(file).use { out ->
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 100, out)
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+}
+
 private fun captureDatasetImage(
     context: Context,
     sectorIndex: Int,
     pitchAngle: Int,
     dir: File,
-    capture: ImageCapture
+    capture: ImageCapture,
+    customFileName: String? = null,
+    validationCallback: ((android.graphics.Bitmap) -> Boolean)? = null
 ) {
     try {
         if (!dir.exists()) {
             dir.mkdirs()
         }
-        val file = File(dir, "${pitchAngle}_${sectorIndex + 1}.jpg")
-        val outputOptions = ImageCapture.OutputFileOptions.Builder(file).build()
+        val file = if (customFileName != null) {
+            File(dir, customFileName)
+        } else {
+            File(dir, "${pitchAngle}_${sectorIndex + 1}.jpg")
+        }
+        
+        // 메모리로 캡처 후 후처리 적용
         capture.takePicture(
-            outputOptions,
             ContextCompat.getMainExecutor(context),
-            object : ImageCapture.OnImageSavedCallback {
-                override fun onError(exception: ImageCaptureException) {
-                    exception.printStackTrace()
+            object : ImageCapture.OnImageCapturedCallback() {
+                override fun onCaptureSuccess(image: ImageProxy) {
+                    var bitmap: android.graphics.Bitmap? = null
+                    try {
+                        val buffer = image.planes[0].buffer
+                        val bytes = ByteArray(buffer.remaining())
+                        buffer.get(bytes)
+                        bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        
+                        // 회전 보정
+                        val rotation = image.imageInfo.rotationDegrees
+                        if (rotation != 0 && bitmap != null) {
+                            val matrix = Matrix()
+                            matrix.postRotate(rotation.toFloat())
+                            bitmap = android.graphics.Bitmap.createBitmap(
+                                bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
+                            )
+                        }
+
+                        if (bitmap != null) {
+                            // [추가] 1:1 비율로 중앙 크롭 및 1024x1024 리사이징
+                            val originalWidth = bitmap.width
+                            val originalHeight = bitmap.height
+                            val size = if (originalWidth < originalHeight) originalWidth else originalHeight
+                            val xOffset = (originalWidth - size) / 2
+                            val yOffset = (originalHeight - size) / 2
+                            
+                            // 중앙 정사각형 크롭
+                            var croppedBitmap = android.graphics.Bitmap.createBitmap(
+                                bitmap, xOffset, yOffset, size, size
+                            )
+                            
+                            // 1024x1024로 리사이징
+                            if (size != 1024) {
+                                croppedBitmap = android.graphics.Bitmap.createScaledBitmap(
+                                    croppedBitmap, 1024, 1024, true
+                                )
+                            }
+                            bitmap = croppedBitmap
+
+                            // [추가] 저장 전 검증 (유사도 체크 등)
+                            if (validationCallback != null) {
+                                if (!validationCallback(bitmap)) {
+                                    // 검증 실패 시 저장하지 않음 (유사도 조건 불만족 등)
+                                    return
+                                }
+                            }
+
+                            // [변경] 촬영 시에는 원본을 그대로 저장 (광택/반사 보정은 폴더 선택 후 옵션에서 수행)
+                            saveBitmapToFile(bitmap, file)
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    } finally {
+                        image.close()
+                    }
                 }
 
-                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                    // 저장 완료
+                override fun onError(exception: ImageCaptureException) {
+                    exception.printStackTrace()
                 }
             }
         )
@@ -3494,27 +4992,61 @@ private fun loadDatasetFolders(
     context: Context,
     onLoaded: (List<DatasetFolder>) -> Unit
 ) {
+    onLoaded(loadDatasetFoldersSync(context))
+}
+
+// [추가] 데이터셋 폴더 로드(동기) + 빈 폴더 자동 정리
+private fun loadDatasetFoldersSync(context: Context): List<DatasetFolder> {
     val root = File(context.getExternalFilesDir(null), "datasets")
     if (!root.exists()) {
-        onLoaded(emptyList())
-        return
+        return emptyList()
     }
 
-    val folders = root.listFiles { file -> file.isDirectory }?.map { dir ->
-        val images = dir.listFiles { f ->
-            f.isFile && f.name.endsWith(".jpg", ignoreCase = true)
-        }?.sortedBy { it.nameWithoutExtension.toIntOrNull() ?: Int.MAX_VALUE } ?: emptyList()
+    // [추가] 0장(빈) 데이터셋 폴더 자동 정리
+    // - 너무 최근에 생성된 폴더(촬영 직후 등)는 오탐 방지를 위해 잠시 유예
+    val now = System.currentTimeMillis()
+    val minAgeMs = 60_000L // 60초보다 오래된 "빈" 폴더만 삭제
 
-        val cover = images.firstOrNull()?.let { Uri.fromFile(it) }
-        DatasetFolder(
-            name = dir.name,
-            dir = dir,
-            coverUri = cover,
-            count = images.size
-        )
-    }?.sortedByDescending { it.name } ?: emptyList()
+    val imageExts = setOf("jpg", "jpeg", "png", "webp")
+    return root.listFiles { file -> file.isDirectory }
+        ?.mapNotNull { dir ->
+            val images = dir.listFiles { f ->
+                f.isFile && imageExts.contains(f.extension.lowercase())
+            }?.sortedBy { it.nameWithoutExtension.toIntOrNull() ?: Int.MAX_VALUE } ?: emptyList()
 
-    onLoaded(folders)
+            if (images.isEmpty()) {
+                // 이미지가 0개인 폴더는 주기적으로 자동 삭제
+                if (now - dir.lastModified() >= minAgeMs) {
+                    try {
+                        dir.deleteRecursively()
+                    } catch (_: Exception) {
+                    }
+                    return@mapNotNull null
+                }
+            }
+
+            val cover = images.firstOrNull()?.let { Uri.fromFile(it) }
+            DatasetFolder(
+                name = dir.name,
+                dir = dir,
+                coverUri = cover,
+                count = images.size
+            )
+        }
+        ?.sortedByDescending { it.name }
+        ?: emptyList()
+}
+
+/** Gemini 전송용: 모든 데이터셋 폴더의 이미지 URI 목록 로드 */
+private fun loadAllDatasetImages(context: Context, onLoaded: (List<Uri>) -> Unit) {
+    val folders = loadDatasetFoldersSync(context)
+    val imageExts = setOf("jpg", "jpeg", "png", "webp")
+    val uris = folders.flatMap { folder ->
+        folder.dir.listFiles { f ->
+            f.isFile && imageExts.contains(f.extension.lowercase())
+        }?.map { Uri.fromFile(it) } ?: emptyList()
+    }
+    onLoaded(uris)
 }
 
 private fun loadDatasetImages(
@@ -3569,6 +5101,11 @@ private fun loadCapturedMedia(
         .filter { file ->
             file.isFile &&
                 (file.name.endsWith(".jpg", ignoreCase = true) ||
+                    file.name.endsWith(".jpeg", ignoreCase = true) ||
+                    file.name.endsWith(".png", ignoreCase = true) ||
+                    file.name.endsWith(".webp", ignoreCase = true) ||
+                    file.name.endsWith(".heic", ignoreCase = true) ||
+                    file.name.endsWith(".heif", ignoreCase = true) ||
                     file.name.endsWith(".mp4", ignoreCase = true)) &&
                 !file.absolutePath.startsWith(datasetsRoot)
         }
@@ -3762,6 +5299,8 @@ private suspend fun startServerTaskWithZip(context: Context, zipFile: File): Str
     }
 }
 
+// (삭제) 서버 기반 광택/반사 제거 파이프라인: 요청에 따라 로컬 Inpainting 기반으로 교체됨
+
 private data class ServerTaskStatus(
     val status: String,
     val progressPercent: Int,
@@ -3804,6 +5343,106 @@ private suspend fun fetchServerTaskStatus(context: Context, taskId: String): Ser
     }
 }
 
+/**
+ * SAM2 서버(/bg-remove)에 이미지와 텍스트 프롬프트를 전송하여
+ * 배경이 제거된 투명 PNG를 받아 앱 라이브러리에 저장합니다.
+ *
+ * 서버: scripts/sam2_server.py (포트 8001)
+ *
+ * @param context   앱 컨텍스트
+ * @param imageUri  처리할 원본 이미지 URI
+ * @param prompt    남길 사물의 영문 텍스트 (예: "cup", "mouse")
+ * @param itemIndex 현재 처리 중인 이미지 순번 (0-based)
+ * @param itemTotal 처리할 이미지 총 수
+ * @param onProgress 진행률 콜백 (percent 0~100, message)
+ * @return 앱 라이브러리에 저장된 PNG Uri, 실패 시 null
+ */
+private suspend fun sam2RemoveBackground(
+    context: Context,
+    imageUri: Uri,
+    prompt: String,
+    itemIndex: Int = 0,
+    itemTotal: Int = 1,
+    onProgress: suspend (percent: Int, message: String) -> Unit = { _, _ -> },
+): Uri? = withContext(Dispatchers.IO) {
+    val itemLabel = if (itemTotal > 1) " (${itemIndex + 1}/$itemTotal)" else ""
+    try {
+        onProgress(5, "이미지 로드 중...$itemLabel")
+
+        val serverAddress = getServerAddress(context)
+        val useHttps = getUseHttps(context)
+        val protocol = if (useHttps) "https" else "http"
+        val url = "$protocol://$serverAddress:$SAM3_DEFAULT_PORT$SAM3_BG_REMOVE_ENDPOINT"
+
+        // URI → 바이트 배열 읽기
+        val imageBytes = context.contentResolver.openInputStream(imageUri)?.use { it.readBytes() }
+            ?: return@withContext null
+
+        // MIME 타입 판별
+        val mimeType = context.contentResolver.getType(imageUri) ?: "image/jpeg"
+        val extension = when {
+            mimeType.contains("png")  -> "png"
+            mimeType.contains("webp") -> "webp"
+            else                      -> "jpg"
+        }
+
+        onProgress(20, "SAM2 서버로 전송 중...$itemLabel")
+
+        val client = createOkHttpClient(useHttps).newBuilder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .readTimeout(180, TimeUnit.SECONDS) // SAM2 추론 대기
+            .callTimeout(240, TimeUnit.SECONDS)
+            .build()
+
+        val requestBody = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart(
+                "image",
+                "input.$extension",
+                imageBytes.toRequestBody(mimeType.toMediaType())
+            )
+            .addFormDataPart("prompt", prompt)
+            .build()
+
+        val httpRequest = Request.Builder()
+            .url(url)
+            .post(requestBody)
+            .build()
+
+        onProgress(35, "SAM2 객체 감지 및 세그멘테이션 중...$itemLabel")
+
+        val response = client.newCall(httpRequest).execute()
+
+        if (!response.isSuccessful) {
+            val errBody = response.body?.string() ?: ""
+            android.util.Log.e("SAM2", "서버 오류 ${response.code}: $errBody")
+            response.close()
+            return@withContext null
+        }
+
+        onProgress(85, "결과 수신 중...$itemLabel")
+
+        val pngBytes = response.body?.bytes()
+        response.close()
+        if (pngBytes == null || pngBytes.isEmpty()) return@withContext null
+
+        onProgress(93, "앱 라이브러리 저장 중...$itemLabel")
+
+        // 결과 PNG를 앱 라이브러리에 저장
+        val outputDir = context.getExternalFilesDir(null) ?: return@withContext null
+        outputDir.mkdirs()
+        val outFile = File(outputDir, "sam2_bg_removed_${System.currentTimeMillis()}.png")
+        FileOutputStream(outFile).use { it.write(pngBytes) }
+
+        onProgress(98, "완료$itemLabel")
+        Uri.fromFile(outFile)
+    } catch (e: Exception) {
+        android.util.Log.e("SAM2", "SAM2 서버 통신 실패", e)
+        null
+    }
+}
+
 private suspend fun downloadPlyResult(context: Context, taskId: String): File? {
     return withContext(Dispatchers.IO) {
         try {
@@ -3843,46 +5482,84 @@ private suspend fun uploadZipAndRunPipeline(
     zipFile: File,
     onProgress: (progress: Int, message: String) -> Unit
 ): Boolean {
-    // 1) 업로드 -> task_id 확보
-    onProgress(5, "파일 업로드 중...")
-    val noResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
-    val taskId = startServerTaskWithZip(context, zipFile)
-    if (taskId.isNullOrBlank()) {
-        onProgress(0, noResponseMsg)
+    // [추가] 서비스 알림 업데이트를 위한 헬퍼 함수
+    val updateNotification = { p: Int, msg: String ->
+        onProgress(p, msg)
+        val intent = Intent(context, AppForegroundService::class.java).apply {
+            putExtra(AppForegroundService.EXTRA_PROGRESS, p)
+            putExtra(AppForegroundService.EXTRA_MESSAGE, msg)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(intent)
+        } else {
+            context.startService(intent)
+        }
+    }
+
+    // [추가] 업로드 및 서버 작업 중 백그라운드 유지를 위한 서비스 시작
+    val serviceIntent = Intent(context, AppForegroundService::class.java)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        context.startForegroundService(serviceIntent)
+    } else {
+        context.startService(serviceIntent)
+    }
+
+    try {
+        // 1) 업로드 -> task_id 확보
+        updateNotification(5, "파일 업로드 중...")
+        val noResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
+        val taskId = startServerTaskWithZip(context, zipFile)
+        if (taskId.isNullOrBlank()) {
+            updateNotification(0, noResponseMsg)
+            context.stopService(serviceIntent)
+            return false
+        }
+
+        // 로컬 ZIP은 서버에 올라갔으면 삭제(저장공간 확보)
+        try { zipFile.delete() } catch (_: Exception) {}
+
+        // 2) 상태 폴링
+        val start = System.currentTimeMillis()
+        val timeoutMs = 30L * 60L * 1000L // 30분
+        var lastServerResponseAt = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            val st = fetchServerTaskStatus(context, taskId)
+            if (st != null) {
+                lastServerResponseAt = System.currentTimeMillis()
+                updateNotification(st.progressPercent.coerceIn(0, 100), st.message)
+                when (st.status) {
+                    "COMPLETED" -> break
+                    "FAILED" -> {
+                        context.stopService(serviceIntent)
+                        return false
+                    }
+                }
+            } else {
+                // 60초 이상 서버 응답이 없으면 중단
+                if (System.currentTimeMillis() - lastServerResponseAt >= 60_000L) {
+                    updateNotification(0, noResponseMsg)
+                    context.stopService(serviceIntent)
+                    return false
+                }
+            }
+            delay(1000)
+        }
+
+        // 3) 결과 다운로드 (.ply)
+        updateNotification(95, "결과 다운로드 중...")
+        val result = downloadPlyResult(context, taskId) ?: run {
+            context.stopService(serviceIntent)
+            return false
+        }
+        
+        updateNotification(100, "완료되었습니다!")
+        context.stopService(serviceIntent)
+        return true
+    } catch (e: Exception) {
+        e.printStackTrace()
+        context.stopService(serviceIntent)
         return false
     }
-
-    // 로컬 ZIP은 서버에 올라갔으면 삭제(저장공간 확보)
-    try { zipFile.delete() } catch (_: Exception) {}
-
-    // 2) 상태 폴링
-    val start = System.currentTimeMillis()
-    val timeoutMs = 30L * 60L * 1000L // 30분
-    var lastServerResponseAt = System.currentTimeMillis()
-    while (System.currentTimeMillis() - start < timeoutMs) {
-        val st = fetchServerTaskStatus(context, taskId)
-        if (st != null) {
-            lastServerResponseAt = System.currentTimeMillis()
-            onProgress(st.progressPercent.coerceIn(0, 100), st.message)
-            when (st.status) {
-                "COMPLETED" -> break
-                "FAILED" -> return false
-            }
-        } else {
-            // 60초 이상 서버 응답이 없으면 중단
-            if (System.currentTimeMillis() - lastServerResponseAt >= 60_000L) {
-                onProgress(0, noResponseMsg)
-                return false
-            }
-        }
-        delay(1000)
-    }
-
-    // 3) 결과 다운로드 (.ply)
-    onProgress(95, "결과 다운로드 중...")
-    val result = downloadPlyResult(context, taskId) ?: return false
-    onProgress(100, "완료되었습니다! 저장 위치: ${result.name}")
-    return true
 }
 
 private fun listImageFiles(dir: File): List<File> {
@@ -4112,12 +5789,12 @@ private suspend fun enhanceDatasetFolders(
     }
 }
 
-private data class PlyParseResult(
+data class PlyParseResult(
     val points: FloatArray,
     val count: Int
 )
 
-private fun parsePlyPoints(file: File): PlyParseResult? {
+fun parsePlyPoints(file: File): PlyParseResult? {
     if (!file.exists()) return null
     return try {
         var vertexCount = 0
@@ -4605,4 +6282,52 @@ fun ServerSettingsScreen(
             )
         }
     }
+}
+
+// [추가] 백그라운드 작업 유지를 위한 포그라운드 서비스
+class AppForegroundService : Service() {
+    companion object {
+        const val CHANNEL_ID = "AppForegroundServiceChannel"
+        const val NOTIFICATION_ID = 1
+        const val EXTRA_PROGRESS = "extra_progress"
+        const val EXTRA_MESSAGE = "extra_message"
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "앱 실행 유지 서비스",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(NotificationManager::class.java)
+            if (manager != null) {
+                manager.createNotificationChannel(channel)
+            }
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val progress = intent?.getIntExtra(EXTRA_PROGRESS, -1) ?: -1
+        val message = intent?.getStringExtra(EXTRA_MESSAGE) ?: "백그라운드에서 작업을 유지하고 있습니다."
+        
+        val notificationBuilder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("어플리케이션 작업 중")
+            .setSmallIcon(android.R.drawable.ic_menu_camera)
+            .setOnlyAlertOnce(true) // 알림 업데이트 시 소리/진동 반복 방지
+
+        if (progress in 0..100) {
+            notificationBuilder.setContentText("$message ($progress%)")
+            notificationBuilder.setProgress(100, progress, false)
+        } else {
+            notificationBuilder.setContentText(message)
+        }
+
+        val notification = notificationBuilder.build()
+        startForeground(NOTIFICATION_ID, notification)
+        return START_STICKY
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
 }
