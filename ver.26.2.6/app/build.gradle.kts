@@ -111,6 +111,8 @@ dependencies {
     // ONNX Runtime Android — U²-Net(u2netp) 카테고리 제한 없는 배경 제거
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
 
+    // 누끼 따기는 기존 ONNX Runtime + u2netp.onnx (BackgroundRemovalProcessor.segmentForeground) 사용
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

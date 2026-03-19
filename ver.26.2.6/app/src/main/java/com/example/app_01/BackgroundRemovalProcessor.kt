@@ -64,6 +64,17 @@ object BackgroundRemovalProcessor {
     // InteractiveSegmenter 모델 경로
     private const val INTERACTIVE_SEGMENTER_MODEL = "models/interactive_segmenter/magic_touch.tflite"
 
+    // ── MobileSAM (경량화 SAM2 계열) ─────────────────────────────────────────
+    // 다운로드: https://huggingface.co/Acly/MobileSAM
+    // Encoder: mobile_sam_image_encoder.onnx (26.9MB, TinyViT 기반)
+    // Decoder: mobile_sam_decoder.onnx      (15.7MB, SAM 마스크 디코더)
+    private const val MOBILE_SAM_ENCODER = "models/mobile_sam/mobile_sam_encoder.onnx"
+    private const val MOBILE_SAM_DECODER = "models/mobile_sam/mobile_sam_decoder.onnx"
+    // SAM 이미지 전처리 파라미터 (0~255 스케일 정규화)
+    private const val SAM_INPUT_SIZE = 1024
+    private val SAM_PIXEL_MEAN = floatArrayOf(123.675f, 116.28f, 103.53f)
+    private val SAM_PIXEL_STD  = floatArrayOf(58.395f,  57.12f,  57.375f)
+
     // 포인트 기반 분리 최대 입력 크기 (2GB 메모리 한도 내 안전 처리)
     private const val ML_KIT_INPUT_MAX = 512
 
@@ -184,6 +195,8 @@ object BackgroundRemovalProcessor {
     @Volatile private var segmenter: ImageSegmenter? = null
     @Volatile private var interactiveSegmenter: InteractiveSegmenter? = null
     @Volatile private var ortSession: OrtSession? = null
+    @Volatile private var mobileSamEncoderSession: OrtSession? = null
+    @Volatile private var mobileSamDecoderSession: OrtSession? = null
 
     fun close() {
         try {
@@ -191,12 +204,16 @@ object BackgroundRemovalProcessor {
             segmenter?.close()
             interactiveSegmenter?.close()
             ortSession?.close()
+            mobileSamEncoderSession?.close()
+            mobileSamDecoderSession?.close()
         } catch (_: Exception) {
         } finally {
             detector = null
             segmenter = null
             interactiveSegmenter = null
             ortSession = null
+            mobileSamEncoderSession = null
+            mobileSamDecoderSession = null
         }
     }
 
@@ -665,6 +682,312 @@ object BackgroundRemovalProcessor {
      *
      * @return 320×320 확률 배열(0~1), 실패 시 null
      */
+    /**
+     * U²-Net으로 전경을 분리하여 알파 채널이 있는 비트맵으로 반환.
+     * 누끼 따기(SubjectSegmentOverlay) 등 외부에서 호출 가능한 공개 API.
+     * @return 배경이 투명 처리된 ARGB_8888 비트맵, 실패 시 null
+     */
+    fun segmentForeground(context: Context, bitmap: Bitmap): Bitmap? {
+        val mask = runU2Net(context, bitmap) ?: return null
+        val sz   = U2NET_INPUT_SIZE
+        // 원본 크기로 마스크 리사이즈 후 알파 채널 적용
+        val resizedMask = resizeFloatMask(mask, sz, sz, bitmap.width, bitmap.height)
+        val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        for (y in 0 until bitmap.height) {
+            for (x in 0 until bitmap.width) {
+                val prob  = resizedMask[y * bitmap.width + x]
+                val alpha = (prob * 255f).toInt().coerceIn(0, 255)
+                val src   = result.getPixel(x, y)
+                result.setPixel(x, y,
+                    android.graphics.Color.argb(alpha, src shr 16 and 0xFF, src shr 8 and 0xFF, src and 0xFF)
+                )
+            }
+        }
+        return result
+    }
+
+    // ── MobileSAM 세션 초기화 ──────────────────────────────────────────────────
+
+    private fun getMobileSamEncoder(context: Context): OrtSession? {
+        mobileSamEncoderSession?.let { return it }
+        return try {
+            val env = OrtEnvironment.getEnvironment()
+            val bytes = context.assets.open(MOBILE_SAM_ENCODER).readBytes()
+            env.createSession(bytes).also { mobileSamEncoderSession = it }
+        } catch (e: Throwable) {
+            Log.e(TAG, "MobileSAM Encoder 로드 실패", e)
+            null
+        }
+    }
+
+    private fun getMobileSamDecoder(context: Context): OrtSession? {
+        mobileSamDecoderSession?.let { return it }
+        return try {
+            val env = OrtEnvironment.getEnvironment()
+            val bytes = context.assets.open(MOBILE_SAM_DECODER).readBytes()
+            env.createSession(bytes).also { mobileSamDecoderSession = it }
+        } catch (e: Throwable) {
+            Log.e(TAG, "MobileSAM Decoder 로드 실패", e)
+            null
+        }
+    }
+
+    /**
+     * SAM 이미지 전처리: 최장변 → SAM_INPUT_SIZE 비율 유지 축소.
+     *
+     * 인코더는 use_preprocess=True 로 export 되어 있어
+     * 내부에서 정규화+패딩을 처리한다.
+     * 따라서 입력 텐서는 [resH, resW, 3] HWC float32 (raw 픽셀 0~255) 형태로 전달.
+     *
+     * @return Triple(HWC float32 배열, resH, resW)
+     */
+    private fun preprocessImageHWC(bitmap: Bitmap): Triple<FloatArray, Int, Int> {
+        val origW  = bitmap.width
+        val origH  = bitmap.height
+        val scale  = SAM_INPUT_SIZE.toFloat() / maxOf(origW, origH)
+        val resW   = (origW * scale).toInt().coerceAtLeast(1)
+        val resH   = (origH * scale).toInt().coerceAtLeast(1)
+
+        val resized     = if (resW != origW || resH != origH)
+            Bitmap.createScaledBitmap(bitmap, resW, resH, true) else bitmap
+        val needRecycle = resized !== bitmap
+
+        // HWC 순서: data[y*resW*3 + x*3 + c]
+        val data   = FloatArray(resH * resW * 3)
+        val pixels = IntArray(resW * resH)
+        resized.getPixels(pixels, 0, resW, 0, 0, resW, resH)
+
+        for (i in pixels.indices) {
+            val px      = pixels[i]
+            val off     = i * 3
+            data[off]     = (px shr 16 and 0xFF).toFloat()   // R (0~255)
+            data[off + 1] = (px shr 8  and 0xFF).toFloat()   // G (0~255)
+            data[off + 2] = (px and 0xFF).toFloat()           // B (0~255)
+        }
+        if (needRecycle) resized.recycle()
+        return Triple(data, resH, resW)
+    }
+
+    /**
+     * MobileSAM (경량화 SAM 계열) 기반 전경 분리.
+     * 누끼 따기에서 사용자가 그린 영역의 중심점을 포인트 프롬프트로 사용.
+     *
+     * 파이프라인:
+     *  1) Encoder: [1,3,1024,1024] → 이미지 임베딩 [1,256,64,64]
+     *  2) Decoder: 임베딩 + 클릭 포인트 → 마스크 로짓 [1,1,H,W]
+     *  3) 시그모이드 임계값(logit > 0) → 이진 마스크 → 알파 채널 적용
+     *
+     * @param normX 클릭 가이드 X (0~1 정규화, 경로 중심점)
+     * @param normY 클릭 가이드 Y (0~1 정규화, 경로 중심점)
+     * @return 배경이 투명 처리된 ARGB_8888 비트맵, 실패 시 null
+     */
+    fun segmentForegroundMobileSAM(
+        context: Context,
+        bitmap: Bitmap,
+        normX: Float,
+        normY: Float
+    ): Bitmap? {
+        return try {
+            val availMb = getAvailableMemoryMb(context)
+            if (availMb < MEM_ABORT_THRESHOLD_MB) {
+                Log.e(TAG, "segmentForegroundMobileSAM: 메모리 부족 (${availMb}MB)")
+                return null
+            }
+
+            val encoder = getMobileSamEncoder(context) ?: return null
+            val decoder = getMobileSamDecoder(context) ?: return null
+            val env     = OrtEnvironment.getEnvironment()
+
+            // 메모리에 맞는 처리 해상도 선택
+            val maxDim = when {
+                availMb < MEM_LOW_THRESHOLD_MB -> 512
+                availMb < MEM_MID_THRESHOLD_MB -> 768
+                else                           -> SAM_INPUT_SIZE
+            }
+            val procBitmap  = scaleBitmapTo(bitmap, maxDim)
+            val needRecycle = procBitmap !== bitmap
+            val origW       = procBitmap.width
+            val origH       = procBitmap.height
+
+            try {
+                // ── 1단계: 인코더 실행 (HWC 포맷: [resH, resW, 3], raw 0~255) ─
+                val (inputData, resH, resW) = preprocessImageHWC(procBitmap)
+                val samScale     = SAM_INPUT_SIZE.toFloat() / maxOf(origW, origH)
+                val encShape     = longArrayOf(resH.toLong(), resW.toLong(), 3L)
+                val encInputName = encoder.inputNames.firstOrNull() ?: "input_image"
+
+                val embeddings: FloatArray
+                OnnxTensor.createTensor(env, FloatBuffer.wrap(inputData), encShape).use { encTensor ->
+                    encoder.run(mapOf(encInputName to encTensor)).use { encOut ->
+                        val embTensor = encOut.get(0) as OnnxTensor
+                        val buf = embTensor.floatBuffer
+                        embeddings = FloatArray(buf.remaining()).also { buf.get(it) }
+                    }
+                }
+                Log.d(TAG, "MobileSAM 인코더 완료 embeddings[${embeddings.size}] resized=${resW}x${resH}")
+
+                // ── 2단계: 디코더 입력 구성 ────────────────────────────────────
+                // 포인트 좌표: 원본 픽셀 공간 → SAM 리사이즈 공간으로 변환
+                // ptX = normX * origW * (1024 / max(origW,origH)) = normX * resW
+                val ptX = normX * origW * samScale
+                val ptY = normY * origH * samScale
+                // SAM 디코더는 포인트 + 더미 패딩(label=-1) 필요
+                val pointCoords  = floatArrayOf(ptX, ptY, 0f, 0f)
+                val pointLabels  = floatArrayOf(1f, -1f)       // 1=전경, -1=패딩
+                val maskInput    = FloatArray(256 * 256)        // 이전 마스크 없음
+                val hasMaskInput = floatArrayOf(0f)
+                // orig_im_size: SAM 업스케일 기준 (리사이즈 후 크기)
+                val origImSize   = floatArrayOf(origH.toFloat(), origW.toFloat())
+
+                val embShape    = longArrayOf(1L, 256L, 64L, 64L)
+                val ptCShape    = longArrayOf(1L, 2L, 2L)
+                val ptLShape    = longArrayOf(1L, 2L)
+                val maskShape   = longArrayOf(1L, 1L, 256L, 256L)
+                val masks: FloatArray
+                var maskW = origW
+                var maskH = origH
+
+                OnnxTensor.createTensor(env, FloatBuffer.wrap(embeddings),   embShape).use { embT ->
+                OnnxTensor.createTensor(env, FloatBuffer.wrap(pointCoords),  ptCShape).use { ptCT ->
+                OnnxTensor.createTensor(env, FloatBuffer.wrap(pointLabels),  ptLShape).use { ptLT ->
+                OnnxTensor.createTensor(env, FloatBuffer.wrap(maskInput),    maskShape).use { maskT ->
+                OnnxTensor.createTensor(env, FloatBuffer.wrap(hasMaskInput), longArrayOf(1L)).use { hasMaskT ->
+                OnnxTensor.createTensor(env, FloatBuffer.wrap(origImSize),   longArrayOf(2L)).use { origSzT ->
+
+                    val decNames   = decoder.inputNames.toList()
+                    val embKey     = decNames.find { it.contains("embed") }       ?: "image_embeddings"
+                    val ptCKey     = decNames.find { it.contains("point_coord") } ?: "point_coords"
+                    val ptLKey     = decNames.find { it.contains("point_label") } ?: "point_labels"
+                    val maskKey    = decNames.find { it == "mask_input" }          ?: "mask_input"
+                    val hasMaskKey = decNames.find { it.contains("has_mask") }    ?: "has_mask_input"
+                    val origSzKey  = decNames.find { it.contains("orig") }        ?: "orig_im_size"
+
+                    decoder.run(mapOf(
+                        embKey to embT, ptCKey to ptCT, ptLKey to ptLT,
+                        maskKey to maskT, hasMaskKey to hasMaskT, origSzKey to origSzT
+                    )).use { decOut ->
+                        val maskIdx = decoder.outputNames.indexOfFirst { it == "masks" }
+                            .takeIf { it >= 0 } ?: 0
+                        val maskTensor = decOut.get(maskIdx) as OnnxTensor
+                        val shape = maskTensor.info.shape
+                        maskH = shape[shape.size - 2].toInt()
+                        maskW = shape[shape.size - 1].toInt()
+                        val buf = maskTensor.floatBuffer
+                        masks = FloatArray(buf.remaining()).also { buf.get(it) }
+                        Log.d(TAG, "MobileSAM 디코더 완료 mask ${maskW}x${maskH} max=${masks.maxOrNull()?.let { "%.2f".format(it) }}")
+                    }
+                }}}}}}
+
+                // ── 3단계: 마스크 후처리 → 알파 적용 ──────────────────────────
+                // logit > 0.0 → 전경 (sigmoid 0.5 임계값과 동일)
+                val binaryMask = FloatArray(masks.size) { if (masks[it] > 0f) 1f else 0f }
+                val resized    = resizeFloatMask(binaryMask, maskW, maskH, procBitmap.width, procBitmap.height)
+                applyAlphaMaskBatch(procBitmap, resized)
+
+            } finally {
+                if (needRecycle) procBitmap.recycle()
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "segmentForegroundMobileSAM 오류", e)
+            null
+        }
+    }
+
+    /**
+     * MediaPipe InteractiveSegmenter (magic_touch.tflite) 기반 전경 분리.
+     * 누끼 따기(SubjectSegmentOverlay)에서 사용자가 그린 영역의 중심점을 가이드로
+     * 카테고리 제한 없는 임의 사물 배경 분리를 수행한다.
+     *
+     * @param context  Context
+     * @param bitmap   처리할 소스 비트맵
+     * @param normX    클릭 가이드 X 좌표 (0.0~1.0 정규화)
+     * @param normY    클릭 가이드 Y 좌표 (0.0~1.0 정규화)
+     * @return 배경이 투명 처리된 ARGB_8888 비트맵, 실패 시 null
+     */
+    fun segmentForegroundAtPoint(
+        context: Context,
+        bitmap: Bitmap,
+        normX: Float,
+        normY: Float
+    ): Bitmap? {
+        return try {
+            // ── 메모리 여유량 확인 및 처리 해상도 결정 ────────────────────────────
+            val inputSize = checkMemoryAndGetInputSize(context) ?: run {
+                Log.e(TAG, "segmentForegroundAtPoint: 메모리 부족으로 처리 불가")
+                return null
+            }
+
+            val iSeg = getInteractiveSegmenter(context) ?: run {
+                Log.e(TAG, "InteractiveSegmenter 초기화 실패 — magic_touch.tflite 확인")
+                return null
+            }
+
+            // ── 처리 해상도로 축소 (OOM 방지) ────────────────────────────────────
+            val scaled = scaleBitmapTo(bitmap, inputSize)
+            val needRecycle = scaled !== bitmap
+            // scaled의 크기를 recycle 전에 미리 저장
+            val scaledW = scaled.width
+            val scaledH = scaled.height
+
+            val rawConf: FloatArray?
+            try {
+                val mpImage = BitmapImageBuilder(scaled).build()
+                val roi = InteractiveSegmenter.RegionOfInterest.create(
+                    NormalizedKeypoint.create(normX, normY)
+                )
+                val segResult = iSeg.segment(mpImage, roi)
+                rawConf = extractConfidenceMask(segResult, scaledW, scaledH)
+            } finally {
+                // 반드시 처리 완료 후 scaled 해제 (use-after-free 방지)
+                if (needRecycle) scaled.recycle()
+            }
+
+            if (rawConf == null || (rawConf.maxOrNull() ?: 0f) < 0.05f) {
+                Log.w(TAG, "segmentForegroundAtPoint: 신뢰도 마스크 없음 또는 너무 낮음")
+                return null
+            }
+
+            // ── 클릭 위치 vs 전체 평균 비교 → 마스크 자동 반전 ─────────────────
+            val clickPxX = (normX * scaledW).toInt().coerceIn(0, scaledW - 1)
+            val clickPxY = (normY * scaledH).toInt().coerceIn(0, scaledH - 1)
+            val neighborR = (minOf(scaledW, scaledH) * 0.04f).toInt().coerceAtLeast(2)
+            val clickConf = getMaskNeighborhoodAvg(rawConf, scaledW, scaledH, clickPxX, clickPxY, neighborR)
+            val maskMean  = rawConf.average().toFloat()
+            Log.d(TAG, "segmentForegroundAtPoint: click($clickPxX,$clickPxY) conf=$clickConf mean=$maskMean")
+
+            val finalMask = if (clickConf < maskMean) {
+                Log.d(TAG, "마스크 반전 (click=$clickConf < mean=$maskMean)")
+                FloatArray(rawConf.size) { 1f - rawConf[it] }
+            } else rawConf
+
+            // ── 원본 크기로 마스크 리사이즈 후 배치 알파 적용 (ANR 방지) ─────────
+            val resized = resizeFloatMask(finalMask, scaledW, scaledH, bitmap.width, bitmap.height)
+            applyAlphaMaskBatch(bitmap, resized)
+
+        } catch (e: Throwable) {
+            Log.e(TAG, "segmentForegroundAtPoint 오류", e)
+            null
+        }
+    }
+
+    /**
+     * FloatArray 마스크를 비트맵 알파 채널에 배치 적용.
+     * 개별 getPixel/setPixel 루프 대비 ~50x 빠름.
+     * @return 배경이 투명 처리된 새 ARGB_8888 비트맵
+     */
+    private fun applyAlphaMaskBatch(src: Bitmap, mask: FloatArray): Bitmap {
+        val w = src.width; val h = src.height
+        val pixels = IntArray(w * h)
+        src.getPixels(pixels, 0, w, 0, 0, w, h)
+        for (i in pixels.indices) {
+            val alpha = (mask[i].coerceIn(0f, 1f) * 255f).toInt()
+            pixels[i] = (alpha shl 24) or (pixels[i] and 0x00FFFFFF)
+        }
+        val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        result.setPixels(pixels, 0, w, 0, 0, w, h)
+        return result
+    }
+
     private fun runU2Net(context: Context, bitmap: Bitmap): FloatArray? {
         val session = getOrtSession(context) ?: return null
         val env = OrtEnvironment.getEnvironment()

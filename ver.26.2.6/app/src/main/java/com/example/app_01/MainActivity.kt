@@ -187,7 +187,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import kotlin.math.roundToInt
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.asImageBitmap
+import kotlinx.coroutines.suspendCancellableCoroutine
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
@@ -4745,19 +4747,24 @@ fun ImageEditScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    // 현재 표시 중인 URI (누끼 따기 결과로 갱신 가능)
+    var currentUri by remember { mutableStateOf(imageUri) }
+
     // 변환 상태
     var buttonRotation by remember { mutableStateOf(0f) }
     var dialDegrees    by remember { mutableStateOf(0f) }
     var isFlipped      by remember { mutableStateOf(false) }
     var pendingCrop    by remember { mutableStateOf<PendingCropData?>(null) }
     var isCropMode     by remember { mutableStateOf(false) }
+    var isDrawMode     by remember { mutableStateOf(false) }   // 누끼 따기 모드
     // 자르기 모드 전용 줌/패닝 상태
     var cropZoom  by remember { mutableStateOf(1f) }
     var cropPanX  by remember { mutableStateOf(0f) }
     var cropPanY  by remember { mutableStateOf(0f) }
 
     val totalRotation = buttonRotation + dialDegrees
-    val hasChanges    = buttonRotation != 0f || dialDegrees != 0f || isFlipped || pendingCrop != null
+    // 현재 URI가 원본과 달라도(누끼 따기 후) hasChanges = true
+    val hasChanges    = buttonRotation != 0f || dialDegrees != 0f || isFlipped || pendingCrop != null || currentUri != imageUri
 
     var showSaveDialog by remember { mutableStateOf(false) }
     var isSaving       by remember { mutableStateOf(false) }
@@ -4771,16 +4778,20 @@ fun ImageEditScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // ── 메인 이미지 (자르기 모드 여부에 따라 하단 패딩 다름) ──
+        // ── 메인 이미지 (모드별 하단 패딩) ──
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 56.dp, bottom = if (isCropMode) 60.dp else 148.dp)
+                .padding(top = 56.dp, bottom = when {
+                    isCropMode -> 60.dp
+                    isDrawMode -> 80.dp
+                    else       -> 148.dp
+                })
                 .fillMaxHeight(),
             contentAlignment = Alignment.Center
         ) {
             Image(
-                painter = rememberAsyncImagePainter(imageUri),
+                painter = rememberAsyncImagePainter(currentUri),
                 contentDescription = null,
                 modifier = Modifier
                     .fillMaxSize()
@@ -4815,6 +4826,8 @@ fun ImageEditScreen(
                     buttonRotation = 0f
                     dialDegrees    = 0f
                     isFlipped      = false
+                    pendingCrop    = null
+                    currentUri     = imageUri
                 },
                 enabled = hasChanges
             ) {
@@ -4838,8 +4851,8 @@ fun ImageEditScreen(
             }
         }
 
-        // ── 하단: 다이얼 바 + 기능 버튼 (자르기 모드가 아닐 때만) ──
-        if (!isCropMode) {
+        // ── 하단: 다이얼 바 + 기능 버튼 (자르기/그리기 모드가 아닐 때만) ──
+        if (!isCropMode && !isDrawMode) {
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -4868,7 +4881,7 @@ fun ImageEditScreen(
                         isCropMode = true
                     }
                     EditActionButton(icon = Icons.Default.AutoFixHigh, label = "누끼따기") {
-                        /* TODO: 누끼따기 */
+                        isDrawMode = true
                     }
                 }
             }
@@ -4877,13 +4890,14 @@ fun ImageEditScreen(
         // ── 자르기 모드 오버레이 ──
         if (isCropMode) {
             CropModeOverlay(
-                imageUri          = imageUri,
+                imageUri          = currentUri,
                 topBarDp          = 56.dp,
                 bottomBarDp       = 60.dp,
                 buttonRotation    = buttonRotation,
                 cropZoom          = cropZoom,
                 cropPanX          = cropPanX,
                 cropPanY          = cropPanY,
+                hasEditChanges    = hasChanges,
                 onZoomChange      = { z, px, py ->
                     cropZoom = z; cropPanX = px; cropPanY = py
                 },
@@ -4905,6 +4919,25 @@ fun ImageEditScreen(
                     cropZoom = 1f; cropPanX = 0f; cropPanY = 0f
                     isCropMode = false
                 }
+            )
+        }
+
+        // ── 누끼 따기 모드 오버레이 ──
+        if (isDrawMode) {
+            SubjectSegmentOverlay(
+                sourceUri     = currentUri,
+                totalRotation = totalRotation,
+                isFlipped     = isFlipped,
+                pendingCrop   = pendingCrop,
+                onResult      = { newUri ->
+                    currentUri     = newUri
+                    isDrawMode     = false
+                    buttonRotation = 0f
+                    dialDegrees    = 0f
+                    isFlipped      = false
+                    pendingCrop    = null
+                },
+                onCancel = { isDrawMode = false }
             )
         }
 
@@ -4947,9 +4980,9 @@ fun ImageEditScreen(
                         showSaveDialog = false
                         scope.launch {
                             isSaving = true
-                            val saved = saveEditedImage(context, imageUri, totalRotation, isFlipped, overwrite = true, cropData = pendingCrop)
+                            val saved = saveEditedImage(context, currentUri, totalRotation, isFlipped, overwrite = true, cropData = pendingCrop)
                             isSaving = false
-                            onSaved(saved ?: imageUri)
+                            onSaved(saved ?: currentUri)
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
@@ -4963,9 +4996,9 @@ fun ImageEditScreen(
                         showSaveDialog = false
                         scope.launch {
                             isSaving = true
-                            val saved = saveEditedImage(context, imageUri, totalRotation, isFlipped, overwrite = false, cropData = pendingCrop)
+                            val saved = saveEditedImage(context, currentUri, totalRotation, isFlipped, overwrite = false, cropData = pendingCrop)
                             isSaving = false
-                            onSaved(saved ?: imageUri)
+                            onSaved(saved ?: currentUri)
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
@@ -4986,9 +5019,271 @@ fun ImageEditScreen(
 }
 
 // ── 다이얼 바: 50칸 / 양끝 페이드 아웃 / 검은 배경 ────────────────────────
-// ──────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// 누끼 따기 — 영역 직접 드로잉 + U²-Net 사물 분리
+// ─────────────────────────────────────────────────────────────────────────────
+@Composable
+private fun SubjectSegmentOverlay(
+    sourceUri: Uri,
+    totalRotation: Float,
+    isFlipped: Boolean,
+    pendingCrop: PendingCropData?,
+    onResult: (Uri) -> Unit,
+    onCancel: () -> Unit
+) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val scope   = rememberCoroutineScope()
+
+    val topBarDp  = 56.dp
+    val botBarDp  = 80.dp
+
+    // 현재 편집 상태가 반영된 작업용 비트맵 (비동기 준비)
+    var workingBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var isPreparing   by remember { mutableStateOf(true) }
+
+    // 드로잉 경로 & UI 상태 (LaunchedEffect보다 먼저 선언)
+    var pathPoints   by remember { mutableStateOf(listOf<Offset>()) }
+    var isProcessing by remember { mutableStateOf(false) }
+    var errorMsg     by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        try {
+            workingBitmap = withContext(Dispatchers.IO) {
+                buildWorkingBitmap(context, sourceUri, totalRotation, isFlipped, pendingCrop)
+            }
+        } catch (e: Throwable) {
+            android.util.Log.e("SubjectSegmentOverlay", "이미지 로딩 오류", e)
+            errorMsg = "이미지를 불러오는 데 실패했습니다.\n다시 시도해 주세요."
+        } finally {
+            isPreparing = false
+        }
+    }
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        val containerW = with(density) { maxWidth.toPx() }
+        val containerH = with(density) { maxHeight.toPx() }
+        val topPx      = with(density) { topBarDp.toPx() }
+        val botPx      = with(density) { botBarDp.toPx() }
+        val imgAreaH   = containerH - topPx - botPx
+
+        // 이미지 실제 표시 경계 (ContentScale.Fit 기준)
+        var dispLeft by remember { mutableStateOf(0f) }
+        var dispTop  by remember { mutableStateOf(topPx) }
+        var dispW    by remember { mutableStateOf(containerW) }
+        var dispH    by remember { mutableStateOf(imgAreaH) }
+
+        LaunchedEffect(workingBitmap) {
+            val bm = workingBitmap ?: return@LaunchedEffect
+            val s  = minOf(containerW / bm.width, imgAreaH / bm.height)
+            val dW = bm.width  * s
+            val dH = bm.height * s
+            dispLeft = (containerW - dW) / 2f
+            dispTop  = topPx + (imgAreaH - dH) / 2f
+            dispW    = dW; dispH = dH
+        }
+
+        // ── 작업용 이미지 표시 ──
+        workingBitmap?.let { bm ->
+            Image(
+                bitmap = bm.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .padding(top = topBarDp, bottom = botBarDp)
+                    .fillMaxSize()
+            )
+        }
+
+        // ── 드로잉 캔버스 ──
+        val composePath = remember(pathPoints) {
+            if (pathPoints.size < 2) null
+            else androidx.compose.ui.graphics.Path().apply {
+                moveTo(pathPoints[0].x, pathPoints[0].y)
+                pathPoints.drop(1).forEach { lineTo(it.x, it.y) }
+                close()
+            }
+        }
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val down = awaitFirstDown()
+                            val pts  = mutableListOf(down.position)
+                            pathPoints = pts.toList()
+                            var event = awaitPointerEvent()
+                            while (event.changes.any { it.pressed }) {
+                                event.changes.firstOrNull()?.let { ch ->
+                                    pts += ch.position
+                                    if (pts.size % 3 == 0) pathPoints = pts.toList()
+                                    ch.consume()
+                                }
+                                event = awaitPointerEvent()
+                            }
+                            pathPoints = pts.toList()
+                        }
+                    }
+                }
+        ) {
+            composePath?.let { path ->
+                drawPath(path, Color.White.copy(alpha = 0.22f), style = Fill)
+                drawPath(path, Color(0xFF9CD83B), style = Stroke(width = 3.dp.toPx()))
+            }
+            if (pathPoints.isNotEmpty()) {
+                drawCircle(Color(0xFF9CD83B), radius = 6.dp.toPx(), center = pathPoints[0])
+            }
+        }
+
+        // ── 상단 바 ──
+        val canApply = pathPoints.size >= 6 && workingBitmap != null
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(topBarDp)
+                .background(Color.Black)
+                .padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onCancel) {
+                Icon(Icons.Default.Close, contentDescription = "취소", tint = Color.White)
+            }
+            Text(
+                "영역 그리기",
+                color = Color.White,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(
+                    onClick  = { pathPoints = emptyList() },
+                    enabled  = pathPoints.isNotEmpty()
+                ) {
+                    Text(
+                        "초기화",
+                        color    = if (pathPoints.isNotEmpty()) Color(0xFFCCCCCC) else Color(0xFF555555),
+                        fontSize = 13.sp
+                    )
+                }
+                TextButton(
+                    onClick = {
+                        val bm = workingBitmap ?: return@TextButton
+                        scope.launch {
+                            isProcessing = true
+                            val result = performSubjectSegmentation(
+                                context   = context,
+                                bitmap    = bm,
+                                pathPoints = pathPoints,
+                                dispLeft  = dispLeft, dispTop = dispTop,
+                                dispW     = dispW,    dispH   = dispH
+                            )
+                            if (result != null) {
+                                val outFile = withContext(Dispatchers.IO) {
+                                    val f = File(
+                                        context.getExternalFilesDir(null),
+                                        "seg_${System.currentTimeMillis()}.png"
+                                    )
+                                    FileOutputStream(f).use { result.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                                    f
+                                }
+                                isProcessing = false
+                                onResult(android.net.Uri.fromFile(outFile))
+                            } else {
+                                isProcessing = false
+                                errorMsg = "사물 분리에 실패했습니다.\n다시 시도해 주세요."
+                            }
+                        }
+                    },
+                    enabled = canApply
+                ) {
+                    Text(
+                        "적용",
+                        color      = if (canApply) Color.White else Color(0xFF555555),
+                        fontSize   = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+
+        // ── 하단 안내 바 ──
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(botBarDp)
+                .background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = if (pathPoints.isEmpty())
+                    "분리할 사물 주변을 손가락으로 따라 그리세요"
+                else
+                    "경계를 그렸으면 [적용]을 탭하거나 [초기화]로 다시 그리세요",
+                color     = Color(0xFF888888),
+                fontSize  = 12.sp,
+                textAlign = TextAlign.Center,
+                modifier  = Modifier.padding(horizontal = 24.dp)
+            )
+        }
+
+        // ── 준비 중 오버레이 ──
+        if (isPreparing) {
+            Box(
+                modifier = Modifier.fillMaxSize().background(Color.Black),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    androidx.compose.material3.CircularProgressIndicator(color = Color(0xFF9CD83B))
+                    Spacer(Modifier.height(12.dp))
+                    Text("이미지 준비 중...", color = Color.White, fontSize = 13.sp)
+                }
+            }
+        }
+
+        // ── 처리 중 오버레이 ──
+        if (isProcessing) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.82f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    androidx.compose.material3.CircularProgressIndicator(color = Color(0xFF9CD83B))
+                    Spacer(Modifier.height(12.dp))
+                    Text("사물을 분리하는 중...", color = Color.White, fontSize = 14.sp)
+                }
+            }
+        }
+
+        // ── 에러 토스트 ──
+        errorMsg?.let { msg ->
+            LaunchedEffect(msg) {
+                kotlinx.coroutines.delay(3000)
+                errorMsg = null
+            }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(Color(0xCC333333), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 20.dp, vertical = 14.dp)
+            ) {
+                Text(msg, color = Color.White, fontSize = 13.sp, textAlign = TextAlign.Center)
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 자르기 오버레이 (이미지 위에 전체 화면으로 덮음)
-// ──────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 @Composable
 private fun CropModeOverlay(
     imageUri: Uri,
@@ -4998,6 +5293,7 @@ private fun CropModeOverlay(
     cropZoom: Float,
     cropPanX: Float,
     cropPanY: Float,
+    hasEditChanges: Boolean,           // 외부(회전·뒤집기) 변경 여부
     onZoomChange: (zoom: Float, panX: Float, panY: Float) -> Unit,
     onConfirm: (PendingCropData) -> Unit,
     onRestoreOriginal: () -> Unit,
@@ -5028,8 +5324,9 @@ private fun CropModeOverlay(
         var cropTop   by remember { mutableStateOf(imgAreaTop) }
         var cropW     by remember { mutableStateOf(containerW) }
         var cropH     by remember { mutableStateOf(imgAreaH) }
-        var is1to1    by remember { mutableStateOf(false) }
-        var activeHdl by remember { mutableStateOf(CropHandle.NONE) }
+        var is1to1       by remember { mutableStateOf(false) }
+        var activeHdl    by remember { mutableStateOf(CropHandle.NONE) }
+        var cropModified by remember { mutableStateOf(false) } // 크롭 영역 조작 여부
 
         val handleR    = with(density) { 34.dp.toPx() }
         val minCropPx  = with(density) { 80.dp.toPx() }
@@ -5211,6 +5508,7 @@ private fun CropModeOverlay(
                                     val d  = ch.position - ch.previousPosition
                                     val b  = effBounds()
                                     val efl = b[0]; val eft = b[1]; val efr = b[2]; val efb = b[3]
+                                    if (activeHdl != CropHandle.NONE) cropModified = true
                                     if (is1to1) {
                                         // ── 1:1 고정 ──
                                         when (activeHdl) {
@@ -5305,6 +5603,10 @@ private fun CropModeOverlay(
         )
 
         // ── 상단 바 오버레이 (기존 편집 상단 바 위에 덮음) ──
+        // 원본 복원: 외부 편집 변경 OR 크롭 조작 시 활성화
+        // 저장:     크롭 영역을 실제로 조작했을 때만 활성화
+        val canRestore = hasEditChanges || cropModified
+        val canSave    = cropModified
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -5318,27 +5620,42 @@ private fun CropModeOverlay(
                 Icon(Icons.Default.Close, contentDescription = "닫기", tint = Color.White)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onRestoreOriginal) {
-                    Text("원본 복원", color = Color.White, fontSize = 14.sp)
-                }
-                TextButton(onClick = {
-                    onConfirm(
-                        PendingCropData(
-                            left            = cropLeft,
-                            top             = cropTop,
-                            width           = cropW,
-                            height          = cropH,
-                            imgAreaTopPx    = imgAreaTop,
-                            imgAreaHeightPx = imgAreaH,
-                            containerW      = containerW,
-                            containerH      = containerH,
-                            cropZoom        = latestZoom.value,
-                            cropPanX        = latestPanX.value,
-                            cropPanY        = latestPanY.value
-                        )
+                TextButton(
+                    onClick  = onRestoreOriginal,
+                    enabled  = canRestore
+                ) {
+                    Text(
+                        "원본 복원",
+                        color    = if (canRestore) Color(0xFFCCCCCC) else Color(0xFF555555),
+                        fontSize = 14.sp
                     )
-                }) {
-                    Text("저장", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+                TextButton(
+                    onClick = {
+                        onConfirm(
+                            PendingCropData(
+                                left            = cropLeft,
+                                top             = cropTop,
+                                width           = cropW,
+                                height          = cropH,
+                                imgAreaTopPx    = imgAreaTop,
+                                imgAreaHeightPx = imgAreaH,
+                                containerW      = containerW,
+                                containerH      = containerH,
+                                cropZoom        = latestZoom.value,
+                                cropPanX        = latestPanX.value,
+                                cropPanY        = latestPanY.value
+                            )
+                        )
+                    },
+                    enabled = canSave
+                ) {
+                    Text(
+                        "저장",
+                        color      = if (canSave) Color.White else Color(0xFF555555),
+                        fontSize   = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
             }
         }
@@ -5495,6 +5812,149 @@ private fun EditActionButton(
 }
 
 // ── 편집된 이미지 저장 (회전·반전 적용 후 파일 쓰기) ─────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// 현재 편집 상태(회전·반전·크롭)를 적용한 비트맵 생성
+// ─────────────────────────────────────────────────────────────────────────────
+private suspend fun buildWorkingBitmap(
+    context: Context,
+    sourceUri: Uri,
+    totalRotation: Float,
+    isFlipped: Boolean,
+    pendingCrop: PendingCropData?
+): android.graphics.Bitmap = withContext(Dispatchers.IO) {
+    val src = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        android.graphics.ImageDecoder.decodeBitmap(
+            android.graphics.ImageDecoder.createSource(context.contentResolver, sourceUri)
+        ) { dec, _, _ -> dec.isMutableRequired = true }
+    } else {
+        @Suppress("DEPRECATION")
+        android.provider.MediaStore.Images.Media.getBitmap(context.contentResolver, sourceUri)
+    }.copy(android.graphics.Bitmap.Config.ARGB_8888, true)
+
+    val matrix = android.graphics.Matrix()
+    if (totalRotation != 0f) matrix.postRotate(totalRotation)
+    if (isFlipped) matrix.postScale(-1f, 1f, src.width / 2f, src.height / 2f)
+
+    var bm: android.graphics.Bitmap = if (!matrix.isIdentity) {
+        android.graphics.Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
+    } else src
+
+    if (pendingCrop != null) {
+        val rotW = bm.width.toFloat(); val rotH = bm.height.toFloat()
+        val s    = minOf(pendingCrop.containerW / rotW, pendingCrop.imgAreaHeightPx / rotH)
+        val baseL = (pendingCrop.containerW - rotW * s) / 2f
+        val baseT = pendingCrop.imgAreaTopPx + (pendingCrop.imgAreaHeightPx - rotH * s) / 2f
+        val cx   = pendingCrop.containerW / 2f
+        val cy   = pendingCrop.imgAreaTopPx + pendingCrop.imgAreaHeightPx / 2f
+        val z = pendingCrop.cropZoom; val px = pendingCrop.cropPanX; val py = pendingCrop.cropPanY
+        val effL = cx + (baseL - cx) * z + px
+        val effT = cy + (baseT - cy) * z + py
+        val effS = s * z
+        val cl = ((pendingCrop.left - effL) / effS).coerceIn(0f, rotW - 1f).toInt()
+        val ct = ((pendingCrop.top  - effT) / effS).coerceIn(0f, rotH - 1f).toInt()
+        val cw = (pendingCrop.width  / effS).coerceIn(1f, rotW - cl).toInt().coerceAtLeast(1)
+        val ch = (pendingCrop.height / effS).coerceIn(1f, rotH - ct).toInt().coerceAtLeast(1)
+        bm = android.graphics.Bitmap.createBitmap(bm, cl, ct, cw, ch)
+    }
+    bm
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ML Kit Subject Segmentation + 드로잉 경로 마스크 합성
+// ─────────────────────────────────────────────────────────────────────────────
+private suspend fun performSubjectSegmentation(
+    context: Context,
+    bitmap: android.graphics.Bitmap,
+    pathPoints: List<Offset>,
+    dispLeft: Float,
+    dispTop: Float,
+    dispW: Float,
+    dispH: Float
+): android.graphics.Bitmap? = withContext(Dispatchers.IO) {
+    try {
+        if (dispW <= 0f || dispH <= 0f || pathPoints.size < 3) return@withContext null
+
+        // ── OOM 방지: 처리 크기를 최대 768px로 제한 ───────────────────────────
+        val MAX_PROC_DIM = 768
+        val scaleFactor = if (bitmap.width > MAX_PROC_DIM || bitmap.height > MAX_PROC_DIM)
+            MAX_PROC_DIM.toFloat() / maxOf(bitmap.width, bitmap.height)
+        else 1f
+        val procBitmap = if (scaleFactor < 1f) {
+            val nw = (bitmap.width  * scaleFactor).toInt().coerceAtLeast(1)
+            val nh = (bitmap.height * scaleFactor).toInt().coerceAtLeast(1)
+            android.graphics.Bitmap.createScaledBitmap(bitmap, nw, nh, true)
+        } else bitmap
+        val needRecycleProcBm = procBitmap !== bitmap
+
+        try {
+            // 1. 경로를 처리용 비트맵 좌표로 변환 (scaleFactor 반영)
+            val scaleX = procBitmap.width  / dispW
+            val scaleY = procBitmap.height / dispH
+            val imgPath = pathPoints.map {
+                Offset((it.x - dispLeft) * scaleX, (it.y - dispTop) * scaleY)
+            }
+            val pw = procBitmap.width.toFloat()
+            val ph = procBitmap.height.toFloat()
+
+            // 2. 경로 중심점 계산 → InteractiveSegmenter 가이드 포인트
+            val centroidX = imgPath.map { it.x }.average().toFloat().coerceIn(0f, pw)
+            val centroidY = imgPath.map { it.y }.average().toFloat().coerceIn(0f, ph)
+            val normX = (centroidX / pw).coerceIn(0f, 1f)
+            val normY = (centroidY / ph).coerceIn(0f, 1f)
+
+            // 3. MobileSAM (경량화 SAM 계열) 전경 분리
+            //    Encoder(26.9MB) + Decoder(15.7MB) ONNX, 카테고리 제한 없음
+            val foregroundBm: android.graphics.Bitmap? =
+                BackgroundRemovalProcessor.segmentForegroundMobileSAM(context, procBitmap, normX, normY)
+
+            // 4. 경로 마스크 (처리 크기 기준, 흰색 = 선택 영역)
+            val pathMask = android.graphics.Bitmap.createBitmap(
+                procBitmap.width, procBitmap.height, android.graphics.Bitmap.Config.ARGB_8888
+            )
+            val pc = android.graphics.Canvas(pathMask)
+            val ap = android.graphics.Path().apply {
+                moveTo(
+                    imgPath[0].x.coerceIn(0f, pw - 1f),
+                    imgPath[0].y.coerceIn(0f, ph - 1f)
+                )
+                imgPath.drop(1).forEach {
+                    lineTo(it.x.coerceIn(0f, pw - 1f), it.y.coerceIn(0f, ph - 1f))
+                }
+                close()
+            }
+            pc.drawPath(ap, android.graphics.Paint().apply {
+                color = android.graphics.Color.WHITE
+                style = android.graphics.Paint.Style.FILL
+                isAntiAlias = true
+            })
+
+            // 5. 합성: (MediaPipe 전경 또는 원본 복사) DST_IN 경로 마스크
+            val baseCopied = foregroundBm == null
+            val base = foregroundBm
+                ?: procBitmap.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+            val result = android.graphics.Bitmap.createBitmap(
+                procBitmap.width, procBitmap.height, android.graphics.Bitmap.Config.ARGB_8888
+            )
+            val rc = android.graphics.Canvas(result)
+            rc.drawBitmap(base, 0f, 0f, null)
+            rc.drawBitmap(pathMask, 0f, 0f, android.graphics.Paint().apply {
+                xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_IN)
+            })
+            // 중간 비트맵 해제
+            pathMask.recycle()
+            if (baseCopied) base.recycle() else foregroundBm?.recycle()
+
+            result
+        } finally {
+            if (needRecycleProcBm) procBitmap.recycle()
+        }
+    } catch (e: Throwable) {
+        e.printStackTrace()
+        null
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 private suspend fun saveEditedImage(
     context: Context,
     originalUri: Uri,
@@ -5550,20 +6010,26 @@ private suspend fun saveEditedImage(
             result = android.graphics.Bitmap.createBitmap(result, imgCropLeft, imgCropTop, imgCropW, imgCropH)
         }
 
-        // 저장 경로 결정
+        // 저장 경로 결정 — PNG 소스(투명 배경)는 PNG 유지, 그 외 JPEG
         val originalPath = originalUri.path ?: return@withContext null
         val originalFile = java.io.File(originalPath)
+        val isPng   = originalPath.endsWith(".png", ignoreCase = true)
+        val ext     = if (isPng) "png" else "jpg"
+        val format  = if (isPng) android.graphics.Bitmap.CompressFormat.PNG
+                      else       android.graphics.Bitmap.CompressFormat.JPEG
+        val quality = if (isPng) 100 else 95
+
         val outFile = if (overwrite) {
             originalFile
         } else {
             java.io.File(
                 originalFile.parent ?: context.getExternalFilesDir(null)!!.absolutePath,
-                "edited_${System.currentTimeMillis()}.jpg"
+                "edited_${System.currentTimeMillis()}.$ext"
             )
         }
 
         java.io.FileOutputStream(outFile).use { fos ->
-            result.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, fos)
+            result.compress(format, quality, fos)
         }
         android.net.Uri.fromFile(outFile)
     } catch (e: Exception) {
