@@ -80,14 +80,20 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -115,6 +121,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
@@ -140,6 +147,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.toMutableStateList
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -162,13 +170,25 @@ import androidx.compose.material.icons.filled.Thermostat
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SettingsInputAntenna
 import androidx.compose.material.icons.filled.Compress
+import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.RotateLeft
+import androidx.compose.material.icons.filled.Flip
+import androidx.compose.material.icons.filled.Crop
+import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import kotlin.math.roundToInt
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -177,7 +197,11 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -650,14 +674,6 @@ fun CameraApp(modifier: Modifier = Modifier) {
 }
 
 /** 디바이스에서 발견된 개별 카메라 정보 */
-data class AvailableCameraInfo(
-    val cameraId: String,
-    val lensFacing: Int,                    // CameraCharacteristics.LENS_FACING_*
-    val focalLengths: FloatArray,
-    val label: String,                      // "후면 광각", "후면 초광각", "후면 망원", "전면 카메라"
-    val isPhysical: Boolean = false,        // 논리 카메라의 물리적 서브카메라 여부
-    val parentLogicalCameraId: String? = null  // 물리 카메라일 경우 부모 논리 카메라 ID
-)
 
 @Composable
 fun CameraScreen(
@@ -695,14 +711,14 @@ fun CameraScreen(
     var selectedResolution by remember { mutableStateOf(ResolutionPreset.RESOLUTION_1024x1024) }
     var azimuthDegrees by remember { mutableStateOf(0f) }
 
-    // 카메라 전환 관련 상태
-    var availableCameras by remember { mutableStateOf<List<AvailableCameraInfo>>(emptyList()) }
-    var selectedCameraId by remember { mutableStateOf<String?>(null) }
-    var showCameraSelector by remember { mutableStateOf(false) }
+    // ── 후면 카메라 바인딩 정보 ──────────────────────────────────────────────
+    // telephoto / wide 각각 "논리 카메라 ID" 또는 "물리 카메라 ID + 부모 논리 ID" 중 하나만 설정됨
+    var rearTelephotoLogicalId  by remember { mutableStateOf<String?>(null) }  // 논리 망원
+    var rearTelephotoPhysId     by remember { mutableStateOf<String?>(null) }  // 물리 망원
+    var rearTelephotoPhysParent by remember { mutableStateOf<String?>(null) }  // 물리 망원의 부모 논리 ID
+    var rearWideId              by remember { mutableStateOf<String?>(null) }  // 광각 논리
 
-    // 앱 시작 시 디바이스에서 사용 가능한 카메라 목록 수집
-    // CameraManager로 모든 렌즈를 열거하되, CameraX의 availableCameraInfos와 비교해
-    // 논리 카메라(CameraX가 직접 바인딩 가능) / 물리 카메라(setPhysicalCameraId 필요)를 구분
+    // 앱 시작 시 한 번: 2단계 탐색 (논리 → 물리 서브카메라 순)
     LaunchedEffect(Unit) {
         try {
             val cameraProvider = withContext(Dispatchers.IO) {
@@ -710,67 +726,73 @@ fun CameraScreen(
             }
             val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
 
-            // CameraX가 직접 접근 가능한 논리 카메라 ID 집합
-            @Suppress("UnsafeOptInUsageError")
-            val logicalCameraIds = cameraProvider.availableCameraInfos
-                .mapNotNull { runCatching { Camera2CameraInfo.from(it).cameraId }.getOrNull() }
-                .toSet()
+            // ── 1단계: CameraX 논리 카메라 탐색 ──────────────────────────────
+            data class LogicalCam(val id: String, val minFocal: Float)
 
-            // 물리 카메라 → 부모 논리 카메라 ID 매핑 (API 28+)
-            val physicalToLogical = mutableMapOf<String, String>()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                for (id in cameraManager.cameraIdList) {
-                    try {
-                        val chars = cameraManager.getCameraCharacteristics(id)
-                        chars.physicalCameraIds.forEach { physId ->
-                            physicalToLogical[physId] = id
+            @Suppress("UnsafeOptInUsageError")
+            val logicalBack: List<LogicalCam> = cameraProvider.availableCameraInfos
+                .filter { it.lensFacing == CameraSelector.LENS_FACING_BACK }
+                .mapNotNull { info ->
+                    val id = runCatching {
+                        Camera2CameraInfo.from(info).cameraId
+                    }.getOrNull() ?: return@mapNotNull null
+                    val focals = runCatching {
+                        cameraManager.getCameraCharacteristics(id)
+                            .get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                    }.getOrNull()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                    LogicalCam(id, focals.min())
+                }
+                .sortedBy { it.minFocal }
+
+            android.util.Log.d("CameraScreen",
+                "논리 후면 카메라: ${logicalBack.map { "${it.id}(${it.minFocal}mm)" }}")
+
+            if (logicalBack.size >= 2) {
+                // 논리 카메라가 2개 이상 → 초점거리 최대 = 망원, 3.5mm 근접 = 광각
+                rearTelephotoLogicalId = logicalBack.maxByOrNull { it.minFocal }?.id
+                rearWideId             = logicalBack.minByOrNull { Math.abs(it.minFocal - 3.5f) }?.id
+                android.util.Log.d("CameraScreen",
+                    "논리 선택 → 망원: $rearTelephotoLogicalId, 광각: $rearWideId")
+            } else {
+                // ── 2단계: 논리 카메라가 1개(퓨전 카메라)인 경우 → 물리 서브카메라 탐색 ──
+                rearWideId = logicalBack.firstOrNull()?.id
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    val logicalIds = logicalBack.map { it.id }
+                    var bestPhysId: String? = null
+                    var bestParentId: String? = null
+                    var bestFocal = 0f
+
+                    for (parentId in logicalIds) {
+                        val parentChars = runCatching {
+                            cameraManager.getCameraCharacteristics(parentId)
+                        }.getOrNull() ?: continue
+                        for (physId in parentChars.physicalCameraIds) {
+                            val chars = runCatching {
+                                cameraManager.getCameraCharacteristics(physId)
+                            }.getOrNull() ?: continue
+                            val focals = chars
+                                .get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                                ?.takeIf { it.isNotEmpty() } ?: continue
+                            val maxF = focals.max()
+                            if (maxF > bestFocal) {
+                                bestFocal = maxF; bestPhysId = physId; bestParentId = parentId
+                            }
                         }
-                    } catch (_: Exception) {}
+                    }
+
+                    // 광각 초점거리보다 1.5배 이상 길어야 망원으로 인정
+                    val wideFocal = logicalBack.firstOrNull()?.minFocal ?: 3.5f
+                    if (bestPhysId != null && bestFocal > wideFocal * 1.5f) {
+                        rearTelephotoPhysId     = bestPhysId
+                        rearTelephotoPhysParent = bestParentId
+                    }
+                    android.util.Log.d("CameraScreen",
+                        "물리 선택 → 망원: $rearTelephotoPhysId(${bestFocal}mm, parent=$rearTelephotoPhysParent), 광각: $rearWideId")
                 }
             }
-
-            val cameras = mutableListOf<AvailableCameraInfo>()
-            for (id in cameraManager.cameraIdList) {
-                try {
-                    val chars = cameraManager.getCameraCharacteristics(id)
-                    val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: continue
-                    if (!caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE)) continue
-
-                    val facing = chars.get(CameraCharacteristics.LENS_FACING) ?: continue
-                    val focalLengths = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                        ?: floatArrayOf()
-                    val minFocal = focalLengths.minOrNull() ?: 3f
-
-                    val isPhysical = id !in logicalCameraIds
-                    val parentId = if (isPhysical) physicalToLogical[id] else null
-
-                    val label = when {
-                        facing == CameraCharacteristics.LENS_FACING_FRONT -> "전면 카메라"
-                        minFocal < 2.5f -> "후면 초광각"
-                        minFocal >= 6.0f -> "후면 망원"
-                        else -> "후면 광각"
-                    }
-                    cameras.add(AvailableCameraInfo(id, facing, focalLengths, label, isPhysical, parentId))
-                } catch (_: Exception) {}
-            }
-            // 후면 카메라를 초점거리 순(초광각→광각→망원)으로, 전면은 마지막에 정렬
-            availableCameras = cameras.sortedWith(
-                compareBy(
-                    { if (it.lensFacing == CameraCharacteristics.LENS_FACING_FRONT) 1 else 0 },
-                    { it.focalLengths.minOrNull() ?: 99f }
-                )
-            )
-            // 기본 선택: 후면 광각 주 카메라(논리 카메라 우선, 초점거리 3.5mm 근접)
-            selectedCameraId = availableCameras
-                .filter { it.lensFacing == CameraCharacteristics.LENS_FACING_BACK && !it.isPhysical }
-                .minByOrNull { Math.abs((it.focalLengths.minOrNull() ?: 3f) - 3.5f) }
-                ?.cameraId
-                ?: availableCameras
-                    .filter { it.lensFacing == CameraCharacteristics.LENS_FACING_BACK }
-                    .minByOrNull { Math.abs((it.focalLengths.minOrNull() ?: 3f) - 3.5f) }
-                    ?.cameraId
         } catch (e: Exception) {
-            android.util.Log.e("CameraScreen", "카메라 목록 수집 실패", e)
+            android.util.Log.w("CameraScreen", "카메라 탐색 실패: ${e.message}")
         }
     }
 
@@ -1103,47 +1125,40 @@ fun CameraScreen(
             try {
                 val cameraProvider = cameraProviderFuture.get()
 
-                // 선택된 카메라가 물리 카메라인지 논리 카메라인지 판단
-                val selectedCamInfo = availableCameras.find { it.cameraId == selectedCameraId }
-                // 물리 카메라: setPhysicalCameraId로 유즈케이스 빌더에 직접 지정
-                // 논리 카메라: Camera2CameraInfo 필터로 CameraSelector 지정
-                val physicalIdToApply: String? = if (selectedCamInfo?.isPhysical == true) selectedCameraId else null
+                // ── 후면 카메라 선택 우선순위 ────────────────────────────────
+                //  1) 망원 논리 카메라  2) 망원 물리 카메라(부모 논리 + setPhysicalCameraId)
+                //  3) 광각 논리 카메라  4) 기기 기본 후면 카메라(폴백)
+                // 전면: 기기 기본 전면 카메라
+                @Suppress("UnsafeOptInUsageError")
+                fun selectorByLogicalId(logicalId: String) = CameraSelector.Builder()
+                    .addCameraFilter { list ->
+                        val matched = list.filter {
+                            runCatching { Camera2CameraInfo.from(it).cameraId == logicalId }
+                                .getOrDefault(false)
+                        }
+                        matched.ifEmpty { list.filter { it.lensFacing == CameraSelector.LENS_FACING_BACK } }
+                    }
+                    .build()
+
+                // 물리 망원 카메라 사용 여부와 그 ID (Preview/ImageCapture 빌더에 적용)
+                val physicalIdToApply: String? = when {
+                    lensFacing == CameraSelector.LENS_FACING_BACK
+                        && rearTelephotoLogicalId == null
+                        && rearTelephotoPhysId != null -> rearTelephotoPhysId
+                    else -> null
+                }
 
                 val cameraSelector = when {
-                    selectedCameraId == null -> {
-                        CameraSelector.Builder().requireLensFacing(lensFacing).build()
-                    }
-                    selectedCamInfo?.isPhysical == true -> {
-                        // 물리 카메라: 부모 논리 카메라로 바인딩 (렌즈 선택은 빌더에서 setPhysicalCameraId로)
-                        val parentId = selectedCamInfo.parentLogicalCameraId
-                        if (parentId != null) {
-                            CameraSelector.Builder()
-                                .addCameraFilter { cameraInfoList ->
-                                    @Suppress("UnsafeOptInUsageError")
-                                    val matched = cameraInfoList.filter { info ->
-                                        try { Camera2CameraInfo.from(info).cameraId == parentId }
-                                        catch (_: Exception) { false }
-                                    }
-                                    matched.ifEmpty { cameraInfoList.filter { it.lensFacing == lensFacing } }
-                                }
-                                .build()
-                        } else {
-                            CameraSelector.Builder().requireLensFacing(lensFacing).build()
-                        }
-                    }
-                    else -> {
-                        // 논리 카메라: ID로 직접 필터링
-                        CameraSelector.Builder()
-                            .addCameraFilter { cameraInfoList ->
-                                @Suppress("UnsafeOptInUsageError")
-                                val matched = cameraInfoList.filter { info ->
-                                    try { Camera2CameraInfo.from(info).cameraId == selectedCameraId }
-                                    catch (_: Exception) { false }
-                                }
-                                matched.ifEmpty { cameraInfoList.filter { it.lensFacing == lensFacing } }
-                            }
-                            .build()
-                    }
+                    lensFacing == CameraSelector.LENS_FACING_FRONT ->
+                        CameraSelector.DEFAULT_FRONT_CAMERA
+                    rearTelephotoLogicalId != null ->
+                        selectorByLogicalId(rearTelephotoLogicalId!!)
+                    rearTelephotoPhysParent != null ->
+                        selectorByLogicalId(rearTelephotoPhysParent!!)
+                    rearWideId != null ->
+                        selectorByLogicalId(rearWideId!!)
+                    else ->
+                        CameraSelector.DEFAULT_BACK_CAMERA
                 }
 
                 cameraProvider.unbindAll()
@@ -1169,7 +1184,6 @@ fun CameraScreen(
                     )
                     .build()
 
-                // Preview 빌더: 물리 카메라 선택 시 setPhysicalCameraId 적용
                 val previewBuilder = Preview.Builder()
                     .setResolutionSelector(resolutionSelector)
                 if (physicalIdToApply != null) {
@@ -1180,7 +1194,6 @@ fun CameraScreen(
                     it.setSurfaceProvider(view.surfaceProvider)
                 }
 
-                // ImageCapture 빌더: 물리 카메라 선택 시 setPhysicalCameraId 적용
                 val imageCaptureBuilder = ImageCapture.Builder()
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                     .setResolutionSelector(resolutionSelector)
@@ -1243,8 +1256,9 @@ fun CameraScreen(
         }, executor)
     }
 
-    // lensFacing, captureMode, selectedResolution, selectedCameraId 변경 시 카메라 재바인딩
-    LaunchedEffect(lensFacing, captureMode, selectedResolution, previewView, selectedCameraId) {
+    // lensFacing, captureMode, selectedResolution, 카메라ID 변경 시 재바인딩
+    LaunchedEffect(lensFacing, captureMode, selectedResolution, previewView,
+        rearTelephotoLogicalId, rearTelephotoPhysId, rearWideId) {
         isCameraReady = false
         previewView?.let { bindCamera(it) }
     }
@@ -1397,113 +1411,7 @@ fun CameraScreen(
                     )
                 }
                 
-                // 카메라 선택 버튼 (설정 아이콘 클릭 → 카메라 목록 팝업)
-                Box {
-                    IconButton(onClick = { showCameraSelector = !showCameraSelector }) {
-                        Icon(
-                            imageVector = Icons.Filled.Settings,
-                            contentDescription = "카메라 설정",
-                            tint = if (showCameraSelector) Color(0xFF9CD83B) else Color.White
-                        )
-                    }
-
-                    // 카메라 선택 드롭다운 패널
-                    if (showCameraSelector) {
-                        Box(
-                            modifier = Modifier
-                                .offset(x = (-160).dp, y = 48.dp)
-                                .zIndex(10f)
-                                .background(Color(0xEE1E1E1E), RoundedCornerShape(12.dp))
-                                .border(1.dp, Color(0xFF9CD83B), RoundedCornerShape(12.dp))
-                                .padding(vertical = 8.dp, horizontal = 4.dp)
-                                .width(180.dp)
-                        ) {
-                            Column {
-                                val currentFacingCameras = availableCameras.filter {
-                                    it.lensFacing == lensFacing
-                                }
-                                val facingLabel = if (lensFacing == CameraCharacteristics.LENS_FACING_FRONT)
-                                    "전면" else "후면"
-                                Text(
-                                    text = "$facingLabel 카메라 선택 (${currentFacingCameras.size}개)",
-                                    color = Color(0xFF9CD83B),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-                                )
-                                Spacer(Modifier.height(4.dp))
-                                currentFacingCameras.forEach { camInfo ->
-                                    val isSelected = camInfo.cameraId == selectedCameraId
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(
-                                                if (isSelected) Color(0x339CD83B)
-                                                else Color.Transparent
-                                            )
-                                            .clickable {
-                                                selectedCameraId = camInfo.cameraId
-                                                lensFacing = camInfo.lensFacing
-                                                showCameraSelector = false
-                                            }
-                                            .padding(horizontal = 12.dp, vertical = 10.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = if (camInfo.lensFacing == CameraCharacteristics.LENS_FACING_FRONT)
-                                                Icons.Filled.CameraFront
-                                            else
-                                                Icons.Filled.CameraRear,
-                                            contentDescription = null,
-                                            tint = if (isSelected) Color(0xFF9CD83B) else Color.White,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                        Spacer(Modifier.width(8.dp))
-                                        Column {
-                                            Text(
-                                                text = camInfo.label,
-                                                color = if (isSelected) Color(0xFF9CD83B) else Color.White,
-                                                fontSize = 13.sp,
-                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                                            )
-                                            val fMin = camInfo.focalLengths.minOrNull()
-                                            if (fMin != null) {
-                                                Text(
-                                                    text = "${"%.1f".format(fMin)}mm · ID ${camInfo.cameraId}",
-                                                    color = Color.Gray,
-                                                    fontSize = 10.sp
-                                                )
-                                            }
-                                        }
-                                        if (isSelected) {
-                                            Spacer(Modifier.weight(1f))
-                                            Icon(
-                                                imageVector = Icons.Filled.Check,
-                                                contentDescription = null,
-                                                tint = Color(0xFF9CD83B),
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
             }
-        }
-
-        // 카메라 선택 패널 외부 탭 시 닫기
-        if (showCameraSelector) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clickable(
-                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                        indication = null
-                    ) { showCameraSelector = false }
-            )
         }
 
         // 동영상 촬영 중 구역 수집 정보 표시 (사물/공간 모두) - 이동식 공간 촬영은 제외
@@ -1781,7 +1689,7 @@ fun CameraScreen(
                 }
             }
 
-            // 전면/후면 카메라 전환 버튼 (후면↔전면 첫 번째 카메라로 토글)
+            // 전면/후면 카메라 전환 버튼
             Icon(
                 imageVector = Icons.Filled.Cameraswitch,
                 contentDescription = "카메라 전환",
@@ -1789,19 +1697,10 @@ fun CameraScreen(
                 modifier = Modifier
                     .size(48.dp)
                     .clickable {
-                        val targetFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK)
+                        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK)
                             CameraSelector.LENS_FACING_FRONT
                         else
                             CameraSelector.LENS_FACING_BACK
-                        lensFacing = targetFacing
-                        // 전환된 방향의 대표 카메라 선택
-                        // 논리 카메라(isPhysical=false) 중 초점거리 3.5mm 근접 광각 주 카메라를 우선
-                        val facingCameras = availableCameras.filter { it.lensFacing == targetFacing }
-                        selectedCameraId = facingCameras
-                            .filter { !it.isPhysical }
-                            .minByOrNull { Math.abs((it.focalLengths.minOrNull() ?: 3f) - 3.5f) }
-                            ?.cameraId
-                            ?: facingCameras.firstOrNull()?.cameraId
                     }
             )
         }
@@ -2792,6 +2691,14 @@ fun GalleryScreen(
     var showBgRemoveDialog by remember { mutableStateOf(false) }
     var bgRemovePrompt by remember { mutableStateOf("") }
     var bgRemovePromptError by remember { mutableStateOf(false) }
+
+    // 3D 모델링 전송 팝업 상태
+    var show3DModelingDialog by remember { mutableStateOf(false) }
+    var modelingPromptText by remember { mutableStateOf("") }
+    var modelingPromptError by remember { mutableStateOf(false) }
+    var pending3DSourceTab by remember { mutableStateOf<LibraryTab?>(null) }
+    var pending3DGalleryUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pending3DDatasetFolders by remember { mutableStateOf<List<String>>(emptyList()) }
     var sam3ProgressPercent by remember { mutableStateOf(0) }
     var sam3ProgressMessage by remember { mutableStateOf("") }
     var sam3ResultMessage by remember { mutableStateOf<String?>(null) }
@@ -3151,55 +3058,12 @@ fun GalleryScreen(
                                                 uploadMessage = "선택된 폴더가 없습니다"
                                             }
                                             else -> {
-                                            isUploading = true
-                                            uploadProgress = 0 to 100
-                                            uploadMessage = "업로드 준비 중..."
-
-                                            CoroutineScope(Dispatchers.IO).launch {
-                                                try {
-                                                    val folderFiles = selectedDatasetFolders
-                                                        .map { File(it) }
-                                                        .filter { it.exists() && it.isDirectory }
-                                                    val zipFile = createZipFromFolders(
-                                                        context = context,
-                                                        folders = folderFiles,
-                                                        zipPrefix = "dataset"
-                                                    )
-                                                    val success = zipFile != null && uploadZipAndRunPipeline(
-                                                        context = context,
-                                                        zipFile = zipFile,
-                                                        onProgress = { p, msg ->
-                                                            CoroutineScope(Dispatchers.Main).launch {
-                                                                uploadProgress = p to 100
-                                                                uploadMessage = msg
-                                                            }
-                                                        }
-                                                    )
-
-                                                    withContext(Dispatchers.Main) {
-                                                        isUploading = false
-                                                        if (success) {
-                                                            uploadResultPopupMessage = "서버에 업로드가 완료되었습니다."
-                                                            showUploadResultPopup = true
-                                                            selectedDatasetFolders = emptySet()
-                                                            isDatasetEditMode = false
-                                                        } else {
-                                                            uploadResultPopupMessage =
-                                                                if (uploadMessage == noServerResponseMsg) noServerResponseMsg else "업로드 실패"
-                                                            showUploadResultPopup = true
-                                                            if (uploadMessage != noServerResponseMsg) {
-                                                                uploadMessage = "업로드 실패"
-                                                            }
-                                                        }
-                                                    }
-                                                } catch (e: Exception) {
-                                                    e.printStackTrace()
-                                                    withContext(Dispatchers.Main) {
-                                                        isUploading = false
-                                                        uploadMessage = "업로드 실패"
-                                                    }
-                                                }
-                                            }
+                                                // 3D 모델링 프롬프트 팝업을 먼저 표시
+                                                pending3DSourceTab = LibraryTab.DATASET
+                                                pending3DDatasetFolders = selectedDatasetFolders.toList()
+                                                modelingPromptText = ""
+                                                modelingPromptError = false
+                                                show3DModelingDialog = true
                                             }
                                         }
                                     }
@@ -3334,55 +3198,12 @@ fun GalleryScreen(
                                         uploadMessage = "선택된 미디어가 없습니다"
                                     }
                                     else -> {
-                                    // 업로드 시작
-                                    isUploading = true
-                                    uploadProgress = 0 to 100
-                                    uploadMessage = "업로드 준비 중..."
-
-                                    // 백그라운드에서 업로드 실행
-                                    CoroutineScope(Dispatchers.IO).launch {
-                                        val itemsToUpload = selectedItems.toList()
-                                        try {
-                                            val zipFile = createZipFromUris(
-                                                context = context,
-                                                uris = itemsToUpload,
-                                                zipPrefix = "media"
-                                            )
-                                            val success = zipFile != null && uploadZipAndRunPipeline(
-                                                context = context,
-                                                zipFile = zipFile,
-                                                onProgress = { p, msg ->
-                                                    CoroutineScope(Dispatchers.Main).launch {
-                                                        uploadProgress = p to 100
-                                                        uploadMessage = msg
-                                                    }
-                                                }
-                                            )
-
-                                            withContext(Dispatchers.Main) {
-                                                isUploading = false
-                                                if (success) {
-                                                        uploadResultPopupMessage = "서버에 업로드가 완료되었습니다."
-                                                        showUploadResultPopup = true
-                                                    selectedItems = emptySet()
-                                                    isEditMode = false
-                                                } else {
-                                                        uploadResultPopupMessage =
-                                                            if (uploadMessage == noServerResponseMsg) noServerResponseMsg else "업로드 실패"
-                                                        showUploadResultPopup = true
-                                                        if (uploadMessage != noServerResponseMsg) {
-                                                            uploadMessage = "업로드 실패"
-                                                        }
-                                                }
-                                            }
-                                        } catch (e: Exception) {
-                                            e.printStackTrace()
-                                            withContext(Dispatchers.Main) {
-                                                isUploading = false
-                                                uploadMessage = "업로드 실패"
-                                            }
-                                        }
-                                    }
+                                        // 3D 모델링 프롬프트 팝업을 먼저 표시
+                                        pending3DSourceTab = LibraryTab.GALLERY
+                                        pending3DGalleryUris = selectedItems.toList()
+                                        modelingPromptText = ""
+                                        modelingPromptError = false
+                                        show3DModelingDialog = true
                                     }
                                 }
                             }
@@ -4051,17 +3872,11 @@ fun GalleryScreen(
                                                     }
                                                 }
                                             }
-                                            // 결과를 시스템 갤러리(사진 앱)에도 저장
-                                            if (savedUris.isNotEmpty()) {
-                                                sam3ProgressPercent = 97
-                                                sam3ProgressMessage = "갤러리에 저장 중..."
-                                                exportImagesToSystemGallery(context, savedUris)
-                                            }
                                             sam3ProgressPercent = 100
                                             isBgRemoving = false
                                             sam3ResultMessage = when {
                                                 successCount > 0 && failCount == 0 ->
-                                                    "배경 제거 완료\n${successCount}장이 갤러리에 저장되었습니다."
+                                                    "배경 제거 완료\n${successCount}장이 앱 갤러리에 저장되었습니다."
                                                 successCount > 0 ->
                                                     "배경 제거 완료\n${successCount}장 성공, ${failCount}장 실패"
                                                 else ->
@@ -4072,6 +3887,213 @@ fun GalleryScreen(
                                                 isEditMode = false
                                                 onImageDeleted()
                                             }
+                                        }
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3D 모델링 프롬프트 입력 다이얼로그
+        if (show3DModelingDialog) {
+            val isValid3DPrompt = modelingPromptText.isNotEmpty() && !modelingPromptError
+            val noServerResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
+
+            Dialog(onDismissRequest = { show3DModelingDialog = false }) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
+                        .padding(20.dp)
+                ) {
+                    Column {
+                        Text(
+                            text = "3D 모델링",
+                            color = Color(0xFF9CD83B),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "어떤 사물을 3D 모델링하시겠습니까?",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        androidx.compose.material3.OutlinedTextField(
+                            value = modelingPromptText,
+                            onValueChange = { input ->
+                                modelingPromptText = input
+                                // 영문자, 숫자, 스페이스, 특수기호(ASCII 0x20~0x7E)만 허용
+                                modelingPromptError = input.isNotEmpty() && !input.all { it.code in 0x20..0x7E }
+                            },
+                            placeholder = {
+                                Text(
+                                    text = "예: gundam figure, white cup",
+                                    color = Color.White.copy(alpha = 0.35f),
+                                    fontSize = 13.sp
+                                )
+                            },
+                            singleLine = true,
+                            isError = modelingPromptError,
+                            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedBorderColor = if (modelingPromptError) Color(0xFFFF5252) else Color(0xFF9CD83B),
+                                unfocusedBorderColor = if (modelingPromptError) Color(0xFFFF5252) else Color.White.copy(alpha = 0.4f),
+                                cursorColor = Color(0xFF9CD83B),
+                                focusedContainerColor = Color(0xFF1E1E1E),
+                                unfocusedContainerColor = Color(0xFF1E1E1E),
+                                errorBorderColor = Color(0xFFFF5252),
+                                errorContainerColor = Color(0xFF1E1E1E),
+                                errorTextColor = Color.White,
+                                errorCursorColor = Color(0xFFFF5252)
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        if (modelingPromptError) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "영어, 숫자, 특수기호만 입력 가능합니다 (한국어 불가)",
+                                color = Color(0xFFFF5252),
+                                fontSize = 12.sp
+                            )
+                        } else {
+                            Spacer(modifier = Modifier.height(6.dp + 18.sp.value.dp))
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            Text(
+                                text = "취소",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                                    .clickable { show3DModelingDialog = false }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "전송",
+                                color = if (isValid3DPrompt) Color.White else Color.White.copy(alpha = 0.35f),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        if (isValid3DPrompt) Color(0xFF1B4F8A)
+                                        else Color(0xFF1B4F8A).copy(alpha = 0.3f)
+                                    )
+                                    .clickable(enabled = isValid3DPrompt) {
+                                        val promptSnapshot = modelingPromptText.trim()
+                                        show3DModelingDialog = false
+                                        uploadSourceTab = pending3DSourceTab
+
+                                        when (pending3DSourceTab) {
+                                            LibraryTab.GALLERY -> {
+                                                val urisSnapshot = pending3DGalleryUris
+                                                isUploading = true
+                                                uploadProgress = 0 to 100
+                                                uploadMessage = "업로드 준비 중..."
+                                                CoroutineScope(Dispatchers.IO).launch {
+                                                    try {
+                                                        val zipFile = createZipFromUris(
+                                                            context = context,
+                                                            uris = urisSnapshot,
+                                                            zipPrefix = "media"
+                                                        )
+                                                        val success = zipFile != null && uploadZipAndRunPipeline(
+                                                            context = context,
+                                                            zipFile = zipFile,
+                                                            prompt = promptSnapshot,
+                                                            onProgress = { p, msg ->
+                                                                CoroutineScope(Dispatchers.Main).launch {
+                                                                    uploadProgress = p to 100
+                                                                    uploadMessage = msg
+                                                                }
+                                                            }
+                                                        )
+                                                        withContext(Dispatchers.Main) {
+                                                            isUploading = false
+                                                            if (success) {
+                                                                uploadResultPopupMessage = "서버에 업로드가 완료되었습니다."
+                                                                showUploadResultPopup = true
+                                                                selectedItems = emptySet()
+                                                                isEditMode = false
+                                                            } else {
+                                                                uploadResultPopupMessage =
+                                                                    if (uploadMessage == noServerResponseMsg) noServerResponseMsg else "업로드 실패"
+                                                                showUploadResultPopup = true
+                                                                if (uploadMessage != noServerResponseMsg) uploadMessage = "업로드 실패"
+                                                            }
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        e.printStackTrace()
+                                                        withContext(Dispatchers.Main) {
+                                                            isUploading = false
+                                                            uploadMessage = "업로드 실패"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            LibraryTab.DATASET -> {
+                                                val foldersSnapshot = pending3DDatasetFolders
+                                                isUploading = true
+                                                uploadProgress = 0 to 100
+                                                uploadMessage = "업로드 준비 중..."
+                                                CoroutineScope(Dispatchers.IO).launch {
+                                                    try {
+                                                        val folderFiles = foldersSnapshot
+                                                            .map { File(it) }
+                                                            .filter { it.exists() && it.isDirectory }
+                                                        val zipFile = createZipFromFolders(
+                                                            context = context,
+                                                            folders = folderFiles,
+                                                            zipPrefix = "dataset"
+                                                        )
+                                                        val success = zipFile != null && uploadZipAndRunPipeline(
+                                                            context = context,
+                                                            zipFile = zipFile,
+                                                            prompt = promptSnapshot,
+                                                            onProgress = { p, msg ->
+                                                                CoroutineScope(Dispatchers.Main).launch {
+                                                                    uploadProgress = p to 100
+                                                                    uploadMessage = msg
+                                                                }
+                                                            }
+                                                        )
+                                                        withContext(Dispatchers.Main) {
+                                                            isUploading = false
+                                                            if (success) {
+                                                                uploadResultPopupMessage = "서버에 업로드가 완료되었습니다."
+                                                                showUploadResultPopup = true
+                                                                selectedDatasetFolders = emptySet()
+                                                                isDatasetEditMode = false
+                                                            } else {
+                                                                uploadResultPopupMessage =
+                                                                    if (uploadMessage == noServerResponseMsg) noServerResponseMsg else "업로드 실패"
+                                                                showUploadResultPopup = true
+                                                                if (uploadMessage != noServerResponseMsg) uploadMessage = "업로드 실패"
+                                                            }
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        e.printStackTrace()
+                                                        withContext(Dispatchers.Main) {
+                                                            isUploading = false
+                                                            uploadMessage = "업로드 실패"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            else -> {}
                                         }
                                     }
                                     .padding(horizontal = 16.dp, vertical = 8.dp)
@@ -4286,295 +4308,1267 @@ fun MediaDetailScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // 내부 변경 가능한 리스트 (삭제 시 즉시 반영)
+    val mutableMediaList = remember(mediaList) { mediaList.toMutableStateList() }
     var currentIndex by remember { mutableStateOf(initialIndex.coerceIn(0, mediaList.size - 1)) }
 
-    // 삼성 갤러리 방식: 길게 누르면 객체 분리
-    var objectExtractionLoading by remember { mutableStateOf(false) }
-    var objectExtractionResult by remember { mutableStateOf<Bitmap?>(null) }
-    var objectExtractionError by remember { mutableStateOf<String?>(null) }
-    var imageSize by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    // 핀치 줌 / 패닝 상태
+    var scale by remember { mutableStateOf(1f) }
+    var offsetX by remember { mutableStateOf(0f) }
+    var offsetY by remember { mutableStateOf(0f) }
 
-    // 인덱스 변경 시 콜백 호출
+    // 필름스트립 스크롤 상태
+    val filmstripState = rememberLazyListState()
+
+    // 옵션 바 상태
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    var actionMessage by remember { mutableStateOf<String?>(null) }
+    var showImageEdit by remember { mutableStateOf(false) }
+
+    // 인덱스 변경 시 콜백 + 줌 리셋 + 필름스트립 자동 스크롤
     LaunchedEffect(currentIndex) {
         onMediaChanged(currentIndex)
-    }
-
-    val currentMediaUri = if (currentIndex in mediaList.indices) mediaList[currentIndex] else null
-    val isVideo = currentMediaUri?.let { isVideoUri(context, it) } ?: false
-
-    // 이미지 크기 로드 + ML Kit 모델 사전 준비 (좌표 변환 및 첫 사용 지연 방지)
-    LaunchedEffect(currentMediaUri) {
-        if (currentMediaUri != null && !isVideoUri(context, currentMediaUri!!)) {
-            imageSize = withContext(Dispatchers.IO) { getImageDimensions(context, currentMediaUri!!) }
-            // InteractiveSegmenter 모델 사전 로드 (첫 사용 지연 방지)
-            withContext(Dispatchers.IO) { BackgroundRemovalProcessor.warmUpSubjectSegmentation(context) }
-        } else {
-            imageSize = null
+        scale = 1f; offsetX = 0f; offsetY = 0f
+        if (mutableMediaList.size > 1) {
+            filmstripState.animateScrollToItem(maxOf(0, currentIndex - 2))
         }
     }
 
-    BackHandler {
-        onBack()
+    // 액션 메시지 3초 후 자동 소거
+    LaunchedEffect(actionMessage) {
+        if (actionMessage != null) {
+            kotlinx.coroutines.delay(3000)
+            actionMessage = null
+        }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        // 현재 미디어 표시
-        if (currentMediaUri != null) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    // imageSize를 키에 포함: 이미지 크기 로드 완료 후 제스처 핸들러 재등록
-                    .pointerInput(currentMediaUri, isVideo, imageSize) {
-                        if (!isVideo && imageSize != null) {
-                            detectTapGestures(
-                                onLongPress = { offset ->
-                                    // 처리 중이거나 결과 다이얼로그가 표시 중이면 무시
-                                    // (표시 중인 비트맵을 recycle하면 렌더링 크래시 발생)
-                                    if (objectExtractionLoading || objectExtractionResult != null) return@detectTapGestures
-                                    val (boxW, boxH) = size.width to size.height
-                                    val (imgW, imgH) = imageSize!!
-                                    val scale = minOf(boxW / imgW, boxH / imgH)
-                                    val displayW = imgW * scale
-                                    val displayH = imgH * scale
-                                    val offsetX = (boxW - displayW) / 2
-                                    val offsetY = (boxH - displayH) / 2
-                                    val tx = offset.x
-                                    val ty = offset.y
-                                    if (tx >= offsetX && tx < offsetX + displayW && ty >= offsetY && ty < offsetY + displayH) {
-                                        val imgX = (tx - offsetX) / scale
-                                        val imgY = (ty - offsetY) / scale
-                                        val normX = (imgX / imgW).coerceIn(0f, 1f)
-                                        val normY = (imgY / imgH).coerceIn(0f, 1f)
-                                        val capturedUri = currentMediaUri
-                                        // 로딩 플래그를 scope.launch 전에 동기 설정 (레이스 컨디션 방지)
-                                        objectExtractionLoading = true
-                                        objectExtractionError = null
-                                        scope.launch {
-                                            try {
-                                                // 512px로 로드 (ML Kit 네이티브 메모리 절약)
-                                                val bitmap = withContext(Dispatchers.IO) {
-                                                    decodeBitmapWithMaxDimension(context, capturedUri!!, 512)
-                                                }
-                                                if (bitmap != null) {
-                                                    val result = withContext(Dispatchers.IO) {
-                                                        BackgroundRemovalProcessor.removeBackgroundWithPoint(
-                                                            context = context,
-                                                            sourceBitmap = bitmap,
-                                                            normX = normX,
-                                                            normY = normY
-                                                        )
-                                                    }
-                                                    bitmap.recycle()
-                                                    when (result) {
-                                                        is BackgroundRemovalProcessor.Result.Success -> {
-                                                            objectExtractionResult = result.bitmap
-                                                        }
-                                                        is BackgroundRemovalProcessor.Result.Error -> {
-                                                            objectExtractionError = result.message
-                                                        }
-                                                    }
-                                                } else {
-                                                    objectExtractionError = "이미지를 로드할 수 없습니다."
-                                                }
-                                            } catch (e: OutOfMemoryError) {
-                                                objectExtractionError = "메모리 부족입니다.\n잠시 후 다시 시도해 주세요."
-                                            } catch (e: Exception) {
-                                                objectExtractionError = "처리 중 오류가 발생했습니다.\n(${e.message ?: "알 수 없음"})"
-                                            } finally {
-                                                objectExtractionLoading = false
-                                            }
-                                        }
-                                    }
-                                }
-                            )
-                        }
-                    }
-                    .pointerInput(Unit) {
-                        var totalDragX = 0f
-                        detectDragGestures(
-                            onDragEnd = {
-                                val threshold = size.width * 0.3f
-                                if (totalDragX > threshold && currentIndex > 0) {
-                                    currentIndex--
-                                } else if (totalDragX < -threshold && currentIndex < mediaList.size - 1) {
-                                    currentIndex++
-                                }
-                                totalDragX = 0f
-                            },
-                            onDrag = { _: PointerInputChange, dragAmount: Offset ->
-                                totalDragX += dragAmount.x
-                            }
-                        )
-                    }
-            ) {
-                if (isVideo && currentMediaUri != null) {
-                    // 동영상 재생 - LaunchedEffect를 사용하여 URI 변경 시 VideoView 업데이트
+    val currentMediaUri = if (currentIndex in mutableMediaList.indices) mutableMediaList[currentIndex] else null
+    val isVideo = currentMediaUri?.let { isVideoUri(context, it) } ?: false
+
+    BackHandler { onBack() }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        // ─── 메인 미디어 영역 (필름스트립 + 옵션 바 위쪽) ────────────────────────
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = if (mutableMediaList.size > 1) 168.dp else 64.dp)
+                .fillMaxHeight()
+        ) {
+            if (currentMediaUri != null) {
+                if (isVideo) {
+                    // 동영상 재생
                     var videoViewRef by remember { mutableStateOf<VideoView?>(null) }
-                    
                     LaunchedEffect(currentMediaUri) {
                         videoViewRef?.let { view ->
                             view.stopPlayback()
                             view.setVideoURI(currentMediaUri)
-                            val mediaController = MediaController(context)
-                            mediaController.setAnchorView(view)
-                            view.setMediaController(mediaController)
+                            val mc = MediaController(context)
+                            mc.setAnchorView(view)
+                            view.setMediaController(mc)
                             view.start()
                         }
                     }
-                    
                     AndroidView(
                         factory = { ctx ->
                             VideoView(ctx).apply {
                                 setVideoURI(currentMediaUri)
-                                val mediaController = MediaController(ctx)
-                                mediaController.setAnchorView(this)
-                                setMediaController(mediaController)
+                                val mc = MediaController(ctx)
+                                mc.setAnchorView(this)
+                                setMediaController(mc)
                                 start()
                                 videoViewRef = this
                             }
                         },
                         modifier = Modifier.fillMaxSize(),
-                        update = { view ->
-                            videoViewRef = view
-                        }
+                        update = { view -> videoViewRef = view }
                     )
                 } else {
-                    // 이미지 보기 (삼성 갤러리 방식: 사물을 길게 누르면 객체 분리)
-                    Image(
-                        painter = rememberAsyncImagePainter(currentMediaUri),
-                        contentDescription = "미디어 상세",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Fit
-                    )
-                    if (!objectExtractionLoading) {
-                        Text(
-                            text = "사물을 길게 누르면 객체 분리",
-                            color = Color.White.copy(alpha = 0.7f),
-                            fontSize = 12.sp,
+                    // 이미지: 핀치 줌(2손가락) + 패닝(줌된 상태) + 스와이프 내비게이션(1손가락·줌 해제)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(currentIndex) {
+                                // size는 PointerInputScope의 프로퍼티 → awaitPointerEventScope 진입 전 캡처
+                                val viewWidth  = size.width.toFloat()
+                                val viewHeight = size.height.toFloat()
+
+                                // 오프셋 경계 클램핑 헬퍼:
+                                // scale 배율에서 이미지가 뷰 밖으로 나가지 않도록 최대 이동 범위를 제한
+                                // maxOffset = (scale - 1) × viewDim / 2
+                                fun clampOffsets() {
+                                    val maxX = ((scale - 1f) * viewWidth  / 2f).coerceAtLeast(0f)
+                                    val maxY = ((scale - 1f) * viewHeight / 2f).coerceAtLeast(0f)
+                                    offsetX = offsetX.coerceIn(-maxX, maxX)
+                                    offsetY = offsetY.coerceIn(-maxY, maxY)
+                                }
+
+                                // 단일 awaitPointerEventScope 블록으로 핀치줌+스와이프를 모두 처리
+                                awaitPointerEventScope {
+                                    while (true) {
+                                        awaitFirstDown(requireUnconsumed = false)
+
+                                        var dragX = 0f
+                                        var pinching = false
+                                        var prevDist = 0f
+
+                                        // 손가락이 모두 떼어질 때까지 이벤트 처리
+                                        while (true) {
+                                            val event = awaitPointerEvent()
+                                            val pressed = event.changes.filter { it.pressed }
+                                            if (pressed.isEmpty()) break
+
+                                            if (pressed.size >= 2) {
+                                                // ─ 두 손가락: 핀치 줌 + 패닝 ─
+                                                pinching = true
+                                                val p1 = pressed[0]; val p2 = pressed[1]
+                                                val dx = p1.position.x - p2.position.x
+                                                val dy = p1.position.y - p2.position.y
+                                                val dist = kotlin.math.sqrt(dx * dx + dy * dy)
+                                                if (prevDist > 0f && dist > 0f) {
+                                                    scale = (scale * dist / prevDist).coerceIn(1f, 5f)
+                                                    if (scale > 1f) {
+                                                        val cx  = (p1.position.x + p2.position.x) / 2f
+                                                        val pcx = (p1.previousPosition.x + p2.previousPosition.x) / 2f
+                                                        val cy  = (p1.position.y + p2.position.y) / 2f
+                                                        val pcy = (p1.previousPosition.y + p2.previousPosition.y) / 2f
+                                                        offsetX += cx - pcx
+                                                        offsetY += cy - pcy
+                                                    } else {
+                                                        offsetX = 0f; offsetY = 0f
+                                                    }
+                                                }
+                                                prevDist = dist
+                                                // 핀치 후 경계 클램핑 적용
+                                                clampOffsets()
+                                                pressed.forEach { it.consume() }
+
+                                            } else if (pressed.size == 1 && !pinching) {
+                                                // ─ 한 손가락: 줌 상태이면 패닝, 아니면 내비게이션 스와이프 ─
+                                                val delta = pressed[0].position - pressed[0].previousPosition
+                                                if (scale > 1.05f) {
+                                                    offsetX += delta.x
+                                                    offsetY += delta.y
+                                                    // 패닝 후 경계 클램핑 적용
+                                                    clampOffsets()
+                                                } else {
+                                                    dragX += delta.x
+                                                }
+                                                pressed[0].consume()
+                                            }
+                                        }
+
+                                        // 스와이프 내비게이션 판정 (핀치 없음 + 줌 해제 상태)
+                                        if (!pinching && scale <= 1.05f) {
+                                            val threshold = viewWidth * 0.3f
+                                            when {
+                                                dragX > threshold && currentIndex > 0 -> currentIndex--
+                                                dragX < -threshold && currentIndex < mediaList.size - 1 -> currentIndex++
+                                            }
+                                        }
+                                        // scale 1 미만 방지 + 최종 경계 클램핑
+                                        if (scale < 1f) { scale = 1f; offsetX = 0f; offsetY = 0f }
+                                        else clampOffsets()
+                                    }
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Image(
+                            painter = rememberAsyncImagePainter(currentMediaUri),
+                            contentDescription = "미디어 상세",
                             modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(bottom = 48.dp)
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    scaleX = scale
+                                    scaleY = scale
+                                    translationX = offsetX
+                                    translationY = offsetY
+                                },
+                            contentScale = ContentScale.Fit
                         )
                     }
                 }
             }
         }
 
-        // 페이지 인디케이터 (하단 중앙)
-        if (mediaList.size > 1) {
-            Text(
-                text = "${currentIndex + 1} / ${mediaList.size}",
-                color = Color.White,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
+        // ─── 하단: 필름스트립 + 옵션 바 ────────────────────────────────────────
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+        ) {
+            // 필름스트립 (2장 이상일 때)
+            if (mutableMediaList.size > 1) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.Black)
+                        .padding(vertical = 8.dp)
+                ) {
+                    LazyRow(
+                        state = filmstripState,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(88.dp),
+                        contentPadding = PaddingValues(horizontal = 20.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        itemsIndexed(mutableMediaList) { idx, uri ->
+                            val isCurrent = idx == currentIndex
+                            Box(
+                                modifier = Modifier
+                                    .size(if (isCurrent) 74.dp else 56.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .border(
+                                        width = if (isCurrent) 2.dp else 0.dp,
+                                        color = if (isCurrent) Color(0xFF9CD83B) else Color.Transparent,
+                                        shape = RoundedCornerShape(6.dp)
+                                    )
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null
+                                    ) {
+                                        scope.launch { currentIndex = idx }
+                                    }
+                            ) {
+                                Image(
+                                    painter = rememberAsyncImagePainter(uri),
+                                    contentDescription = null,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop,
+                                    alpha = if (isCurrent) 1f else 0.55f
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ─── 옵션 바 (항상 표시) ──────────────────────────────────────────────
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.Black)
+                    .padding(vertical = 14.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 이미지 편집 (연필 아이콘)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { if (currentMediaUri != null && !isVideo) showImageEdit = true },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "이미지 편집",
+                        tint = Color.White,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+                // 구분선
+                Box(modifier = Modifier.width(0.5.dp).height(28.dp).background(Color(0xFF444444)))
+                // 2차 사물 배경 분리 (브러시 아이콘)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { /* TODO: 2차 사물 배경 분리 */ },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Brush,
+                        contentDescription = "2차 사물 배경 분리",
+                        tint = Color.White,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+                // 구분선
+                Box(modifier = Modifier.width(0.5.dp).height(28.dp).background(Color(0xFF444444)))
+                // 이미지 내보내기 (업로드 아이콘)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            currentMediaUri?.let { uri ->
+                                scope.launch {
+                                    val result = exportImagesToSystemGallery(context, listOf(uri))
+                                    actionMessage = if (result.successCount > 0) "갤러리에 내보냈습니다" else "내보내기 실패"
+                                }
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FileUpload,
+                        contentDescription = "이미지 내보내기",
+                        tint = Color.White,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+                // 구분선
+                Box(modifier = Modifier.width(0.5.dp).height(28.dp).background(Color(0xFF444444)))
+                // 이미지 삭제 (휴지통 아이콘)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { showDeleteConfirm = true },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "이미지 삭제",
+                        tint = Color.White,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+            }
+        }
+
+        // 액션 메시지 토스트 (내보내기 결과 등)
+        actionMessage?.let { msg ->
+            Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .padding(bottom = 16.dp)
+                    .padding(bottom = 180.dp)
+                    .background(Color(0xCC000000), RoundedCornerShape(20.dp))
+                    .padding(horizontal = 20.dp, vertical = 10.dp)
+            ) {
+                Text(msg, color = Color.White, fontSize = 14.sp)
+            }
+        }
+
+        // 이미지 편집 화면: 외부 Box 안에서 오버레이로 표시해야 전체 화면 덮기 가능
+        if (showImageEdit && currentMediaUri != null) {
+            ImageEditScreen(
+                imageUri = currentMediaUri,
+                onBack = { showImageEdit = false },
+                onSaved = { newUri ->
+                    if (newUri != currentMediaUri) {
+                        mutableMediaList[currentIndex] = newUri
+                    }
+                    onGalleryUpdated()
+                    showImageEdit = false
+                }
+            )
+        }
+    }
+
+    // 삭제 확인 다이얼로그
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("이미지 삭제") },
+            text = { Text("이 이미지를 삭제하시겠습니까?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDeleteConfirm = false
+                    currentMediaUri?.let { uri ->
+                        scope.launch {
+                            try {
+                                val file = java.io.File(uri.path ?: "")
+                                if (file.exists()) file.delete()
+                            } catch (e: Exception) { e.printStackTrace() }
+                            val removedIdx = currentIndex
+                            mutableMediaList.removeAt(removedIdx)
+                            if (mutableMediaList.isEmpty()) {
+                                onGalleryUpdated()
+                                onBack()
+                            } else {
+                                currentIndex = removedIdx.coerceIn(0, mutableMediaList.size - 1)
+                                onGalleryUpdated()
+                            }
+                        }
+                    }
+                }) {
+                    Text("삭제", color = Color(0xFFFF6B6B))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) {
+                    Text("취소", color = Color(0xFFAAAAAA))
+                }
+            },
+            containerColor = Color(0xFF2A2A2A),
+            titleContentColor = Color.White,
+            textContentColor = Color(0xFFCCCCCC)
+        )
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 자르기 모드 지원 타입
+// ──────────────────────────────────────────────────────────────────────────────
+private enum class CropHandle { NONE, MOVE, NW, NE, SW, SE, N, E, S, W }
+
+private data class PendingCropData(
+    val left: Float,
+    val top: Float,
+    val width: Float,
+    val height: Float,
+    val imgAreaTopPx: Float,
+    val imgAreaHeightPx: Float,
+    val containerW: Float,
+    val containerH: Float,
+    val cropZoom: Float = 1f,
+    val cropPanX: Float = 0f,
+    val cropPanY: Float = 0f
+)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 이미지 편집 화면
+// ──────────────────────────────────────────────────────────────────────────────
+@Composable
+fun ImageEditScreen(
+    imageUri: Uri,
+    onBack: () -> Unit,
+    onSaved: (Uri) -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // 변환 상태
+    var buttonRotation by remember { mutableStateOf(0f) }
+    var dialDegrees    by remember { mutableStateOf(0f) }
+    var isFlipped      by remember { mutableStateOf(false) }
+    var pendingCrop    by remember { mutableStateOf<PendingCropData?>(null) }
+    var isCropMode     by remember { mutableStateOf(false) }
+    // 자르기 모드 전용 줌/패닝 상태
+    var cropZoom  by remember { mutableStateOf(1f) }
+    var cropPanX  by remember { mutableStateOf(0f) }
+    var cropPanY  by remember { mutableStateOf(0f) }
+
+    val totalRotation = buttonRotation + dialDegrees
+    val hasChanges    = buttonRotation != 0f || dialDegrees != 0f || isFlipped || pendingCrop != null
+
+    var showSaveDialog by remember { mutableStateOf(false) }
+    var isSaving       by remember { mutableStateOf(false) }
+
+    fun requestBack() { if (hasChanges) showSaveDialog = true else onBack() }
+
+    BackHandler { requestBack() }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        // ── 메인 이미지 (자르기 모드 여부에 따라 하단 패딩 다름) ──
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 56.dp, bottom = if (isCropMode) 60.dp else 148.dp)
+                .fillMaxHeight(),
+            contentAlignment = Alignment.Center
+        ) {
+            Image(
+                painter = rememberAsyncImagePainter(imageUri),
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        rotationZ    = totalRotation
+                        val flipSign = if (isFlipped) -1f else 1f
+                        scaleX       = flipSign * if (isCropMode) cropZoom else 1f
+                        scaleY       = if (isCropMode) cropZoom else 1f
+                        translationX = if (isCropMode) cropPanX else 0f
+                        translationY = if (isCropMode) cropPanY else 0f
+                    },
+                contentScale = ContentScale.Fit
             )
         }
 
-        // 객체 분리 중 로딩
-        if (objectExtractionLoading) {
+        // ── 상단 바: X | 이미지 편집 | 원본 복원  저장 ──
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .fillMaxWidth()
+                .background(Color.Black)
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = { requestBack() }) {
+                Icon(Icons.Default.Close, contentDescription = "닫기", tint = Color.White)
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            // 원본 복원 버튼
+            TextButton(
+                onClick = {
+                    buttonRotation = 0f
+                    dialDegrees    = 0f
+                    isFlipped      = false
+                },
+                enabled = hasChanges
+            ) {
+                Text(
+                    "원본 복원",
+                    color    = if (hasChanges) Color(0xFFCCCCCC) else Color(0xFF555555),
+                    fontSize = 14.sp
+                )
+            }
+            // 저장 버튼
+            TextButton(
+                onClick  = { showSaveDialog = true },
+                enabled  = hasChanges
+            ) {
+                Text(
+                    "저장",
+                    color      = if (hasChanges) Color.White else Color(0xFF555555),
+                    fontSize   = 14.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+
+        // ── 하단: 다이얼 바 + 기능 버튼 (자르기 모드가 아닐 때만) ──
+        if (!isCropMode) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Color.Black)
+            ) {
+                EditDialBar(
+                    degrees = dialDegrees,
+                    onDegreesChanged = { dialDegrees = it }
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.Black)
+                        .padding(vertical = 16.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    EditActionButton(icon = Icons.Default.RotateLeft, label = "회전") {
+                        buttonRotation = ((buttonRotation - 90f) % 360f + 360f) % 360f
+                    }
+                    EditActionButton(icon = Icons.Default.Flip, label = "좌우반전") {
+                        isFlipped = !isFlipped
+                    }
+                    EditActionButton(icon = Icons.Default.Crop, label = "자르기") {
+                        isCropMode = true
+                    }
+                    EditActionButton(icon = Icons.Default.AutoFixHigh, label = "누끼따기") {
+                        /* TODO: 누끼따기 */
+                    }
+                }
+            }
+        }
+
+        // ── 자르기 모드 오버레이 ──
+        if (isCropMode) {
+            CropModeOverlay(
+                imageUri          = imageUri,
+                topBarDp          = 56.dp,
+                bottomBarDp       = 60.dp,
+                buttonRotation    = buttonRotation,
+                cropZoom          = cropZoom,
+                cropPanX          = cropPanX,
+                cropPanY          = cropPanY,
+                onZoomChange      = { z, px, py ->
+                    cropZoom = z; cropPanX = px; cropPanY = py
+                },
+                onConfirm         = { crop ->
+                    pendingCrop    = crop
+                    isCropMode     = false
+                    cropZoom = 1f; cropPanX = 0f; cropPanY = 0f
+                    showSaveDialog = true
+                },
+                onRestoreOriginal = {
+                    pendingCrop    = null
+                    buttonRotation = 0f
+                    dialDegrees    = 0f
+                    isFlipped      = false
+                    cropZoom = 1f; cropPanX = 0f; cropPanY = 0f
+                    isCropMode     = false
+                },
+                onCancel = {
+                    cropZoom = 1f; cropPanX = 0f; cropPanY = 0f
+                    isCropMode = false
+                }
+            )
+        }
+
+        // 저장 중 오버레이
+        if (isSaving) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .padding(32.dp),
+                    .background(Color.Black.copy(alpha = 0.65f)),
                 contentAlignment = Alignment.Center
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(color = Color(0xFF9CD83B))
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text("객체 경계 추론 중...", color = Color.White, fontSize = 16.sp)
+                androidx.compose.material3.CircularProgressIndicator(color = Color(0xFF9CD83B))
+            }
+        }
+    }
+
+    // ── 저장 확인 다이얼로그 ──
+    if (showSaveDialog) {
+        androidx.compose.ui.window.Dialog(onDismissRequest = { showSaveDialog = false }) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF2A2A2A), RoundedCornerShape(16.dp))
+                    .padding(horizontal = 8.dp, vertical = 20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    "변경된 이미지를 저장하시겠습니까?",
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+                Spacer(Modifier.height(16.dp))
+                HorizontalDivider(color = Color(0xFF444444))
+                // 편집 이미지로 저장 (원본 덮어쓰기)
+                TextButton(
+                    onClick = {
+                        showSaveDialog = false
+                        scope.launch {
+                            isSaving = true
+                            val saved = saveEditedImage(context, imageUri, totalRotation, isFlipped, overwrite = true, cropData = pendingCrop)
+                            isSaving = false
+                            onSaved(saved ?: imageUri)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("편집 이미지로 저장", color = Color(0xFF9CD83B), fontSize = 15.sp)
+                }
+                HorizontalDivider(color = Color(0xFF444444))
+                // 복사본으로 저장
+                TextButton(
+                    onClick = {
+                        showSaveDialog = false
+                        scope.launch {
+                            isSaving = true
+                            val saved = saveEditedImage(context, imageUri, totalRotation, isFlipped, overwrite = false, cropData = pendingCrop)
+                            isSaving = false
+                            onSaved(saved ?: imageUri)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("복사본으로 저장", color = Color.White, fontSize = 15.sp)
+                }
+                HorizontalDivider(color = Color(0xFF444444))
+                // 저장하지 않음
+                TextButton(
+                    onClick = { showSaveDialog = false; onBack() },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("저장하지 않음", color = Color(0xFFAAAAAA), fontSize = 15.sp)
                 }
             }
         }
+    }
+}
 
-        // 객체 분리 결과 다이얼로그
-        if (objectExtractionResult != null) {
-            Dialog(onDismissRequest = {
-                objectExtractionResult?.recycle()
-                objectExtractionResult = null
-            }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                        .padding(20.dp)
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("객체 분리 완료", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.height(12.dp))
-                        objectExtractionResult?.let { bmp ->
-                            Image(
-                                bitmap = bmp.asImageBitmap(),
-                                contentDescription = "분리된 객체",
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(max = 400.dp)
-                                    .clip(RoundedCornerShape(8.dp)),
-                                contentScale = ContentScale.Fit
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Button(
-                                onClick = {
-                                    objectExtractionResult?.let { bmp ->
-                                        scope.launch(Dispatchers.IO) {
-                                            saveCutoutToAppGallery(context, bmp)
-                                            withContext(Dispatchers.Main) {
-                                                onGalleryUpdated()
-                                                objectExtractionResult?.recycle()
-                                                objectExtractionResult = null
+// ── 다이얼 바: 50칸 / 양끝 페이드 아웃 / 검은 배경 ────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+// 자르기 오버레이 (이미지 위에 전체 화면으로 덮음)
+// ──────────────────────────────────────────────────────────────────────────────
+@Composable
+private fun CropModeOverlay(
+    imageUri: Uri,
+    topBarDp: androidx.compose.ui.unit.Dp,
+    bottomBarDp: androidx.compose.ui.unit.Dp,
+    buttonRotation: Float,
+    cropZoom: Float,
+    cropPanX: Float,
+    cropPanY: Float,
+    onZoomChange: (zoom: Float, panX: Float, panY: Float) -> Unit,
+    onConfirm: (PendingCropData) -> Unit,
+    onRestoreOriginal: () -> Unit,
+    onCancel: () -> Unit
+) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    // pointerInput 안에서 항상 최신값을 읽기 위한 래퍼
+    val latestZoom = androidx.compose.runtime.rememberUpdatedState(cropZoom)
+    val latestPanX = androidx.compose.runtime.rememberUpdatedState(cropPanX)
+    val latestPanY = androidx.compose.runtime.rememberUpdatedState(cropPanY)
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val containerW = with(density) { maxWidth.toPx() }
+        val containerH = with(density) { maxHeight.toPx() }
+        val topPx      = with(density) { topBarDp.toPx() }
+        val imgAreaTop = topPx
+        val imgAreaH   = containerH - topPx - with(density) { bottomBarDp.toPx() }
+
+        // 실제 이미지 표시 경계 (이미지 로드 후 업데이트)
+        var dispLeft   by remember { mutableStateOf(0f) }
+        var dispTop    by remember { mutableStateOf(imgAreaTop) }
+        var dispRight  by remember { mutableStateOf(containerW) }
+        var dispBottom by remember { mutableStateOf(imgAreaTop + imgAreaH) }
+
+        // 자르기 사각형 상태 (dispLeft/dispTop 기준 초기값)
+        var cropLeft  by remember { mutableStateOf(0f) }
+        var cropTop   by remember { mutableStateOf(imgAreaTop) }
+        var cropW     by remember { mutableStateOf(containerW) }
+        var cropH     by remember { mutableStateOf(imgAreaH) }
+        var is1to1    by remember { mutableStateOf(false) }
+        var activeHdl by remember { mutableStateOf(CropHandle.NONE) }
+
+        val handleR    = with(density) { 34.dp.toPx() }
+        val minCropPx  = with(density) { 80.dp.toPx() }
+        val hLen       = with(density) { 22.dp.toPx() }
+        val hLineW     = with(density) { 3.dp.toPx() }
+        val edgeLen    = hLen * 1.1f   // 모서리 핸들 선 길이 (꼭짓점 L자와 비슷한 크기)
+        val edgeLineW  = hLineW * 1.2f // 꼭짓점보다 살짝 두껍게
+        // 가로/세로 터치 인식 범위
+        val edgeTouchX = with(density) { 48.dp.toPx() }  // N/S: 가로 넓게
+        val edgeTouchY = with(density) { 28.dp.toPx() }  // N/S: 세로 보통
+        val edgeTouchXv = with(density) { 28.dp.toPx() } // E/W: 가로 보통
+        val edgeTouchYv = with(density) { 48.dp.toPx() } // E/W: 세로 넓게
+
+        // 이미지 실제 표시 경계 비동기 계산
+        LaunchedEffect(imageUri, buttonRotation) {
+            val bounds = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                context.contentResolver.openInputStream(imageUri)?.use {
+                    android.graphics.BitmapFactory.decodeStream(it, null, opts)
+                }
+                var rawW = opts.outWidth.toFloat()
+                var rawH = opts.outHeight.toFloat()
+                if (rawW <= 0f || rawH <= 0f) return@withContext null
+                val rot90 = ((buttonRotation / 90f).toInt() % 4 + 4) % 4
+                if (rot90 % 2 == 1) { rawW = rawH.also { rawH = rawW } }
+                val s  = minOf(containerW / rawW, imgAreaH / rawH)
+                val dW = rawW * s;  val dH = rawH * s
+                val dL = (containerW - dW) / 2f
+                val dT = imgAreaTop + (imgAreaH - dH) / 2f
+                floatArrayOf(dL, dT, dL + dW, dT + dH)
+            } ?: return@LaunchedEffect
+            dispLeft   = bounds[0]; dispTop    = bounds[1]
+            dispRight  = bounds[2]; dispBottom = bounds[3]
+            // 이미지 영역의 90% 크기로 초기 자르기 설정
+            val iW = (dispRight - dispLeft) * 0.90f
+            val iH = (dispBottom - dispTop) * 0.90f
+            cropLeft = dispLeft + (dispRight - dispLeft - iW) / 2f
+            cropTop  = dispTop  + (dispBottom - dispTop  - iH) / 2f
+            cropW    = iW;  cropH = iH
+        }
+
+        // ── 어두운 마스크 + 자르기 테두리 + 격자 + 핸들 ──
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val cr = cropLeft + cropW
+            val cb = cropTop  + cropH
+            val ov = Color.Black.copy(alpha = 0.6f)
+            fun cs(w: Float, h: Float) = androidx.compose.ui.geometry.Size(w, h)
+
+            // 외부 4면 어둡게
+            drawRect(ov, Offset.Zero,        cs(containerW, cropTop))
+            drawRect(ov, Offset(0f, cb),      cs(containerW, containerH - cb))
+            drawRect(ov, Offset(0f, cropTop), cs(cropLeft, cropH))
+            drawRect(ov, Offset(cr, cropTop), cs(containerW - cr, cropH))
+
+            // 흰색 테두리
+            drawRect(
+                color   = Color.White,
+                topLeft = Offset(cropLeft, cropTop),
+                size    = cs(cropW, cropH),
+                style   = androidx.compose.ui.graphics.drawscope.Stroke(width = hLineW * 0.55f)
+            )
+
+            // 삼등분 격자선
+            for (i in 1..2) {
+                val gx = cropLeft + cropW * i / 3f
+                val gy = cropTop  + cropH * i / 3f
+                drawLine(Color.White.copy(alpha = 0.4f), Offset(gx, cropTop), Offset(gx, cb), strokeWidth = hLineW * 0.3f)
+                drawLine(Color.White.copy(alpha = 0.4f), Offset(cropLeft, gy), Offset(cr, gy), strokeWidth = hLineW * 0.3f)
+            }
+
+            // L자 꼭짓점 핸들
+            fun corner(cx: Float, cy: Float, dx: Float, dy: Float) {
+                drawLine(Color.White, Offset(cx, cy), Offset(cx + dx, cy), strokeWidth = hLineW)
+                drawLine(Color.White, Offset(cx, cy), Offset(cx, cy + dy), strokeWidth = hLineW)
+            }
+            corner(cropLeft, cropTop,  hLen,  hLen)
+            corner(cr,       cropTop, -hLen,  hLen)
+            corner(cropLeft, cb,       hLen, -hLen)
+            corner(cr,       cb,      -hLen, -hLen)
+
+            // 모서리 중간 핸들 (굵은 가로/세로선)
+            val mx = cropLeft + cropW / 2f
+            val my = cropTop  + cropH / 2f
+            // N (상단 중앙 – 가로선)
+            drawLine(Color.White, Offset(mx - edgeLen / 2f, cropTop), Offset(mx + edgeLen / 2f, cropTop), strokeWidth = edgeLineW)
+            // S (하단 중앙 – 가로선)
+            drawLine(Color.White, Offset(mx - edgeLen / 2f, cb),      Offset(mx + edgeLen / 2f, cb),      strokeWidth = edgeLineW)
+            // E (우측 중앙 – 세로선)
+            drawLine(Color.White, Offset(cr, my - edgeLen / 2f),      Offset(cr, my + edgeLen / 2f),      strokeWidth = edgeLineW)
+            // W (좌측 중앙 – 세로선)
+            drawLine(Color.White, Offset(cropLeft, my - edgeLen / 2f), Offset(cropLeft, my + edgeLen / 2f), strokeWidth = edgeLineW)
+        }
+
+        // ── 제스처 핸들러 ──
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(is1to1, dispLeft, dispTop, dispRight, dispBottom) {
+                    // 이미지 컨테이너 중심 (graphicsLayer 축)
+                    val cx = containerW / 2f
+                    val cy = imgAreaTop + imgAreaH / 2f
+                    val imgDispW = dispRight - dispLeft
+                    val imgDispH = dispBottom - dispTop
+
+                    // 현재 줌/패닝을 적용한 유효 이미지 표시 경계 계산
+                    fun effBounds(): FloatArray {
+                        val z  = latestZoom.value
+                        val px = latestPanX.value
+                        val py = latestPanY.value
+                        return floatArrayOf(
+                            cx + (dispLeft   - cx) * z + px,
+                            cy + (dispTop    - cy) * z + py,
+                            cx + (dispRight  - cx) * z + px,
+                            cy + (dispBottom - cy) * z + py
+                        )
+                    }
+
+                    awaitPointerEventScope {
+                        while (true) {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val pos  = down.position
+                            val (eL, eT, eR, eB) = effBounds().let {
+                                arrayOf(it[0], it[1], it[2], it[3])
+                            }
+                            val cr2  = cropLeft + cropW
+                            val cb2  = cropTop  + cropH
+                            fun near(x: Float, y: Float) =
+                                kotlin.math.abs(pos.x - x) < handleR && kotlin.math.abs(pos.y - y) < handleR
+                            fun nearH(x: Float, y: Float) =
+                                kotlin.math.abs(pos.x - x) < edgeTouchX && kotlin.math.abs(pos.y - y) < edgeTouchY
+                            fun nearV(x: Float, y: Float) =
+                                kotlin.math.abs(pos.x - x) < edgeTouchXv && kotlin.math.abs(pos.y - y) < edgeTouchYv
+
+                            activeHdl = when {
+                                near(cropLeft, cropTop)                       -> CropHandle.NW
+                                near(cr2,      cropTop)                       -> CropHandle.NE
+                                near(cropLeft, cb2)                           -> CropHandle.SW
+                                near(cr2,      cb2)                           -> CropHandle.SE
+                                nearH(cropLeft + cropW / 2f, cropTop)         -> CropHandle.N
+                                nearH(cropLeft + cropW / 2f, cb2)             -> CropHandle.S
+                                nearV(cr2,      cropTop + cropH / 2f)         -> CropHandle.E
+                                nearV(cropLeft, cropTop + cropH / 2f)         -> CropHandle.W
+                                pos.x in cropLeft..cr2 && pos.y in cropTop..cb2 -> CropHandle.MOVE
+                                else -> CropHandle.NONE
+                            }
+
+                            while (true) {
+                                val event   = awaitPointerEvent()
+                                val pressed = event.changes.filter { it.pressed }
+                                if (pressed.isEmpty()) break
+
+                                if (pressed.size >= 2) {
+                                    // ── 두 손가락 핀치: 확대/축소 + 이동 ──
+                                    val p1 = pressed[0]; val p2 = pressed[1]
+                                    val curDist  = (p2.position - p1.position).getDistance()
+                                    val prevDist = (p2.previousPosition - p1.previousPosition).getDistance()
+                                    if (prevDist > 1f) {
+                                        val z  = latestZoom.value
+                                        val px = latestPanX.value; val py = latestPanY.value
+                                        val scaleFactor = curDist / prevDist
+                                        val newZoom = (z * scaleFactor).coerceIn(1f, 5f)
+                                        // 두 손가락 중점이 동일한 이미지 점에 고정되도록 패닝 조정
+                                        val midX = (p1.previousPosition.x + p2.previousPosition.x) / 2f
+                                        val midY = (p1.previousPosition.y + p2.previousPosition.y) / 2f
+                                        val newMidX = (p1.position.x + p2.position.x) / 2f
+                                        val newMidY = (p1.position.y + p2.position.y) / 2f
+                                        var newPanX = newMidX - cx - ((midX - cx - px) / z) * newZoom
+                                        var newPanY = newMidY - cy - ((midY - cy - py) / z) * newZoom
+                                        // 패닝 범위 제한 (이미지가 화면에서 너무 벗어나지 않도록)
+                                        val maxPX = imgDispW * (newZoom - 1f) / 2f + kotlin.math.abs(dispLeft - cx)
+                                        val maxPY = imgDispH * (newZoom - 1f) / 2f + kotlin.math.abs(dispTop  - cy)
+                                        newPanX = newPanX.coerceIn(-maxPX, maxPX)
+                                        newPanY = newPanY.coerceIn(-maxPY, maxPY)
+                                        onZoomChange(newZoom, newPanX, newPanY)
+                                    }
+                                    pressed.forEach { it.consume() }
+                                } else if (pressed.size == 1) {
+                                    val ch = pressed[0]
+                                    val d  = ch.position - ch.previousPosition
+                                    val b  = effBounds()
+                                    val efl = b[0]; val eft = b[1]; val efr = b[2]; val efb = b[3]
+                                    if (is1to1) {
+                                        // ── 1:1 고정 ──
+                                        when (activeHdl) {
+                                            CropHandle.MOVE -> {
+                                                cropLeft = (cropLeft + d.x).coerceIn(efl, efr - cropW)
+                                                cropTop  = (cropTop  + d.y).coerceIn(eft,  efb - cropH)
                                             }
+                                            CropHandle.NW, CropHandle.N, CropHandle.W -> {
+                                                val pivR = cropLeft + cropW; val pivB = cropTop + cropH
+                                                val ds = -(d.x + d.y) / 2f
+                                                val ns = (cropW + ds).coerceIn(minCropPx, minOf(pivR - efl, pivB - eft))
+                                                cropLeft = (pivR - ns).coerceAtLeast(efl)
+                                                cropTop  = (pivB - ns).coerceAtLeast(eft)
+                                                cropW = ns; cropH = ns
+                                            }
+                                            CropHandle.NE -> {
+                                                val pivB = cropTop + cropH
+                                                val ds = (d.x - d.y) / 2f
+                                                val ns = (cropW + ds).coerceIn(minCropPx, minOf(efr - cropLeft, pivB - eft))
+                                                cropTop = (pivB - ns).coerceAtLeast(eft)
+                                                cropW = ns; cropH = ns
+                                            }
+                                            CropHandle.SW -> {
+                                                val pivR = cropLeft + cropW
+                                                val ds = (-d.x + d.y) / 2f
+                                                val ns = (cropW + ds).coerceIn(minCropPx, minOf(pivR - efl, efb - cropTop))
+                                                cropLeft = (pivR - ns).coerceAtLeast(efl)
+                                                cropW = ns; cropH = ns
+                                            }
+                                            CropHandle.SE, CropHandle.E, CropHandle.S -> {
+                                                val ds = (d.x + d.y) / 2f
+                                                val ns = (cropW + ds).coerceIn(minCropPx, minOf(efr - cropLeft, efb - cropTop))
+                                                cropW = ns; cropH = ns
+                                            }
+                                            CropHandle.NONE -> {}
+                                        }
+                                    } else {
+                                        // ── 자유 크롭 ──
+                                        when (activeHdl) {
+                                            CropHandle.MOVE -> {
+                                                cropLeft = (cropLeft + d.x).coerceIn(efl, efr - cropW)
+                                                cropTop  = (cropTop  + d.y).coerceIn(eft,  efb - cropH)
+                                            }
+                                            CropHandle.NW -> {
+                                                val pivR = cropLeft + cropW; val pivB = cropTop + cropH
+                                                val nw = (cropW - d.x).coerceIn(minCropPx, pivR - efl)
+                                                val nh = (cropH - d.y).coerceIn(minCropPx, pivB - eft)
+                                                cropLeft = pivR - nw; cropTop = pivB - nh
+                                                cropW = nw; cropH = nh
+                                            }
+                                            CropHandle.NE -> {
+                                                val pivB = cropTop + cropH
+                                                cropW = (cropW + d.x).coerceIn(minCropPx, efr - cropLeft)
+                                                val nh = (cropH - d.y).coerceIn(minCropPx, pivB - eft)
+                                                cropTop = pivB - nh; cropH = nh
+                                            }
+                                            CropHandle.SW -> {
+                                                val pivR = cropLeft + cropW
+                                                val nw = (cropW - d.x).coerceIn(minCropPx, pivR - efl)
+                                                cropLeft = pivR - nw; cropW = nw
+                                                cropH = (cropH + d.y).coerceIn(minCropPx, efb - cropTop)
+                                            }
+                                            CropHandle.SE -> {
+                                                cropW = (cropW + d.x).coerceIn(minCropPx, efr - cropLeft)
+                                                cropH = (cropH + d.y).coerceIn(minCropPx, efb - cropTop)
+                                            }
+                                            CropHandle.N -> {
+                                                val pivB = cropTop + cropH
+                                                val nh = (cropH - d.y).coerceIn(minCropPx, pivB - eft)
+                                                cropTop = pivB - nh; cropH = nh
+                                            }
+                                            CropHandle.E -> {
+                                                cropW = (cropW + d.x).coerceIn(minCropPx, efr - cropLeft)
+                                            }
+                                            CropHandle.S -> {
+                                                cropH = (cropH + d.y).coerceIn(minCropPx, efb - cropTop)
+                                            }
+                                            CropHandle.W -> {
+                                                val pivR = cropLeft + cropW
+                                                val nw = (cropW - d.x).coerceIn(minCropPx, pivR - efl)
+                                                cropLeft = pivR - nw; cropW = nw
+                                            }
+                                            CropHandle.NONE -> {}
                                         }
                                     }
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF9CD83B))
-                            ) {
-                                Text("갤러리에 저장")
-                            }
-                            OutlinedButton(
-                                onClick = {
-                                    objectExtractionResult?.recycle()
-                                    objectExtractionResult = null
+                                    ch.consume()
                                 }
-                            ) {
-                                Text("닫기", color = Color.White)
                             }
                         }
                     }
+                }
+        )
+
+        // ── 상단 바 오버레이 (기존 편집 상단 바 위에 덮음) ──
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(topBarDp)
+                .background(Color.Black)
+                .padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onCancel) {
+                Icon(Icons.Default.Close, contentDescription = "닫기", tint = Color.White)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onRestoreOriginal) {
+                    Text("원본 복원", color = Color.White, fontSize = 14.sp)
+                }
+                TextButton(onClick = {
+                    onConfirm(
+                        PendingCropData(
+                            left            = cropLeft,
+                            top             = cropTop,
+                            width           = cropW,
+                            height          = cropH,
+                            imgAreaTopPx    = imgAreaTop,
+                            imgAreaHeightPx = imgAreaH,
+                            containerW      = containerW,
+                            containerH      = containerH,
+                            cropZoom        = latestZoom.value,
+                            cropPanX        = latestPanX.value,
+                            cropPanY        = latestPanY.value
+                        )
+                    )
+                }) {
+                    Text("저장", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
 
-        // 객체 분리 실패 메시지
-        if (objectExtractionError != null) {
-            Dialog(onDismissRequest = { objectExtractionError = null }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                        .padding(20.dp)
-                ) {
-                    Column {
-                        Text("객체 분리 실패", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(objectExtractionError!!, color = Color.White.copy(alpha = 0.9f), fontSize = 14.sp)
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Button(
-                            onClick = { objectExtractionError = null },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF9CD83B))
-                        ) {
-                            Text("확인")
+        // ── 하단 바: 1:1 토글만 ──
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(bottomBarDp)
+                .background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) {
+            val btnBorder = if (is1to1) Color(0xFF9CD83B) else Color(0xFF666666)
+            val btnText   = if (is1to1) Color(0xFF9CD83B) else Color(0xFF888888)
+            val btnBg     = if (is1to1) Color(0xFF9CD83B).copy(alpha = 0.15f) else Color.Transparent
+            Box(
+                modifier = Modifier
+                    .border(1.5.dp, btnBorder, RoundedCornerShape(6.dp))
+                    .background(btnBg, RoundedCornerShape(6.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        is1to1 = !is1to1
+                        if (is1to1) {
+                            val sq = minOf(cropW, cropH)
+                            val cx = cropLeft + cropW / 2f
+                            val cy = cropTop  + cropH / 2f
+                            cropW    = sq; cropH = sq
+                            cropLeft = (cx - sq / 2f).coerceIn(dispLeft, dispRight  - sq)
+                            cropTop  = (cy - sq / 2f).coerceIn(dispTop,  dispBottom - sq)
                         }
                     }
-                }
+                    .padding(horizontal = 18.dp, vertical = 6.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("1 : 1", color = btnText, fontSize = 13.sp, fontWeight = FontWeight.Medium)
             }
         }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+@Composable
+private fun EditDialBar(
+    degrees: Float,
+    onDegreesChanged: (Float) -> Unit
+) {
+    val density = LocalDensity.current
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(52.dp)   // Galaxy 수준으로 더 슬림하게
+            .background(Color.Black)
+    ) {
+        val viewWidthPx = with(density) { maxWidth.toPx() }
+        val tickWidthPx = viewWidthPx / 50f   // 화면에 50칸
+        val visibleHalf = 27
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .draggable(
+                    orientation = Orientation.Horizontal,
+                    state = rememberDraggableState { delta ->
+                        onDegreesChanged(degrees + delta / tickWidthPx)
+                    }
+                )
+        ) {
+            // 현재 각도 텍스트 (중앙 상단)
+            Text(
+                text     = "${"%.1f".format(degrees)}°",
+                color    = Color(0xFF9CD83B),
+                fontSize = 10.sp,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 2.dp)
+            )
+
+            // 눈금 Canvas
+            Canvas(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(36.dp)
+                    .align(Alignment.BottomCenter)
+            ) {
+                val centerX  = size.width / 2f
+                val midY     = size.height / 2f
+                val tickH    = size.height * 0.40f  // 균일 작은 눈금
+                val originH  = size.height * 0.80f  // 원점만 약간 길게
+                val halfW    = size.width / 2f
+
+                val from = (degrees - visibleHalf).toInt()
+                val to   = (degrees + visibleHalf).toInt()
+
+                for (i in from..to) {
+                    val x = centerX + (i - degrees) * tickWidthPx
+                    if (x < 0f || x > size.width) continue
+
+                    // 중심에서 멀수록 점점 투명하게 (페이드 아웃)
+                    val dist       = kotlin.math.abs(x - centerX) / halfW   // 0=중심, 1=끝
+                    val fadeAlpha  = ((1f - dist / 0.82f) * 1.1f).coerceIn(0f, 1f)
+
+                    val isOrigin   = i == 0
+                    val baseColor  = if (isOrigin) Color(0xFF9CD83B) else Color(0xFFAAAAAA)
+
+                    drawLine(
+                        color       = baseColor.copy(alpha = fadeAlpha),
+                        start       = Offset(x, midY - (if (isOrigin) originH else tickH) / 2f),
+                        end         = Offset(x, midY + (if (isOrigin) originH else tickH) / 2f),
+                        strokeWidth = if (isOrigin) 2.dp.toPx() else 1.dp.toPx()
+                    )
+                }
+            }
+
+            // 중앙 기준 포인터 (고정 녹색 선)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 4.dp)
+                    .width(2.dp)
+                    .height(18.dp)
+                    .background(Color(0xFF9CD83B))
+            )
+        }
+    }
+}
+
+// ── 편집 기능 버튼 아이템 ──────────────────────────────────────────────────────
+@Composable
+private fun EditActionButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onClick() }
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector        = icon,
+            contentDescription = label,
+            tint               = Color.White,
+            modifier           = Modifier.size(30.dp)
+        )
+    }
+}
+
+// ── 편집된 이미지 저장 (회전·반전 적용 후 파일 쓰기) ─────────────────────────
+private suspend fun saveEditedImage(
+    context: Context,
+    originalUri: Uri,
+    rotationDegrees: Float,
+    isFlipped: Boolean,
+    overwrite: Boolean,
+    cropData: PendingCropData? = null
+): Uri? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    try {
+        // 비트맵 로드
+        val src = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            val source = android.graphics.ImageDecoder.createSource(context.contentResolver, originalUri)
+            android.graphics.ImageDecoder.decodeBitmap(source) { dec, _, _ ->
+                dec.isMutableRequired = true
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            android.provider.MediaStore.Images.Media.getBitmap(context.contentResolver, originalUri)
+        }.copy(android.graphics.Bitmap.Config.ARGB_8888, true)
+
+        // 회전/반전 행렬 적용
+        val matrix = android.graphics.Matrix()
+        if (rotationDegrees != 0f) matrix.postRotate(rotationDegrees)
+        if (isFlipped)             matrix.postScale(-1f, 1f, src.width / 2f, src.height / 2f)
+
+        var result = if (!matrix.isIdentity) {
+            android.graphics.Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
+        } else src
+
+        // 자르기 적용 (회전/반전 후 화면상 좌표 → 비트맵 좌표 변환, 줌/패닝 포함)
+        if (cropData != null) {
+            val rotW = result.width.toFloat()
+            val rotH = result.height.toFloat()
+            // ContentScale.Fit 기준 디스플레이 스케일 및 오프셋
+            val s    = minOf(cropData.containerW / rotW, cropData.imgAreaHeightPx / rotH)
+            val baseDispLeft = (cropData.containerW - rotW * s) / 2f
+            val baseDispTop  = cropData.imgAreaTopPx + (cropData.imgAreaHeightPx - rotH * s) / 2f
+            // graphicsLayer 중심 (축 기준점)
+            val cx = cropData.containerW / 2f
+            val cy = cropData.imgAreaTopPx + cropData.imgAreaHeightPx / 2f
+            // 줌/패닝 적용 후 실제 화면상 이미지 좌상단 위치
+            val z  = cropData.cropZoom
+            val px = cropData.cropPanX; val py = cropData.cropPanY
+            val effDispLeft = cx + (baseDispLeft - cx) * z + px
+            val effDispTop  = cy + (baseDispTop  - cy) * z + py
+            val effScale    = s * z   // 유효 px-per-image-pixel
+
+            val imgCropLeft = ((cropData.left - effDispLeft) / effScale).coerceIn(0f, rotW - 1f).toInt()
+            val imgCropTop  = ((cropData.top  - effDispTop)  / effScale).coerceIn(0f, rotH - 1f).toInt()
+            val imgCropW = (cropData.width  / effScale).coerceIn(1f, rotW - imgCropLeft).toInt().coerceAtLeast(1)
+            val imgCropH = (cropData.height / effScale).coerceIn(1f, rotH - imgCropTop ).toInt().coerceAtLeast(1)
+
+            result = android.graphics.Bitmap.createBitmap(result, imgCropLeft, imgCropTop, imgCropW, imgCropH)
+        }
+
+        // 저장 경로 결정
+        val originalPath = originalUri.path ?: return@withContext null
+        val originalFile = java.io.File(originalPath)
+        val outFile = if (overwrite) {
+            originalFile
+        } else {
+            java.io.File(
+                originalFile.parent ?: context.getExternalFilesDir(null)!!.absolutePath,
+                "edited_${System.currentTimeMillis()}.jpg"
+            )
+        }
+
+        java.io.FileOutputStream(outFile).use { fos ->
+            result.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, fos)
+        }
+        android.net.Uri.fromFile(outFile)
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
     }
 }
 
@@ -5249,7 +6243,11 @@ private suspend fun createZipFromFolders(
  * @param file 업로드할 파일
  * @return 업로드 성공 여부
  */
-private suspend fun startServerTaskWithZip(context: Context, zipFile: File): String? {
+private suspend fun startServerTaskWithZip(
+    context: Context,
+    zipFile: File,
+    prompt: String = ""
+): String? {
     return withContext(Dispatchers.IO) {
         try {
             val serverAddress = getServerAddress(context)
@@ -5265,14 +6263,17 @@ private suspend fun startServerTaskWithZip(context: Context, zipFile: File): Str
                 return@withContext null
             }
 
-            val requestBody = MultipartBody.Builder()
+            val multipartBuilder = MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
                 .addFormDataPart(
                     "file",
                     zipFile.name,
                     zipFile.asRequestBody("application/zip".toMediaType())
                 )
-                .build()
+            if (prompt.isNotBlank()) {
+                multipartBuilder.addFormDataPart("prompt", prompt)
+            }
+            val requestBody = multipartBuilder.build()
 
             val protocol = if (useHttps) "https" else "http"
             val url = "$protocol://$serverAddress:$serverPort$UPLOAD_ENDPOINT"
@@ -5480,6 +6481,7 @@ private suspend fun downloadPlyResult(context: Context, taskId: String): File? {
 private suspend fun uploadZipAndRunPipeline(
     context: Context,
     zipFile: File,
+    prompt: String = "",
     onProgress: (progress: Int, message: String) -> Unit
 ): Boolean {
     // [추가] 서비스 알림 업데이트를 위한 헬퍼 함수
@@ -5508,7 +6510,7 @@ private suspend fun uploadZipAndRunPipeline(
         // 1) 업로드 -> task_id 확보
         updateNotification(5, "파일 업로드 중...")
         val noResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
-        val taskId = startServerTaskWithZip(context, zipFile)
+        val taskId = startServerTaskWithZip(context, zipFile, prompt)
         if (taskId.isNullOrBlank()) {
             updateNotification(0, noResponseMsg)
             context.stopService(serviceIntent)
@@ -6283,7 +7285,6 @@ fun ServerSettingsScreen(
         }
     }
 }
-
 // [추가] 백그라운드 작업 유지를 위한 포그라운드 서비스
 class AppForegroundService : Service() {
     companion object {
