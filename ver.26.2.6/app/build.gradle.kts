@@ -90,12 +90,23 @@ dependencies {
     
     // Coil for image loading
     implementation("io.coil-kt:coil-compose:2.5.0")
+
+    // Glide — 광택 제거 파이프라인: URI → Bitmap (512×512)
+    implementation("com.github.bumptech.glide:glide:4.16.0")
     
     // Material Icons Extended
     implementation("androidx.compose.material:material-icons-extended")
     
-    // OkHttp for HTTP requests
+    // OkHttp + Retrofit + Gson (AI CAD 파이프라인: API 클라이언트)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    val retrofitVer = "2.11.0"
+    implementation("com.squareup.retrofit2:retrofit:$retrofitVer")
+    implementation("com.squareup.retrofit2:converter-gson:$retrofitVer")
+    implementation("com.google.code.gson:gson:2.11.0")
+
+    // SceneView / Filament — GLB 미리보기 (Maven Central에 게시된 버전)
+    val sceneViewVer = "2.3.0"
+    implementation("io.github.sceneview:sceneview:$sceneViewVer")
 
     // EXIF (이미지 회전/방향 보정)
     implementation("androidx.exifinterface:exifinterface:1.3.7")

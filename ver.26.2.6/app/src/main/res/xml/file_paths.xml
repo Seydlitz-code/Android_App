@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <external-files-path name="my_images" path="Pictures" />
+    <!-- 3D models/, aicad_library/ 등 앱 전용 파일 공유(FileProvider) -->
+    <external-files-path name="external_app_files" path="." />
 </paths>

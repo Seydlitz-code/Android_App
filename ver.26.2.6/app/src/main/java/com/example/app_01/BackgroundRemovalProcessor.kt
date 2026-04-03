@@ -1018,19 +1018,19 @@ object BackgroundRemovalProcessor {
             Log.d(TAG, "U²-Net inputName=$inputName, outputs=${session.outputNames}")
 
             val probFlat = FloatArray(pixCount)
-            OnnxTensor.createTensor(env, FloatBuffer.wrap(data), inputShape).use { inputTensor ->
-                session.run(mapOf(inputName to inputTensor)).use { result ->
-                    try {
-                        // 방법 1: OnnxTensor.floatBuffer 직접 읽기 (효율적)
-                        val outTensor = result.get(0) as OnnxTensor
-                        val buf = outTensor.floatBuffer
-                        buf.get(probFlat, 0, buf.remaining().coerceAtMost(pixCount))
-                    } catch (_: Exception) {
-                        // 방법 2: 4D Array 파싱 (레퍼런스 코드 방식)
-                        @Suppress("UNCHECKED_CAST")
-                        val mask4D = result.get(0).value as Array<Array<Array<FloatArray>>>
-                        val row2D = mask4D[0][0]
-                        for (y in 0 until sz) for (x in 0 until sz) probFlat[y * sz + x] = row2D[y][x]
+            synchronized(OnnxInferenceGate.lock) {
+                OnnxTensor.createTensor(env, FloatBuffer.wrap(data), inputShape).use { inputTensor ->
+                    session.run(mapOf(inputName to inputTensor)).use { result ->
+                        try {
+                            val outTensor = result.get(0) as OnnxTensor
+                            val buf = outTensor.floatBuffer
+                            buf.get(probFlat, 0, buf.remaining().coerceAtMost(pixCount))
+                        } catch (_: Exception) {
+                            @Suppress("UNCHECKED_CAST")
+                            val mask4D = result.get(0).value as Array<Array<Array<FloatArray>>>
+                            val row2D = mask4D[0][0]
+                            for (y in 0 until sz) for (x in 0 until sz) probFlat[y * sz + x] = row2D[y][x]
+                        }
                     }
                 }
             }
