@@ -20,6 +20,9 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.max
 
+/** GL 미리보기·UI용: 초과 시 균등 간격으로 줄여 힙 OOM을 완화합니다. */
+private const val MAX_PREVIEW_VERTICES = 350_000
+
 /**
  * PLY -> OBJ 변환 (캐시)
  * - 색이 있으면 OBJ + MTL 쌍을 만들고 primitive별 `usemtl`로 색을 연결합니다.
@@ -33,8 +36,32 @@ data class ObjConversionResult(
 
 fun convertPlyToObjCached(context: Context, plyFile: File): ObjConversionResult {
     if (!plyFile.exists()) return ObjConversionResult(error = "원본 PLY 파일이 존재하지 않습니다.")
+    val storageRoot = context.getExternalFilesDir(null)
+        ?: return ObjConversionResult(error = "앱 저장 공간에 접근할 수 없습니다.")
 
     return try {
+        val outDir = File(storageRoot, "models_obj").apply { mkdirs() }
+        val key = "${plyFile.nameWithoutExtension}_${plyFile.lastModified()}_v5"
+        val outFile = File(outDir, "${key}.obj")
+        val mtlFile = File(outDir, "${key}.mtl")
+
+        // 헤더만 읽어 색 유무 판별 — 캐시 히트 시 전체 PLY 파싱을 건너뜁니다(힙 OOM 방지).
+        val hasVertexColorsHint = hasPlyVertexRgbHeader(plyFile)
+        val cacheReady = outFile.exists() &&
+            outFile.length() > 0L &&
+            (!hasVertexColorsHint || (mtlFile.exists() && mtlFile.length() > 0L))
+        if (cacheReady) {
+            val fromObj = try {
+                parseObjVertices(outFile)
+            } catch (oom: OutOfMemoryError) {
+                android.util.Log.e("ObjViewer", "parseObjVertices OOM (cached obj)", oom)
+                null
+            }
+            if (fromObj != null) {
+                return ObjConversionResult(file = outFile, previewMesh = fromObj)
+            }
+        }
+
         val parsed = parsePlyPointsAny(plyFile)
         val points = parsed.points
         val count = parsed.count
@@ -42,20 +69,8 @@ fun convertPlyToObjCached(context: Context, plyFile: File): ObjConversionResult 
         val hasVertexColors = vtxColors != null && vtxColors.size == count * 3
         if (count <= 0) return ObjConversionResult(error = "PLY에서 vertex(점)를 0개로 인식했습니다.")
 
-        val outDir = File(context.getExternalFilesDir(null), "models_obj").apply { mkdirs() }
-        // v5: PLY 색을 OBJ+MTL primitive material로 재설계
-        val key = "${plyFile.nameWithoutExtension}_${plyFile.lastModified()}_v5"
-        val outFile = File(outDir, "${key}.obj")
-        val mtlFile = File(outDir, "${key}.mtl")
-
         val faces = readPlyFacesIfPresent(plyFile)
         val previewMesh = buildPreviewMeshFromPly(points, count, vtxColors, faces)
-
-        // 캐시 hit
-        val cacheReady = outFile.exists() &&
-            outFile.length() > 0L &&
-            (!hasVertexColors || (mtlFile.exists() && mtlFile.length() > 0L))
-        if (cacheReady) return ObjConversionResult(file = outFile, previewMesh = previewMesh)
 
         // 기존 캐시(같은 nameWithoutExtension) 정리(너무 많이 쌓이는 것 방지)
         outDir.listFiles { f ->
@@ -151,14 +166,99 @@ fun convertPlyToObjCached(context: Context, plyFile: File): ObjConversionResult 
         if (!outFile.exists() || outFile.length() <= 0L) {
             ObjConversionResult(
                 error = "OBJ 파일 생성에 실패했습니다(파일이 생성되지 않았거나 크기가 0입니다).",
-                previewMesh = previewMesh
+                previewMesh = downsamplePreviewMesh(previewMesh)
             )
         } else {
-            ObjConversionResult(file = outFile, previewMesh = previewMesh)
+            ObjConversionResult(file = outFile, previewMesh = downsamplePreviewMesh(previewMesh))
         }
-    } catch (e: Exception) {
-        e.printStackTrace()
-        ObjConversionResult(error = "OBJ 변환 중 예외 발생: ${e.message ?: e.javaClass.simpleName}")
+    } catch (oom: OutOfMemoryError) {
+        oom.printStackTrace()
+        ObjConversionResult(
+            error = "메모리가 부족합니다. PLY가 너무 크거나 다른 작업으로 힙이 가득 찼습니다. 앱을 다시 실행한 뒤 시도해 주세요."
+        )
+    } catch (t: Throwable) {
+        t.printStackTrace()
+        ObjConversionResult(error = "OBJ 변환 중 오류: ${t.message ?: t.javaClass.simpleName}")
+    }
+}
+
+private fun hasPlyVertexRgbHeader(file: File): Boolean {
+    return RandomAccessFile(file, "r").use { raf ->
+        val header = parsePlyHeader(raf)
+        val props = header.vertexProperties
+        fun idxByNames(vararg names: String): Int {
+            for (n in names) {
+                val i = props.indexOfFirst { it.name.equals(n, ignoreCase = true) }
+                if (i >= 0) return i
+            }
+            return -1
+        }
+        val redIdx = idxByNames("red", "diffuse_red", "r")
+        val greenIdx = idxByNames("green", "diffuse_green", "g")
+        val blueIdx = idxByNames("blue", "diffuse_blue", "b")
+        redIdx >= 0 && greenIdx >= 0 && blueIdx >= 0
+    }
+}
+
+/**
+ * 렌더링용 메쉬가 너무 크면 균등 간격으로 줄입니다(512MB 힙에서 OOM 방지).
+ */
+private fun downsamplePreviewMesh(mesh: ObjParseResult): ObjParseResult {
+    if (mesh.count <= MAX_PREVIEW_VERTICES) return mesh
+    return when (mesh.drawMode) {
+        MeshDrawMode.POINTS -> {
+            val stride = ((mesh.count + MAX_PREVIEW_VERTICES - 1) / MAX_PREVIEW_VERTICES).coerceAtLeast(1)
+            val newCount = (mesh.count + stride - 1) / stride
+            val pts = FloatArray(newCount * 3)
+            val cols = if (mesh.vertexColors != null && mesh.vertexColors.size == mesh.count * 3) {
+                FloatArray(newCount * 3)
+            } else {
+                null
+            }
+            var wi = 0
+            var i = 0
+            while (i < mesh.count) {
+                pts[wi * 3] = mesh.points[i * 3]
+                pts[wi * 3 + 1] = mesh.points[i * 3 + 1]
+                pts[wi * 3 + 2] = mesh.points[i * 3 + 2]
+                if (cols != null) {
+                    cols[wi * 3] = mesh.vertexColors!![i * 3]
+                    cols[wi * 3 + 1] = mesh.vertexColors[i * 3 + 1]
+                    cols[wi * 3 + 2] = mesh.vertexColors[i * 3 + 2]
+                }
+                wi++
+                i += stride
+            }
+            ObjParseResult(pts, newCount, MeshDrawMode.POINTS, cols)
+        }
+        MeshDrawMode.TRIANGLES -> {
+            val triCount = mesh.count / 3
+            if (triCount <= 0) return mesh
+            val stride = ((triCount + MAX_PREVIEW_VERTICES - 1) / MAX_PREVIEW_VERTICES).coerceAtLeast(1)
+            val newTriCount = (triCount + stride - 1) / stride
+            val pts = FloatArray(newTriCount * 9)
+            val cols = if (mesh.vertexColors != null && mesh.vertexColors.size == mesh.count * 3) {
+                FloatArray(newTriCount * 9)
+            } else {
+                null
+            }
+            var wi = 0
+            var t = 0
+            while (t < triCount) {
+                val vb = t * 9
+                for (k in 0 until 9) {
+                    pts[wi * 9 + k] = mesh.points[vb + k]
+                }
+                if (cols != null) {
+                    for (k in 0 until 9) {
+                        cols[wi * 9 + k] = mesh.vertexColors!![vb + k]
+                    }
+                }
+                wi++
+                t += stride
+            }
+            ObjParseResult(pts, wi * 3, MeshDrawMode.TRIANGLES, cols)
+        }
     }
 }
 
@@ -201,6 +301,32 @@ private fun buildPreviewMeshFromPly(
         vertexColors.copyOf()
     } else null
     return ObjParseResult(normalizedPoints.copyOf(), vertexCount, MeshDrawMode.POINTS, pointColors)
+}
+
+/**
+ * 라이브러리 썸네일용: PLY/OBJ를 동일한 [ObjParseResult]로 파싱합니다.
+ * 과대 파일은 메모리 보호를 위해 생략합니다.
+ */
+fun loadModelForThumbnailMesh(file: File): ObjParseResult? {
+    if (!file.exists() || !file.isFile) return null
+    val maxBytes = 120L * 1024L * 1024L
+    if (file.length() > maxBytes) return null
+    return try {
+        when {
+            file.extension.equals("obj", ignoreCase = true) -> parseObjVertices(file)
+            file.extension.equals("ply", ignoreCase = true) -> {
+                val parsed = parsePlyPointsAny(file)
+                val faces = readPlyFacesIfPresent(file)
+                downsamplePreviewMesh(
+                    buildPreviewMeshFromPly(parsed.points, parsed.count, parsed.vertexColors, faces)
+                )
+            }
+            else -> null
+        }
+    } catch (t: Throwable) {
+        t.printStackTrace()
+        null
+    }
 }
 
 private fun appendObjVertexLine(w: Appendable, points: FloatArray, index: Int) {
@@ -441,14 +567,13 @@ private fun parsePlyPointsAny(file: File): PlyParseResult {
         val blueIdx = idxByNames("blue", "diffuse_blue", "b")
         val hasRgb = redIdx >= 0 && greenIdx >= 0 && blueIdx >= 0
 
-        val rawPoints = ArrayList<Float>(header.vertexCount * 3)
-        val rawColors = if (hasRgb) ArrayList<Float>(header.vertexCount * 3) else null
+        val rawPoints = FloatArray(header.vertexCount * 3)
+        val rawColors = if (hasRgb) FloatArray(header.vertexCount * 3) else null
 
-        if (fmtLower.contains("ascii")) {
-            // dataStartOffset 이후를 라인으로 읽는다
+        val count: Int = if (fmtLower.contains("ascii")) {
             raf.seek(header.dataStartOffset)
-            var readCount = 0
-            while (readCount < header.vertexCount) {
+            var v = 0
+            while (v < header.vertexCount) {
                 val line = raf.readLine() ?: break
                 val t = line.trim()
                 if (t.isEmpty()) continue
@@ -458,25 +583,27 @@ private fun parsePlyPointsAny(file: File): PlyParseResult {
                 val y = parts.getOrNull(yIdx)?.toFloatOrNull()
                 val z = parts.getOrNull(zIdx)?.toFloatOrNull()
                 if (x != null && y != null && z != null) {
-                    rawPoints.add(x); rawPoints.add(y); rawPoints.add(z)
+                    val base = v * 3
+                    rawPoints[base] = x
+                    rawPoints[base + 1] = y
+                    rawPoints[base + 2] = z
                     if (rawColors != null) {
                         val rt = props[redIdx].type
                         val gt = props[greenIdx].type
                         val bt = props[blueIdx].type
-                        rawColors.add(plyColorFromAsciiToken(parts[redIdx], rt))
-                        rawColors.add(plyColorFromAsciiToken(parts[greenIdx], gt))
-                        rawColors.add(plyColorFromAsciiToken(parts[blueIdx], bt))
+                        rawColors[base] = plyColorFromAsciiToken(parts[redIdx], rt)
+                        rawColors[base + 1] = plyColorFromAsciiToken(parts[greenIdx], gt)
+                        rawColors[base + 2] = plyColorFromAsciiToken(parts[blueIdx], bt)
                     }
-                    readCount++
+                    v++
                 }
             }
+            v
         } else if (fmtLower.contains("binary_little_endian") || fmtLower.contains("binary_big_endian")) {
             raf.seek(header.dataStartOffset)
             val order = if (header.littleEndian) ByteOrder.LITTLE_ENDIAN else ByteOrder.BIG_ENDIAN
-
-            // vertex stride 계산
-            val stride = props.sumOf { typeSizeBytes(it.type) }
-            val row = ByteArray(stride)
+            val rowStride = props.sumOf { typeSizeBytes(it.type) }
+            val row = ByteArray(rowStride)
 
             for (i in 0 until header.vertexCount) {
                 raf.readFully(row)
@@ -488,35 +615,41 @@ private fun parsePlyPointsAny(file: File): PlyParseResult {
                 var cg = 0f
                 var cb = 0f
                 for ((pi, p) in props.withIndex()) {
-                    val v = readScalarAsFloat(bb, p.type)
+                    val vv = readScalarAsFloat(bb, p.type)
                     when (pi) {
-                        xIdx -> x = v
-                        yIdx -> y = v
-                        zIdx -> z = v
-                        redIdx -> cr = plyColorFromScalar(v, p.type)
-                        greenIdx -> cg = plyColorFromScalar(v, p.type)
-                        blueIdx -> cb = plyColorFromScalar(v, p.type)
+                        xIdx -> x = vv
+                        yIdx -> y = vv
+                        zIdx -> z = vv
+                        redIdx -> cr = plyColorFromScalar(vv, p.type)
+                        greenIdx -> cg = plyColorFromScalar(vv, p.type)
+                        blueIdx -> cb = plyColorFromScalar(vv, p.type)
                     }
                 }
-                rawPoints.add(x); rawPoints.add(y); rawPoints.add(z)
+                val base = i * 3
+                rawPoints[base] = x
+                rawPoints[base + 1] = y
+                rawPoints[base + 2] = z
                 if (rawColors != null) {
-                    rawColors.add(cr); rawColors.add(cg); rawColors.add(cb)
+                    rawColors[base] = cr
+                    rawColors[base + 1] = cg
+                    rawColors[base + 2] = cb
                 }
             }
+            header.vertexCount
         } else {
             throw IllegalArgumentException("지원하지 않는 PLY format: ${header.format}")
         }
 
-        val count = rawPoints.size / 3
         if (count <= 0) {
             throw IllegalArgumentException("PLY에서 vertex를 읽지 못했습니다. (format: ${header.format})")
         }
 
-        val vertexColors: FloatArray? = if (hasRgb && rawColors != null && rawColors.size == count * 3) {
+        val vertexColors: FloatArray? = if (hasRgb && rawColors != null) {
             FloatArray(count * 3) { i -> rawColors[i].coerceIn(0f, 1f) }
-        } else null
+        } else {
+            null
+        }
 
-        // bounds -> normalize (기존 parsePlyPoints와 동일)
         var minX = Float.MAX_VALUE
         var minY = Float.MAX_VALUE
         var minZ = Float.MAX_VALUE
@@ -542,18 +675,17 @@ private fun parsePlyPointsAny(file: File): PlyParseResult {
         val maxDim = max(maxX - minX, max(maxY - minY, maxZ - minZ))
         val half = if (maxDim > 0f) maxDim / 2f else 1f
 
-        val points = FloatArray(count * 3)
         for (i in 0 until count) {
             val x = rawPoints[i * 3]
             val y = rawPoints[i * 3 + 1]
             val z = rawPoints[i * 3 + 2]
-            points[i * 3] = (x - cx) / half
-            points[i * 3 + 1] = (y - cy) / half
-            points[i * 3 + 2] = (z - cz) / half
+            rawPoints[i * 3] = (x - cx) / half
+            rawPoints[i * 3 + 1] = (y - cy) / half
+            rawPoints[i * 3 + 2] = (z - cz) / half
         }
 
-        val colorsOut = vertexColors?.copyOf()
-        return PlyParseResult(points, count, colorsOut)
+        val points = if (count == header.vertexCount) rawPoints else rawPoints.copyOf(count * 3)
+        return PlyParseResult(points, count, vertexColors)
     }
 }
 
@@ -693,16 +825,11 @@ private data class ObjFacePrimitive(
     val materialColor: ObjMaterialColor?
 )
 
-private data class ObjPointPrimitive(
-    val index: Int,
-    val materialColor: ObjMaterialColor?
-)
-
 private fun parseMtlFile(file: File): Map<String, ObjMaterialColor> {
     if (!file.exists() || !file.isFile) return emptyMap()
     val out = LinkedHashMap<String, ObjMaterialColor>()
     var currentName: String? = null
-    file.bufferedReader().useLines { lines ->
+    file.bufferedReader(StandardCharsets.UTF_8).useLines { lines ->
         lines.forEach { line ->
             val t = line.trim().trimStart('\uFEFF')
             if (t.isEmpty() || t.startsWith("#")) return@forEach
@@ -710,7 +837,7 @@ private fun parseMtlFile(file: File): Map<String, ObjMaterialColor> {
             if (parts.isEmpty()) return@forEach
             when (parts[0].lowercase()) {
                 "newmtl" -> currentName = parts.getOrNull(1)
-                "kd" -> {
+                "kd", "ka" -> {
                     val name = currentName ?: return@forEach
                     if (parts.size < 4) return@forEach
                     val r = (parseObjFloatToken(parts[1]) ?: 0f).coerceIn(0f, 1f)
@@ -738,14 +865,31 @@ private fun loadObjMaterialLibraries(objFile: File, names: List<String>): Map<St
 fun parseObjVertices(file: File): ObjParseResult? {
     if (!file.exists()) return null
     return try {
+        val raw = parseObjVerticesUnbounded(file) ?: return null
+        try {
+            downsamplePreviewMesh(raw)
+        } catch (t: Throwable) {
+            t.printStackTrace()
+            raw
+        }
+    } catch (t: Throwable) {
+        t.printStackTrace()
+        null
+    }
+}
+
+private fun parseObjVerticesUnbounded(file: File): ObjParseResult? {
+    return try {
         val rawPos = ArrayList<Float>(1024)
         val rawCol = ArrayList<Float>(1024)
         var hasEmbeddedVertexColor = false
         val materials = LinkedHashMap<String, ObjMaterialColor>()
-        val pointPrimitives = ArrayList<ObjPointPrimitive>(256)
+        /** `p` 프리미티브: 정점 인덱스(박싱 최소화). 색은 [pointRgbFlat]에 정점당 3 float로 병렬 저장 */
+        val pointVertexIndices = ArrayList<Int>(4096)
+        val pointRgbFlat = ArrayList<Float>(4096)
         val facePrimitives = ArrayList<ObjFacePrimitive>(256)
         var currentMaterialName: String? = null
-        file.bufferedReader().useLines { lines ->
+        file.bufferedReader(StandardCharsets.UTF_8).useLines { lines ->
             lines.forEach { line ->
                 val t = line.trim().trimStart('\uFEFF')
                 if (t.isEmpty() || t.startsWith("#")) return@forEach
@@ -775,7 +919,24 @@ fun parseObjVertices(file: File): ObjParseResult? {
                         val vertexCount = rawPos.size / 3
                         for (tok in parts.drop(1)) {
                             val index = resolveObjVertexIndex(tok, vertexCount) ?: continue
-                            pointPrimitives.add(ObjPointPrimitive(index, material))
+                            pointVertexIndices.add(index)
+                            when {
+                                material != null -> {
+                                    pointRgbFlat.add(material.r)
+                                    pointRgbFlat.add(material.g)
+                                    pointRgbFlat.add(material.b)
+                                }
+                                hasEmbeddedVertexColor && rawCol.size == vertexCount * 3 -> {
+                                    pointRgbFlat.add(rawCol[index * 3])
+                                    pointRgbFlat.add(rawCol[index * 3 + 1])
+                                    pointRgbFlat.add(rawCol[index * 3 + 2])
+                                }
+                                else -> {
+                                    pointRgbFlat.add(0.70f)
+                                    pointRgbFlat.add(0.72f)
+                                    pointRgbFlat.add(0.75f)
+                                }
+                            }
                         }
                     }
                     "f" -> {
@@ -816,14 +977,22 @@ fun parseObjVertices(file: File): ObjParseResult? {
                     triList.add(normalized[vid * 3])
                     triList.add(normalized[vid * 3 + 1])
                     triList.add(normalized[vid * 3 + 2])
-                    if (primitive.materialColor != null) {
-                        colList.add(primitive.materialColor.r)
-                        colList.add(primitive.materialColor.g)
-                        colList.add(primitive.materialColor.b)
-                    } else if (hasEmbeddedVertexColor && rawCol.size == count * 3) {
-                        colList.add(rawCol[vid * 3])
-                        colList.add(rawCol[vid * 3 + 1])
-                        colList.add(rawCol[vid * 3 + 2])
+                    when {
+                        primitive.materialColor != null -> {
+                            colList.add(primitive.materialColor.r)
+                            colList.add(primitive.materialColor.g)
+                            colList.add(primitive.materialColor.b)
+                        }
+                        hasEmbeddedVertexColor && rawCol.size == count * 3 -> {
+                            colList.add(rawCol[vid * 3])
+                            colList.add(rawCol[vid * 3 + 1])
+                            colList.add(rawCol[vid * 3 + 2])
+                        }
+                        else -> {
+                            colList.add(0.70f)
+                            colList.add(0.72f)
+                            colList.add(0.75f)
+                        }
                     }
                 }
             }
@@ -832,37 +1001,35 @@ fun parseObjVertices(file: File): ObjParseResult? {
             } else {
                 val triCount = triList.size / 3
                 val tv = FloatArray(triList.size) { triList[it] }
-                val tc = if (colList.size == triList.size) {
-                    FloatArray(colList.size) { colList[it] }
-                } else null
+                val tc = FloatArray(colList.size) { colList[it] }
                 return ObjParseResult(tv, triCount, MeshDrawMode.TRIANGLES, tc)
             }
         }
 
-        if (pointPrimitives.isNotEmpty()) {
-            val pointList = ArrayList<Float>(pointPrimitives.size * 3)
-            val pointColors = ArrayList<Float>(pointPrimitives.size * 3)
-            for (primitive in pointPrimitives) {
-                val vid = primitive.index
+        if (pointVertexIndices.isNotEmpty()) {
+            val nPts = pointVertexIndices.size
+            if (pointRgbFlat.size != nPts * 3) {
+                while (pointRgbFlat.size < nPts * 3) {
+                    pointRgbFlat.add(0.70f)
+                    pointRgbFlat.add(0.72f)
+                    pointRgbFlat.add(0.75f)
+                }
+            }
+            val pointList = ArrayList<Float>(nPts * 3)
+            val pointColorsOut = ArrayList<Float>(nPts * 3)
+            for (i in 0 until nPts) {
+                val vid = pointVertexIndices[i]
                 if (vid !in 0 until count) continue
                 pointList.add(normalized[vid * 3])
                 pointList.add(normalized[vid * 3 + 1])
                 pointList.add(normalized[vid * 3 + 2])
-                if (primitive.materialColor != null) {
-                    pointColors.add(primitive.materialColor.r)
-                    pointColors.add(primitive.materialColor.g)
-                    pointColors.add(primitive.materialColor.b)
-                } else if (hasEmbeddedVertexColor && rawCol.size == count * 3) {
-                    pointColors.add(rawCol[vid * 3])
-                    pointColors.add(rawCol[vid * 3 + 1])
-                    pointColors.add(rawCol[vid * 3 + 2])
-                }
+                pointColorsOut.add(pointRgbFlat[i * 3])
+                pointColorsOut.add(pointRgbFlat[i * 3 + 1])
+                pointColorsOut.add(pointRgbFlat[i * 3 + 2])
             }
             if (pointList.isNotEmpty()) {
                 val pv = FloatArray(pointList.size) { pointList[it] }
-                val pc = if (pointColors.size == pointList.size) {
-                    FloatArray(pointColors.size) { pointColors[it] }
-                } else null
+                val pc = FloatArray(pointColorsOut.size) { pointColorsOut[it] }
                 return ObjParseResult(pv, pointList.size / 3, MeshDrawMode.POINTS, pc)
             }
         }
@@ -871,8 +1038,8 @@ fun parseObjVertices(file: File): ObjParseResult? {
             FloatArray(count * 3) { i -> rawCol[i] }
         } else null
         ObjParseResult(normalized, count, MeshDrawMode.POINTS, colors)
-    } catch (e: Exception) {
-        e.printStackTrace()
+    } catch (t: Throwable) {
+        t.printStackTrace()
         null
     }
 }
@@ -1051,6 +1218,14 @@ private class ObjRenderer : GLSurfaceView.Renderer {
         rotationX = 0f
         rotationY = 0f
         cameraDistance = 3f
+        if (count <= 0 || points.size < count * 3) {
+            pointBuffer = null
+            vertexCount = 0
+            drawTriangles = false
+            triUseVertexColor = false
+            pointsUseVertexColor = false
+            return
+        }
         drawTriangles = drawMode == MeshDrawMode.TRIANGLES
         triUseVertexColor = drawTriangles &&
             vertexColors != null &&
@@ -1059,40 +1234,51 @@ private class ObjRenderer : GLSurfaceView.Renderer {
             vertexColors != null &&
             vertexColors.size == count * 3
 
-        if (triUseVertexColor) {
-            val bb = ByteBuffer.allocateDirect(count * 6 * 4).order(ByteOrder.nativeOrder())
-            val fb = bb.asFloatBuffer()
-            for (i in 0 until count) {
-                fb.put(points[i * 3])
-                fb.put(points[i * 3 + 1])
-                fb.put(points[i * 3 + 2])
-                fb.put(vertexColors!![i * 3])
-                fb.put(vertexColors[i * 3 + 1])
-                fb.put(vertexColors[i * 3 + 2])
+        try {
+            if (triUseVertexColor) {
+                val bb = ByteBuffer.allocateDirect(count * 6 * 4).order(ByteOrder.nativeOrder())
+                val fb = bb.asFloatBuffer()
+                for (i in 0 until count) {
+                    fb.put(points[i * 3])
+                    fb.put(points[i * 3 + 1])
+                    fb.put(points[i * 3 + 2])
+                    fb.put(vertexColors!![i * 3])
+                    fb.put(vertexColors[i * 3 + 1])
+                    fb.put(vertexColors[i * 3 + 2])
+                }
+                fb.position(0)
+                pointBuffer = fb
+            } else if (pointsUseVertexColor) {
+                val bb = ByteBuffer.allocateDirect(count * 6 * 4).order(ByteOrder.nativeOrder())
+                val fb = bb.asFloatBuffer()
+                for (i in 0 until count) {
+                    fb.put(points[i * 3])
+                    fb.put(points[i * 3 + 1])
+                    fb.put(points[i * 3 + 2])
+                    fb.put(vertexColors!![i * 3])
+                    fb.put(vertexColors[i * 3 + 1])
+                    fb.put(vertexColors[i * 3 + 2])
+                }
+                fb.position(0)
+                pointBuffer = fb
+            } else {
+                val bb = ByteBuffer.allocateDirect(count * 3 * 4).order(ByteOrder.nativeOrder())
+                val fb = bb.asFloatBuffer()
+                for (i in 0 until count * 3) {
+                    fb.put(points[i])
+                }
+                fb.position(0)
+                pointBuffer = fb
             }
-            fb.position(0)
-            pointBuffer = fb
-        } else if (pointsUseVertexColor) {
-            val bb = ByteBuffer.allocateDirect(count * 6 * 4).order(ByteOrder.nativeOrder())
-            val fb = bb.asFloatBuffer()
-            for (i in 0 until count) {
-                fb.put(points[i * 3])
-                fb.put(points[i * 3 + 1])
-                fb.put(points[i * 3 + 2])
-                fb.put(vertexColors!![i * 3])
-                fb.put(vertexColors[i * 3 + 1])
-                fb.put(vertexColors[i * 3 + 2])
-            }
-            fb.position(0)
-            pointBuffer = fb
-        } else {
-            val bb = ByteBuffer.allocateDirect(points.size * 4).order(ByteOrder.nativeOrder())
-            val fb = bb.asFloatBuffer()
-            fb.put(points)
-            fb.position(0)
-            pointBuffer = fb
+            vertexCount = count
+        } catch (oom: OutOfMemoryError) {
+            android.util.Log.e("ObjViewer", "setPoints OOM (vertices=$count)", oom)
+            pointBuffer = null
+            vertexCount = 0
+            drawTriangles = false
+            triUseVertexColor = false
+            pointsUseVertexColor = false
         }
-        vertexCount = count
     }
 
     fun addRotation(dx: Float, dy: Float) {
@@ -1325,12 +1511,16 @@ class ObjSurfaceView(context: Context) : GLSurfaceView(context) {
 
     fun loadModel(file: File) {
         Thread {
-            val parsed = parseObjVertices(file)
-            if (parsed != null) {
-                queueEvent {
-                    renderer.setPoints(parsed.points, parsed.count, parsed.drawMode, parsed.vertexColors)
-                    requestRender()
+            try {
+                val parsed = parseObjVertices(file)
+                if (parsed != null) {
+                    queueEvent {
+                        renderer.setPoints(parsed.points, parsed.count, parsed.drawMode, parsed.vertexColors)
+                        requestRender()
+                    }
                 }
+            } catch (t: Throwable) {
+                android.util.Log.e("ObjViewer", "loadModel failed: ${file.name}", t)
             }
         }.start()
     }
@@ -1339,18 +1529,23 @@ class ObjSurfaceView(context: Context) : GLSurfaceView(context) {
     fun loadMeshFile(file: File, onLoaded: (() -> Unit)? = null) {
         val main = Handler(Looper.getMainLooper())
         Thread {
-            val parsed = when {
-                file.extension.equals("stl", true) -> parseStlVertices(file)
-                file.extension.equals("ply", true) -> loadColoredPlyMesh(file)
-                file.extension.equals("obj", true) -> parseObjVertices(file)
-                else -> parseObjVertices(file)
-            }
-            if (parsed != null) {
-                queueEvent {
-                    renderer.setPoints(parsed.points, parsed.count, parsed.drawMode, parsed.vertexColors)
+            try {
+                val parsed = when {
+                    file.extension.equals("stl", true) -> parseStlVertices(file)
+                    file.extension.equals("ply", true) -> loadColoredPlyMesh(file)
+                    file.extension.equals("obj", true) -> parseObjVertices(file)
+                    else -> parseObjVertices(file)
+                }
+                if (parsed != null) {
+                    queueEvent {
+                        renderer.setPoints(parsed.points, parsed.count, parsed.drawMode, parsed.vertexColors)
+                        main.post { onLoaded?.invoke() }
+                    }
+                } else {
                     main.post { onLoaded?.invoke() }
                 }
-            } else {
+            } catch (t: Throwable) {
+                android.util.Log.e("ObjViewer", "loadMeshFile failed: ${file.name}", t)
                 main.post { onLoaded?.invoke() }
             }
         }.start()
@@ -1359,7 +1554,11 @@ class ObjSurfaceView(context: Context) : GLSurfaceView(context) {
     /** 이미 파싱된 메쉬를 GL 스레드에 적용 (Compose에서 IO 후 전달할 때 사용) */
     fun applyParsedMesh(parsed: ObjParseResult) {
         queueEvent {
-            renderer.setPoints(parsed.points, parsed.count, parsed.drawMode, parsed.vertexColors)
+            try {
+                renderer.setPoints(parsed.points, parsed.count, parsed.drawMode, parsed.vertexColors)
+            } catch (t: Throwable) {
+                android.util.Log.e("ObjViewer", "applyParsedMesh", t)
+            }
         }
     }
 

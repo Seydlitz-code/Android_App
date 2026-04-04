@@ -10,6 +10,7 @@ import android.provider.OpenableColumns
 import android.graphics.Bitmap
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Locale
 
 data class MediaTransferResult(
     val successCount: Int,
@@ -73,7 +74,7 @@ private fun isVideoUriCompat(context: Context, uri: Uri): Boolean {
 /**
  * 앱 내부(외부파일 디렉토리)로 사진 가져오기.
  * - 저장 위치: externalFilesDir/imported/
- * - loadCapturedMedia()가 스캔하는 범위에 포함되도록 datasets 하위는 사용하지 않음
+ * - loadCapturedMediaSync()가 스캔하는 범위에 포함되도록 datasets 하위는 사용하지 않음
  */
 suspend fun importImagesToAppLibrary(context: Context, uris: List<Uri>): MediaTransferResult {
     if (uris.isEmpty()) return MediaTransferResult(0, 0, "가져올 사진이 없습니다.")
@@ -113,6 +114,77 @@ suspend fun importImagesToAppLibrary(context: Context, uris: List<Uri>): MediaTr
         ok > 0 && fail > 0 -> "가져오기 완료: ${ok}장 (실패 ${fail}장)"
         ok > 0 -> "가져오기 완료: ${ok}장"
         else -> "가져오기에 실패했습니다."
+    }
+    return MediaTransferResult(ok, fail, msg)
+}
+
+/**
+ * 앱 갤러리에 있는 이미지를 복사해 `datasets/<폴더명>/`에 저장합니다.
+ * 원본 파일은 그대로 두므로 앱 갤러리 목록은 변하지 않습니다.
+ */
+suspend fun copyImagesToDatasetFolder(
+    context: Context,
+    uris: List<Uri>,
+    folderDisplayName: String
+): MediaTransferResult {
+    if (uris.isEmpty()) return MediaTransferResult(0, 0, "선택된 이미지가 없습니다.")
+    val trimmed = folderDisplayName.trim()
+    val safeFolder = trimmed
+        .replace(Regex("[^a-zA-Z0-9_\\-\\uAC00-\\uD7A3]"), "_")
+        .take(80)
+        .ifBlank { "dataset_${System.currentTimeMillis()}" }
+
+    val root = File(context.getExternalFilesDir(null), "datasets")
+    root.mkdirs()
+    val dir = File(root, safeFolder)
+    if (dir.exists()) {
+        return MediaTransferResult(0, uris.size, "같은 이름의 폴더가 이미 있습니다.")
+    }
+    if (!dir.mkdirs()) {
+        return MediaTransferResult(0, uris.size, "폴더를 만들 수 없습니다.")
+    }
+
+    val resolver = context.contentResolver
+    var ok = 0
+    var fail = 0
+    var index = 0
+    for (u in uris) {
+        try {
+            if (isVideoUriCompat(context, u)) {
+                fail++
+                continue
+            }
+            index++
+            val displayName = resolveDisplayNameCompat(context, u)
+            val ext = guessExtFromName(displayName)
+            val outFile = File(dir, String.format(Locale.US, "%04d.%s", index, ext))
+            val inStream = resolver.openInputStream(u)
+            if (inStream == null) {
+                fail++
+                continue
+            }
+            inStream.use { input ->
+                FileOutputStream(outFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            ok++
+        } catch (_: Exception) {
+            fail++
+        }
+    }
+
+    if (ok == 0) {
+        try {
+            dir.deleteRecursively()
+        } catch (_: Exception) {
+        }
+    }
+
+    val msg = when {
+        ok > 0 && fail > 0 -> "데이터셋폴더에 ${ok}장을 저장했습니다. (동영상·실패 ${fail}건 제외)"
+        ok > 0 -> "데이터셋폴더「$safeFolder」에 ${ok}장을 저장했습니다."
+        else -> "이미지를 복사하지 못했습니다."
     }
     return MediaTransferResult(ok, fail, msg)
 }

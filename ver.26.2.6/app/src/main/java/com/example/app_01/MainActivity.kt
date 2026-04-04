@@ -10,9 +10,11 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.media.MediaActionSound
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.view.Surface
 import org.json.JSONObject
@@ -27,6 +29,7 @@ import android.view.MotionEvent
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.nio.charset.StandardCharsets
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import androidx.compose.foundation.Canvas
@@ -104,6 +107,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
@@ -254,8 +258,8 @@ import androidx.core.content.ContextCompat
 import coil.compose.rememberAsyncImagePainter
 import android.widget.VideoView
 import android.widget.MediaController
-import android.media.MediaMetadataRetriever
 import android.graphics.Bitmap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -264,6 +268,7 @@ import com.example.app_01.ui.theme.App_01Theme
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.TimeZone
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -464,7 +469,13 @@ enum class LibraryTab {
 }
 
 enum class LibraryDetailScreen {
-    NONE, DATASET_FOLDER, MODEL_VIEWER, OBJ_VIEWER
+    NONE,
+    DATASET_FOLDER,
+    MODEL_VIEWER,
+    OBJ_VIEWER,
+    /** 3D 모델 탭: PLY / OBJ 각각의 파일 목록 */
+    MODEL_3D_PLY_LIST,
+    MODEL_3D_OBJ_LIST,
 }
 
 enum class CameraEntryMode {
@@ -588,22 +599,21 @@ fun CameraApp(modifier: Modifier = Modifier) {
         }
     }
 
+    // 갤러리 그리드 스크롤 상태 — 이미지 상세 화면 이동 후 복귀 시 위치 유지
+    val galleryGridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
+    val galleryScope = rememberCoroutineScope()
+
     LaunchedEffect(Unit) {
-        loadCapturedMedia(context) { images ->
-            capturedImages = images
-            if (images.isNotEmpty()) {
-                lastCapturedImageUri = images.first()
-            }
+        val images = withContext(Dispatchers.IO) { loadCapturedMediaSync(context) }
+        capturedImages = images
+        if (images.isNotEmpty()) {
+            lastCapturedImageUri = images.first()
         }
     }
 
     var selectedMediaUri by remember { mutableStateOf<Uri?>(null) }
     var selectedMediaIndex by remember { mutableStateOf(0) }
     var viewingMediaList by remember { mutableStateOf<List<Uri>>(emptyList()) }
-
-    // 갤러리 그리드 스크롤 상태 — 이미지 상세 화면 이동 후 복귀 시 위치 유지
-    val galleryGridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
-    val galleryScope = rememberCoroutineScope()
     
     Column(
         modifier = modifier
@@ -618,7 +628,9 @@ fun CameraApp(modifier: Modifier = Modifier) {
                     selectedMediaUri = null
                     // 갤러리로 복귀 시 마지막으로 본 이미지가 있는 행으로 스크롤
                     galleryScope.launch {
-                        galleryGridState.scrollToItem(selectedMediaIndex)
+                        galleryGridState.scrollToItem(
+                            gridItemIndexForMediaIndex(selectedMediaIndex, capturedImages, context)
+                        )
                     }
                 },
                 onMediaChanged = { index ->
@@ -628,9 +640,12 @@ fun CameraApp(modifier: Modifier = Modifier) {
                     }
                 },
                 onGalleryUpdated = {
-                    loadCapturedMedia(context) { images ->
-                        capturedImages = images
-                        if (images.isNotEmpty()) lastCapturedImageUri = images.first()
+                    galleryScope.launch(Dispatchers.IO) {
+                        val images = loadCapturedMediaSync(context)
+                        withContext(Dispatchers.Main) {
+                            capturedImages = images
+                            if (images.isNotEmpty()) lastCapturedImageUri = images.first()
+                        }
                     }
                 }
             )
@@ -674,12 +689,15 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                 }
                             },
                             onImageDeleted = {
-                                loadCapturedMedia(context) { images ->
-                                    capturedImages = images
-                                    if (images.isNotEmpty()) {
-                                        lastCapturedImageUri = images.first()
-                                    } else {
-                                        lastCapturedImageUri = null
+                                galleryScope.launch(Dispatchers.IO) {
+                                    val images = loadCapturedMediaSync(context)
+                                    withContext(Dispatchers.Main) {
+                                        capturedImages = images
+                                        if (images.isNotEmpty()) {
+                                            lastCapturedImageUri = images.first()
+                                        } else {
+                                            lastCapturedImageUri = null
+                                        }
                                     }
                                 }
                             },
@@ -691,9 +709,12 @@ fun CameraApp(modifier: Modifier = Modifier) {
                         ClaudeChatScreen(
                             galleryImages = capturedImages,
                             onGalleryUpdated = {
-                                loadCapturedMedia(context) { images ->
-                                    capturedImages = images
-                                    if (images.isNotEmpty()) lastCapturedImageUri = images.first()
+                                galleryScope.launch(Dispatchers.IO) {
+                                    val images = loadCapturedMediaSync(context)
+                                    withContext(Dispatchers.Main) {
+                                        capturedImages = images
+                                        if (images.isNotEmpty()) lastCapturedImageUri = images.first()
+                                    }
                                 }
                             },
                             onAiCadSavedToLibrary = { aiCadLibraryVersion++ }
@@ -711,19 +732,25 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                         lastCapturedImageUri = lastCapturedImageUri,
                                         onImageCaptured = { uri ->
                                             lastCapturedImageUri = uri
-                                            loadCapturedMedia(context) { images ->
-                                                capturedImages = images
-                                                if (images.isNotEmpty()) {
-                                                    lastCapturedImageUri = images.first()
+                                            galleryScope.launch(Dispatchers.IO) {
+                                                val images = loadCapturedMediaSync(context)
+                                                withContext(Dispatchers.Main) {
+                                                    capturedImages = images
+                                                    if (images.isNotEmpty()) {
+                                                        lastCapturedImageUri = images.first()
+                                                    }
                                                 }
                                             }
                                         },
                                         onVideoCaptured = { uri ->
                                             lastCapturedImageUri = uri
-                                            loadCapturedMedia(context) { images ->
-                                                capturedImages = images
-                                                if (images.isNotEmpty()) {
-                                                    lastCapturedImageUri = images.first()
+                                            galleryScope.launch(Dispatchers.IO) {
+                                                val images = loadCapturedMediaSync(context)
+                                                withContext(Dispatchers.Main) {
+                                                    capturedImages = images
+                                                    if (images.isNotEmpty()) {
+                                                        lastCapturedImageUri = images.first()
+                                                    }
                                                 }
                                             }
                                         },
@@ -2697,7 +2724,7 @@ private fun ClaudeImageSelectDialog(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "이미지 선택 (갤러리·데이터셋 폴더)",
+                        text = "이미지 선택 (갤러리·데이터셋폴더)",
                         color = Color.White,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold
@@ -2716,7 +2743,7 @@ private fun ClaudeImageSelectDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    listOf("갤러리 (${galleryImages.size})" to 0, "데이터셋 폴더 (${datasetFolders.size})" to 1).forEach { (label, index) ->
+                    listOf("갤러리 (${galleryImages.size})" to 0, "데이터셋폴더 (${datasetFolders.size})" to 1).forEach { (label, index) ->
                         val isSelected = selectedTab == index
                         Text(
                             text = label,
@@ -2780,7 +2807,7 @@ private fun ClaudeImageSelectDialog(
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = "데이터셋 폴더가 없습니다.",
+                                    text = "데이터셋폴더가 없습니다.",
                                     color = Color.White.copy(alpha = 0.7f),
                                     fontSize = 14.sp
                                 )
@@ -3953,11 +3980,17 @@ data class PlyModel(
     val lastModified: Long
 )
 
+private data class Model3dSplitLibrary(
+    val plyModels: List<PlyModel>,
+    val objModels: List<PlyModel>,
+)
+
 /** 갤러리 오버플로 메뉴에서 선택한 뒤 이미지 선택·확인으로 이어지는 동작 */
 private enum class PendingGalleryMenuAction {
     None,
     BackgroundRemove,
     GlareRemove,
+    CreateDatasetFolder,
     Export,
     Share
 }
@@ -4090,12 +4123,187 @@ fun BottomNavItem(
 
 private val LibraryHubThumbRadius = 26.dp
 
+@Composable
+private fun PlyModelThumbnailImage(
+    model: PlyModel,
+    thumbRefresh: Int,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    var thumbUri by remember(model.file.absolutePath) { mutableStateOf<Uri?>(null) }
+    LaunchedEffect(model.file.absolutePath, model.lastModified, thumbRefresh) {
+        thumbUri = try {
+            Model3dThumbnail.generateOrGetAsync(context, model.file)?.let { Uri.fromFile(it) }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        if (thumbUri != null) {
+            Image(
+                painter = rememberAsyncImagePainter(thumbUri),
+                contentDescription = model.name,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Filled.Public,
+                contentDescription = "3D Model",
+                tint = Color(0xFF7ED321),
+                modifier = Modifier.size(48.dp)
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun Model3dLibraryGridItem(
+    model: PlyModel,
+    thumbRefresh: Int,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.combinedClickable(
+            onClick = onClick,
+            onLongClick = onLongClick
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xFF1A1A1A))
+                .border(
+                    width = if (isSelected) 4.dp else 1.dp,
+                    color = if (isSelected) Color.Blue
+                    else Color.White.copy(alpha = 0.2f),
+                    shape = RoundedCornerShape(8.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            PlyModelThumbnailImage(
+                model = model,
+                thumbRefresh = thumbRefresh,
+                modifier = Modifier.fillMaxSize()
+            )
+            if (isSelected) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                        .size(28.dp)
+                        .background(Color(0xFF7ED321), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Check,
+                        contentDescription = "선택됨",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = model.file.name,
+            color = Color.White,
+            fontSize = 12.sp,
+            maxLines = 1,
+            textAlign = TextAlign.Center
+        )
+    }
+}
+
+/** 3D 모델 탭: PLY / OBJ 포맷별 서브 라이브러리 카드 (메인 허브와 동일한 카드 스타일) */
+@Composable
+private fun Model3dFormatHubGrid(
+    plyCount: Int,
+    objCount: Int,
+    plyCoverUri: Uri?,
+    objCoverUri: Uri?,
+    onOpenPly: () -> Unit,
+    onOpenObj: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(2),
+        modifier = modifier,
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp)
+    ) {
+        items(2, key = { if (it == 0) "hub_ply" else "hub_obj" }) { idx ->
+            val title = if (idx == 0) "PLY" else "OBJ"
+            val countLabel = if (idx == 0) "${plyCount}개" else "${objCount}개"
+            val coverUri = if (idx == 0) plyCoverUri else objCoverUri
+            val tint = if (idx == 0) Color(0xFF9CD83B) else Color(0xFF7ED321)
+            val onOpen = if (idx == 0) onOpenPly else onOpenObj
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpen),
+                horizontalAlignment = Alignment.Start
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1f)
+                        .clip(RoundedCornerShape(LibraryHubThumbRadius))
+                        .background(Color(0xFF1C1C1E))
+                ) {
+                    if (coverUri != null) {
+                        Image(
+                            painter = rememberAsyncImagePainter(coverUri),
+                            contentDescription = title,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Public,
+                                contentDescription = null,
+                                tint = tint.copy(alpha = 0.85f),
+                                modifier = Modifier.size(44.dp)
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = title,
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
+                Text(
+                    text = countLabel,
+                    color = Color.White.copy(alpha = 0.45f),
+                    fontSize = 13.sp,
+                    maxLines = 1
+                )
+            }
+        }
+    }
+}
+
 /** 갤럭시 갤러리 스타일 라이브러리 앨범 허브 (3열 그리드) */
 @Composable
 private fun LibraryAlbumHubGrid(
     images: List<Uri>,
     datasetFolders: List<DatasetFolder>,
-    plyModels: List<PlyModel>,
+    model3dTotalCount: Int,
+    model3dCoverUri: Uri?,
     aiCadStlFiles: List<File>,
     onOpenSection: (LibraryTab) -> Unit,
     modifier: Modifier = Modifier
@@ -4120,8 +4328,8 @@ private fun LibraryAlbumHubGrid(
     val entries = listOf(
         HubEntry(
             LibraryTab.MODEL_3D, "3D 모델",
-            "${plyModels.size}개",
-            null,
+            "${model3dTotalCount}개",
+            model3dCoverUri,
             Icons.Filled.Public,
             Color(0xFF7ED321)
         ),
@@ -4133,7 +4341,7 @@ private fun LibraryAlbumHubGrid(
             Color(0xFF9CD83B)
         ),
         HubEntry(
-            LibraryTab.DATASET, "데이터셋",
+            LibraryTab.DATASET, "데이터셋폴더",
             "${datasetFolders.size}개",
             datasetCover,
             Icons.Filled.Folder,
@@ -4262,12 +4470,34 @@ fun GalleryScreen(
     var showLibraryAssetDeleteConfirm by remember { mutableStateOf(false) }
     var showGalleryOverflowMenu by remember { mutableStateOf(false) }
     var pendingGalleryMenuAction by remember { mutableStateOf(PendingGalleryMenuAction.None) }
+    var showNewDatasetFolderNameDialog by remember { mutableStateOf(false) }
+    var newDatasetFolderNameInput by remember { mutableStateOf("") }
+    var pendingDatasetFolderImageUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var datasetFolders by remember { mutableStateOf<List<DatasetFolder>>(emptyList()) }
     var datasetImages by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var currentDatasetFolder by remember { mutableStateOf<DatasetFolder?>(null) }
     var libraryDetailScreen by remember { mutableStateOf(LibraryDetailScreen.NONE) }
-    var plyModels by remember { mutableStateOf<List<PlyModel>>(emptyList()) }
+    var plyLibraryModels by remember { mutableStateOf<List<PlyModel>>(emptyList()) }
+    var objLibraryModels by remember { mutableStateOf<List<PlyModel>>(emptyList()) }
+    val allModel3dLibrary = plyLibraryModels + objLibraryModels
     var currentPlyModel by remember { mutableStateOf<PlyModel?>(null) }
+
+    val objViewerPathKey =
+        if (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER && currentPlyModel != null) {
+            currentPlyModel!!.file.absolutePath
+        } else {
+            null
+        }
+    var objViewerConverting by remember(objViewerPathKey) { mutableStateOf(true) }
+    var objViewerObjFile by remember(objViewerPathKey) { mutableStateOf<File?>(null) }
+    var objViewerPreviewMesh by remember(objViewerPathKey) { mutableStateOf<ObjParseResult?>(null) }
+    var objViewerError by remember(objViewerPathKey) { mutableStateOf<String?>(null) }
+    var objViewerSaving by remember(objViewerPathKey) { mutableStateOf(false) }
+
+    var libraryHubModel3dCoverUri by remember { mutableStateOf<Uri?>(null) }
+    var plySubHubCoverUri by remember { mutableStateOf<Uri?>(null) }
+    var objSubHubCoverUri by remember { mutableStateOf<Uri?>(null) }
+    var libraryModelThumbRefresh by remember { mutableStateOf(0) }
 
     var aiCadStlFiles by remember { mutableStateOf<List<File>>(emptyList()) }
     var selectedAiCadStlFile by remember { mutableStateOf<File?>(null) }
@@ -4275,6 +4505,127 @@ fun GalleryScreen(
     // [추가] 내보내기/가져오기 작업 상태
     var isTransferring by remember { mutableStateOf(false) }
     val transferScope = rememberCoroutineScope()
+
+    LaunchedEffect(objViewerPathKey) {
+        if (objViewerPathKey == null) return@LaunchedEffect
+        val plyFile = File(objViewerPathKey)
+        objViewerConverting = true
+        objViewerError = null
+        objViewerObjFile = null
+        objViewerPreviewMesh = null
+        objViewerSaving = false
+        try {
+            if (plyFile.extension.equals("obj", ignoreCase = true)) {
+                val mesh = withContext(Dispatchers.IO) {
+                    parseObjVertices(plyFile)
+                }
+                objViewerPreviewMesh = mesh
+                objViewerObjFile = plyFile
+                objViewerError = if (mesh == null) {
+                    "OBJ를 읽을 수 없습니다."
+                } else {
+                    null
+                }
+                objViewerConverting = false
+            } else {
+                val savedObj = File(ModelLibraryPaths.objDir(context), "${plyFile.nameWithoutExtension}.obj")
+                if (savedObj.exists() &&
+                    savedObj.length() > 0L &&
+                    savedObj.lastModified() >= plyFile.lastModified()
+                ) {
+                    val mesh = withContext(Dispatchers.IO) {
+                        parseObjVertices(savedObj)
+                    }
+                    objViewerPreviewMesh = mesh
+                    objViewerObjFile = savedObj
+                    objViewerError = if (mesh == null) {
+                        "저장된 OBJ를 읽을 수 없습니다."
+                    } else {
+                        null
+                    }
+                    objViewerConverting = false
+                } else {
+                    val result = withContext(Dispatchers.IO) {
+                        convertPlyToObjCached(context, plyFile)
+                    }
+                    val out = result.file
+                    objViewerPreviewMesh = result.previewMesh
+                    if (out == null || !out.exists()) {
+                        objViewerError = result.error ?: "OBJ 변환에 실패했습니다."
+                        objViewerConverting = false
+                    } else {
+                        objViewerObjFile = out
+                        objViewerConverting = false
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            objViewerError = "처리 중 오류: ${t.message ?: t.javaClass.simpleName}"
+            objViewerConverting = false
+        }
+    }
+
+    val model3dCoverSource = remember(plyLibraryModels, objLibraryModels) {
+        (plyLibraryModels + objLibraryModels).maxByOrNull { it.lastModified }
+    }
+    LaunchedEffect(
+        model3dCoverSource?.file?.absolutePath,
+        model3dCoverSource?.lastModified,
+        libraryModelThumbRefresh
+    ) {
+        val f = model3dCoverSource?.file
+        if (f == null) {
+            libraryHubModel3dCoverUri = null
+            return@LaunchedEffect
+        }
+        libraryHubModel3dCoverUri = try {
+            Model3dThumbnail.generateOrGetAsync(context, f)?.let { Uri.fromFile(it) }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    val plySubHubSource = remember(plyLibraryModels) {
+        plyLibraryModels.maxByOrNull { it.lastModified }?.file
+    }
+    LaunchedEffect(
+        plySubHubSource?.absolutePath,
+        plySubHubSource?.lastModified(),
+        libraryModelThumbRefresh
+    ) {
+        val f = plySubHubSource
+        if (f == null) {
+            plySubHubCoverUri = null
+            return@LaunchedEffect
+        }
+        plySubHubCoverUri = try {
+            Model3dThumbnail.generateOrGetAsync(context, f)?.let { Uri.fromFile(it) }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    val objSubHubSource = remember(objLibraryModels) {
+        objLibraryModels.maxByOrNull { it.lastModified }?.file
+    }
+    LaunchedEffect(
+        objSubHubSource?.absolutePath,
+        objSubHubSource?.lastModified(),
+        libraryModelThumbRefresh
+    ) {
+        val f = objSubHubSource
+        if (f == null) {
+            objSubHubCoverUri = null
+            return@LaunchedEffect
+        }
+        objSubHubCoverUri = try {
+            Model3dThumbnail.generateOrGetAsync(context, f)?.let { Uri.fromFile(it) }
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     // [추가] 1차 배경제거 작업 상태
     var isBgRemoving by remember { mutableStateOf(false) }
@@ -4516,8 +4867,18 @@ fun GalleryScreen(
             }
         }
         if (libraryTab == LibraryTab.MODEL_3D) {
-            loadPlyModels(context) { models ->
-                plyModels = models
+            loadModel3dLibrary(context) { lib ->
+                plyLibraryModels = lib.plyModels
+                objLibraryModels = lib.objModels
+            }
+        }
+        if (libraryTab != LibraryTab.MODEL_3D) {
+            if (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER ||
+                libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ||
+                libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST
+            ) {
+                libraryDetailScreen = LibraryDetailScreen.NONE
+                currentPlyModel = null
             }
         }
     }
@@ -4557,7 +4918,10 @@ fun GalleryScreen(
     LaunchedEffect(showLibraryHub, aiCadLibraryVersion, images.size) {
         if (!showLibraryHub) return@LaunchedEffect
         loadDatasetFolders(context) { datasetFolders = it }
-        loadPlyModels(context) { plyModels = it }
+        loadModel3dLibrary(context) { lib ->
+            plyLibraryModels = lib.plyModels
+            objLibraryModels = lib.objModels
+        }
         aiCadStlFiles = withContext(Dispatchers.IO) { AiCadLibrary.listStlFiles(context) }
     }
 
@@ -4591,16 +4955,50 @@ fun GalleryScreen(
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
-                            .clickable { onLibraryHubVisibilityChange(true) }
+                            .clickable {
+                                when {
+                                    libraryTab == LibraryTab.MODEL_3D &&
+                                        libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER -> {
+                                        val f = currentPlyModel?.file
+                                        libraryDetailScreen =
+                                            if (f?.extension?.equals("obj", ignoreCase = true) == true) {
+                                                LibraryDetailScreen.MODEL_3D_OBJ_LIST
+                                            } else {
+                                                LibraryDetailScreen.MODEL_3D_PLY_LIST
+                                            }
+                                        currentPlyModel = null
+                                    }
+                                    libraryTab == LibraryTab.MODEL_3D && (
+                                        libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ||
+                                            libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST
+                                        ) -> {
+                                        libraryDetailScreen = LibraryDetailScreen.NONE
+                                        libraryAssetEditMode = false
+                                        selectedLibraryAssetPaths = emptySet()
+                                    }
+                                    else -> onLibraryHubVisibilityChange(true)
+                                }
+                            }
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = when (libraryTab) {
-                            LibraryTab.MODEL_3D -> "3D 모델"
-                            LibraryTab.AI_CAD -> "AI CAD"
-                            LibraryTab.DATASET -> "데이터셋"
-                            LibraryTab.GALLERY -> "갤러리"
+                        text = when {
+                            libraryTab == LibraryTab.MODEL_3D &&
+                                libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER ->
+                                currentPlyModel?.file?.name ?: "3D 모델"
+                            libraryTab == LibraryTab.MODEL_3D &&
+                                libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ->
+                                "PLY 라이브러리"
+                            libraryTab == LibraryTab.MODEL_3D &&
+                                libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST ->
+                                "OBJ 라이브러리"
+                            else -> when (libraryTab) {
+                                LibraryTab.MODEL_3D -> "3D 모델"
+                                LibraryTab.AI_CAD -> "AI CAD"
+                                LibraryTab.DATASET -> "데이터셋폴더"
+                                LibraryTab.GALLERY -> "갤러리"
+                            }
                         },
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
@@ -4636,6 +5034,20 @@ fun GalleryScreen(
                                         }
                                         PendingGalleryMenuAction.GlareRemove -> {
                                             runGlareRemovalOnGallerySelection()
+                                        }
+                                        PendingGalleryMenuAction.CreateDatasetFolder -> {
+                                            val imageUris = selectedItems.filter { !isVideoUri(context, it) }
+                                            if (imageUris.isEmpty()) {
+                                                Toast.makeText(
+                                                    context,
+                                                    "폴더에 넣을 이미지를 선택해 주세요. (동영상은 제외됩니다.)",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            } else {
+                                                pendingDatasetFolderImageUris = imageUris
+                                                newDatasetFolderNameInput = ""
+                                                showNewDatasetFolderNameDialog = true
+                                            }
                                         }
                                         PendingGalleryMenuAction.Export -> {
                                             runExportGallerySelection()
@@ -4678,6 +5090,79 @@ fun GalleryScreen(
                                 }
                                 .padding(horizontal = 10.dp, vertical = 4.dp)
                         )
+                    } else if (
+                        libraryTab == LibraryTab.MODEL_3D &&
+                        !showLibraryHub &&
+                        libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER &&
+                        currentPlyModel != null
+                    ) {
+                        val plyF = currentPlyModel!!.file
+                        if (!objViewerConverting && objViewerError == null && objViewerObjFile != null &&
+                            plyF.extension.equals("ply", ignoreCase = true)
+                        ) {
+                            Text(
+                                text = if (objViewerSaving) "저장 중…" else "저장",
+                                color = if (objViewerSaving) Color.White.copy(alpha = 0.5f)
+                                else Color(0xFF9CD83B),
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable(enabled = !objViewerSaving) {
+                                        val cached = objViewerObjFile ?: return@clickable
+                                        objViewerSaving = true
+                                        transferScope.launch {
+                                            val err = withContext(Dispatchers.IO) {
+                                                saveConvertedObjToModelsLibrary(context, plyF, cached)
+                                            }
+                                            objViewerSaving = false
+                                            if (err != null) {
+                                                Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Model3dThumbnail.invalidateForModelFile(context, plyF)
+                                                Model3dThumbnail.invalidateForModelFile(
+                                                    context,
+                                                    File(
+                                                        ModelLibraryPaths.objDir(context),
+                                                        "${plyF.nameWithoutExtension}.obj"
+                                                    )
+                                                )
+                                                libraryModelThumbRefresh++
+                                                Toast.makeText(
+                                                    context,
+                                                    "OBJ가 라이브러리에 저장되었습니다.",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                                loadModel3dLibrary(context) { lib ->
+                                                    plyLibraryModels = lib.plyModels
+                                                    objLibraryModels = lib.objModels
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
+                        IconButton(
+                            onClick = {
+                                val f = currentPlyModel?.file
+                                libraryDetailScreen =
+                                    if (f?.extension?.equals("obj", ignoreCase = true) == true) {
+                                        LibraryDetailScreen.MODEL_3D_OBJ_LIST
+                                    } else {
+                                        LibraryDetailScreen.MODEL_3D_PLY_LIST
+                                    }
+                                currentPlyModel = null
+                            },
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Close,
+                                contentDescription = "닫기",
+                                tint = Color.White
+                            )
+                        }
                     } else if (libraryTab == LibraryTab.GALLERY && !showLibraryHub) {
                         Box {
                             IconButton(
@@ -4725,6 +5210,30 @@ fun GalleryScreen(
                                         isEditMode = true
                                         selectedItems = emptySet()
                                         pendingGalleryMenuAction = PendingGalleryMenuAction.GlareRemove
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "폴더 만들기",
+                                            color = Color.White,
+                                            fontSize = 15.sp
+                                        )
+                                    },
+                                    onClick = {
+                                        showGalleryOverflowMenu = false
+                                        if (!isUploading && !isTransferring && !isGlareRemoving) {
+                                            isEditMode = true
+                                            selectedItems = emptySet()
+                                            pendingGalleryMenuAction =
+                                                PendingGalleryMenuAction.CreateDatasetFolder
+                                        } else {
+                                            Toast.makeText(
+                                                context,
+                                                "다른 작업이 진행 중입니다.",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
                                     }
                                 )
                                 DropdownMenuItem(
@@ -4822,7 +5331,8 @@ fun GalleryScreen(
                 LibraryAlbumHubGrid(
                     images = images,
                     datasetFolders = datasetFolders,
-                    plyModels = plyModels,
+                    model3dTotalCount = allModel3dLibrary.size,
+                    model3dCoverUri = libraryHubModel3dCoverUri,
                     aiCadStlFiles = aiCadStlFiles,
                     onOpenSection = { tab ->
                         onLibraryTabChange(tab)
@@ -4831,256 +5341,267 @@ fun GalleryScreen(
                     modifier = Modifier.fillMaxSize()
                 )
             } else if (libraryTab == LibraryTab.MODEL_3D) {
-            if (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER && currentPlyModel != null) {
-                BackHandler {
-                    libraryDetailScreen = LibraryDetailScreen.NONE
-                    currentPlyModel = null
-                }
-                val plyFile = currentPlyModel!!.file
-                var isConverting by remember(plyFile) { mutableStateOf(true) }
-                var objFile by remember(plyFile) { mutableStateOf<File?>(null) }
-                var previewMesh by remember(plyFile) { mutableStateOf<ObjParseResult?>(null) }
-                var convertError by remember(plyFile) { mutableStateOf<String?>(null) }
+                if (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER && currentPlyModel != null) {
+                    BackHandler {
+                        val f = currentPlyModel?.file
+                        libraryDetailScreen =
+                            if (f?.extension?.equals("obj", ignoreCase = true) == true) {
+                                LibraryDetailScreen.MODEL_3D_OBJ_LIST
+                            } else {
+                                LibraryDetailScreen.MODEL_3D_PLY_LIST
+                            }
+                        currentPlyModel = null
+                    }
+                    val viewerSourceFile = currentPlyModel!!.file
 
-                LaunchedEffect(plyFile) {
-                    isConverting = true
-                    convertError = null
-                    objFile = null
-                    previewMesh = null
-                    val result = withContext(Dispatchers.IO) {
-                        convertPlyToObjCached(context, plyFile)
-                    }
-                    val out = result.file
-                    previewMesh = result.previewMesh
-                    if (out == null || !out.exists()) {
-                        convertError = result.error ?: "OBJ 변환에 실패했습니다."
-                        isConverting = false
-                    } else {
-                        objFile = out
-                        isConverting = false
-                    }
-                }
-
-                Box(modifier = Modifier.fillMaxSize()) {
-                    when {
-                        isConverting -> {
-                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Text(
-                                    text = "OBJ 변환 중...",
-                                    color = Color.White,
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                        convertError != null -> {
-                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Text(
-                                    text = convertError ?: "오류",
-                                    color = Color.White,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    textAlign = TextAlign.Center
-                                )
-                            }
-                        }
-                        objFile != null -> {
-                            key(objFile!!.absolutePath) {
-                                AndroidView(
-                                    factory = { ctx ->
-                                        ObjSurfaceView(ctx).apply {
-                                            val mesh = previewMesh
-                                            if (mesh != null) {
-                                                applyParsedMesh(mesh)
-                                            } else {
-                                                loadModel(objFile!!)
-                                            }
-                                        }
-                                    },
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            }
-                        }
-                    }
-
-                    Icon(
-                        imageVector = Icons.Filled.Close,
-                        contentDescription = "닫기",
-                        tint = Color.White,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(16.dp)
-                            .size(32.dp)
-                            .clickable {
-                                libraryDetailScreen = LibraryDetailScreen.NONE
-                                currentPlyModel = null
-                            }
-                    )
-                }
-            } else {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    if (libraryAssetEditMode) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Share,
-                                contentDescription = "공유하기",
-                                tint = if (selectedLibraryAssetPaths.isNotEmpty()) Color(0xFF9CD83B)
-                                else Color(0xFF9CD83B).copy(alpha = 0.4f),
-                                modifier = Modifier
-                                    .size(20.dp)
-                                    .clickable(enabled = selectedLibraryAssetPaths.isNotEmpty()) {
-                                        val files = plyModels
-                                            .filter { selectedLibraryAssetPaths.contains(it.file.absolutePath) }
-                                            .map { it.file }
-                                        shareLibraryFiles(context, files)
-                                    }
-                            )
-                            Text(
-                                text = "삭제",
-                                color = if (selectedLibraryAssetPaths.isNotEmpty()) Color.White
-                                else Color.White.copy(alpha = 0.4f),
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(
-                                        if (selectedLibraryAssetPaths.isNotEmpty()) Color.Red
-                                        else Color.Red.copy(alpha = 0.4f)
-                                    )
-                                    .clickable(enabled = selectedLibraryAssetPaths.isNotEmpty()) {
-                                        showLibraryAssetDeleteConfirm = true
-                                    }
-                                    .padding(horizontal = 6.dp, vertical = 4.dp)
-                            )
-                            Text(
-                                text = "전체 선택",
-                                color = Color.White,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFF3A3A3A))
-                                    .clickable {
-                                        selectedLibraryAssetPaths =
-                                            plyModels.map { it.file.absolutePath }.toSet()
-                                    }
-                                    .padding(horizontal = 6.dp, vertical = 4.dp)
-                            )
-                        }
-                    }
-                    if (plyModels.isEmpty()) {
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "3D 모델이 아직 없습니다",
-                                color = Color.White.copy(alpha = 0.7f),
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    } else {
-                        LazyVerticalGrid(
-                            columns = GridCells.Fixed(3),
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth(),
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            items(plyModels, key = { it.file.absolutePath }) { model ->
-                                val path = model.file.absolutePath
-                                val isSelected = selectedLibraryAssetPaths.contains(path)
-                                Column(
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    modifier = Modifier
-                                        .combinedClickable(
-                                            onClick = {
-                                                if (libraryAssetEditMode) {
-                                                    selectedLibraryAssetPaths =
-                                                        if (isSelected) selectedLibraryAssetPaths - path
-                                                        else selectedLibraryAssetPaths + path
-                                                } else {
-                                                    currentPlyModel = model
-                                                    libraryDetailScreen = LibraryDetailScreen.OBJ_VIEWER
-                                                }
-                                            },
-                                            onLongClick = {
-                                                if (!libraryAssetEditMode) {
-                                                    libraryAssetEditMode = true
-                                                    selectedLibraryAssetPaths = setOf(path)
-                                                }
-                                            }
-                                        )
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .aspectRatio(1f)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(Color(0xFF1A1A1A))
-                                            .border(
-                                                width = if (isSelected) 4.dp else 1.dp,
-                                                color = if (isSelected) Color.Blue
-                                                else Color.White.copy(alpha = 0.2f),
-                                                shape = RoundedCornerShape(8.dp)
-                                            ),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Filled.Public,
-                                            contentDescription = "3D Model",
-                                            tint = Color(0xFF7ED321),
-                                            modifier = Modifier.size(48.dp)
-                                        )
-                                        if (isSelected) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .align(Alignment.TopEnd)
-                                                    .padding(8.dp)
-                                                    .size(28.dp)
-                                                    .background(Color(0xFF7ED321), CircleShape),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Filled.Check,
-                                                    contentDescription = "선택됨",
-                                                    tint = Color.White,
-                                                    modifier = Modifier.size(18.dp)
-                                                )
-                                            }
-                                        }
-                                    }
-                                    Spacer(modifier = Modifier.height(4.dp))
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        when {
+                            objViewerConverting -> {
+                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                     Text(
-                                        text = model.name,
+                                        text = if (viewerSourceFile.extension.equals("obj", ignoreCase = true)) {
+                                            "모델 불러오는 중..."
+                                        } else {
+                                            "OBJ 변환 중..."
+                                        },
                                         color = Color.White,
-                                        fontSize = 12.sp,
-                                        maxLines = 1,
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                            objViewerError != null -> {
+                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = objViewerError ?: "오류",
+                                        color = Color.White,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
                                         textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                            objViewerObjFile != null -> {
+                                key(objViewerObjFile!!.absolutePath) {
+                                    AndroidView(
+                                        factory = { ctx ->
+                                            ObjSurfaceView(ctx).apply {
+                                                val mesh = objViewerPreviewMesh
+                                                if (mesh != null) {
+                                                    applyParsedMesh(mesh)
+                                                } else {
+                                                    loadModel(objViewerObjFile!!)
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.fillMaxSize()
                                     )
                                 }
                             }
                         }
                     }
+                } else {
+                    val listModels = when (libraryDetailScreen) {
+                        LibraryDetailScreen.MODEL_3D_PLY_LIST -> plyLibraryModels
+                        LibraryDetailScreen.MODEL_3D_OBJ_LIST -> objLibraryModels
+                        else -> emptyList()
+                    }
+                    if (libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ||
+                        libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST
+                    ) {
+                        BackHandler {
+                            libraryDetailScreen = LibraryDetailScreen.NONE
+                            libraryAssetEditMode = false
+                            selectedLibraryAssetPaths = emptySet()
+                        }
+                    }
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        if (libraryAssetEditMode &&
+                            (libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ||
+                                libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Share,
+                                    contentDescription = "공유하기",
+                                    tint = if (selectedLibraryAssetPaths.isNotEmpty()) Color(0xFF9CD83B)
+                                    else Color(0xFF9CD83B).copy(alpha = 0.4f),
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .clickable(enabled = selectedLibraryAssetPaths.isNotEmpty()) {
+                                            val files = listModels
+                                                .filter { selectedLibraryAssetPaths.contains(it.file.absolutePath) }
+                                                .map { it.file }
+                                            shareLibraryFiles(context, files)
+                                        }
+                                )
+                                Text(
+                                    text = "삭제",
+                                    color = if (selectedLibraryAssetPaths.isNotEmpty()) Color.White
+                                    else Color.White.copy(alpha = 0.4f),
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(
+                                            if (selectedLibraryAssetPaths.isNotEmpty()) Color.Red
+                                            else Color.Red.copy(alpha = 0.4f)
+                                        )
+                                        .clickable(enabled = selectedLibraryAssetPaths.isNotEmpty()) {
+                                            showLibraryAssetDeleteConfirm = true
+                                        }
+                                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                                )
+                                Text(
+                                    text = "전체 선택",
+                                    color = Color.White,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color(0xFF3A3A3A))
+                                        .clickable {
+                                            selectedLibraryAssetPaths =
+                                                listModels.map { it.file.absolutePath }.toSet()
+                                        }
+                                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                        when (libraryDetailScreen) {
+                            LibraryDetailScreen.NONE -> {
+                                if (plyLibraryModels.isEmpty() && objLibraryModels.isEmpty()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxWidth(),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "3D 모델이 아직 없습니다",
+                                            color = Color.White.copy(alpha = 0.7f),
+                                            fontSize = 16.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                } else {
+                                    Model3dFormatHubGrid(
+                                        plyCount = plyLibraryModels.size,
+                                        objCount = objLibraryModels.size,
+                                        plyCoverUri = plySubHubCoverUri,
+                                        objCoverUri = objSubHubCoverUri,
+                                        onOpenPly = {
+                                            libraryDetailScreen = LibraryDetailScreen.MODEL_3D_PLY_LIST
+                                        },
+                                        onOpenObj = {
+                                            libraryDetailScreen = LibraryDetailScreen.MODEL_3D_OBJ_LIST
+                                        },
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                            }
+                            LibraryDetailScreen.MODEL_3D_PLY_LIST,
+                            LibraryDetailScreen.MODEL_3D_OBJ_LIST -> {
+                                if (listModels.isEmpty()) {
+                                    val emptyMsg = if (libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST) {
+                                        "PLY 파일이 없습니다"
+                                    } else {
+                                        "OBJ 파일이 없습니다"
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxWidth(),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = emptyMsg,
+                                            color = Color.White.copy(alpha = 0.7f),
+                                            fontSize = 16.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                } else {
+                                    val modelDayGroups = remember(listModels) {
+                                        groupByDayConsecutiveDescending(
+                                            listModels.sortedByDescending { it.lastModified }
+                                        ) { it.lastModified }
+                                    }
+                                    LazyVerticalGrid(
+                                        columns = GridCells.Fixed(4),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxWidth(),
+                                        contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        modelDayGroups.forEach { (dayStart, modelsInDay) ->
+                                            item(
+                                                span = { GridItemSpan(this.maxLineSpan) },
+                                                key = "m3d_day_$dayStart"
+                                            ) {
+                                                Text(
+                                                    text = formatKoreanDateHeader(dayStart),
+                                                    color = Color.White,
+                                                    fontSize = 14.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 4.dp, vertical = 8.dp)
+                                                )
+                                            }
+                                            items(
+                                                items = modelsInDay,
+                                                key = { it.file.absolutePath }
+                                            ) { model ->
+                                                val path = model.file.absolutePath
+                                                val isSelected = selectedLibraryAssetPaths.contains(path)
+                                                Model3dLibraryGridItem(
+                                                    model = model,
+                                                    thumbRefresh = libraryModelThumbRefresh,
+                                                    isSelected = isSelected,
+                                                    onClick = {
+                                                        if (libraryAssetEditMode) {
+                                                            selectedLibraryAssetPaths =
+                                                                if (isSelected) selectedLibraryAssetPaths - path
+                                                                else selectedLibraryAssetPaths + path
+                                                        } else {
+                                                            currentPlyModel = model
+                                                            libraryDetailScreen = LibraryDetailScreen.OBJ_VIEWER
+                                                        }
+                                                    },
+                                                    onLongClick = {
+                                                        if (!libraryAssetEditMode) {
+                                                            libraryAssetEditMode = true
+                                                            selectedLibraryAssetPaths = setOf(path)
+                                                        }
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            else -> {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
+                        }
+                    }
                 }
-            }
-        } else if (libraryTab == LibraryTab.AI_CAD) {
+            } else if (libraryTab == LibraryTab.AI_CAD) {
             if (selectedAiCadStlFile != null) {
                 val stlFile = selectedAiCadStlFile!!
                 var viewerLoading by remember(stlFile.absolutePath) { mutableStateOf(true) }
@@ -5254,8 +5775,13 @@ fun GalleryScreen(
                             )
                         }
                     }
+                    val aiCadDayGroups = remember(aiCadStlFiles) {
+                        groupByDayConsecutiveDescending(
+                            aiCadStlFiles.sortedByDescending { it.lastModified() }
+                        ) { it.lastModified() }
+                    }
                     LazyVerticalGrid(
-                        columns = GridCells.Fixed(3),
+                        columns = GridCells.Fixed(4),
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth(),
@@ -5263,75 +5789,94 @@ fun GalleryScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        items(aiCadStlFiles, key = { it.absolutePath }) { file ->
-                            val path = file.absolutePath
-                            val isSelected = selectedLibraryAssetPaths.contains(path)
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                modifier = Modifier
-                                    .combinedClickable(
-                                        onClick = {
-                                            if (libraryAssetEditMode) {
-                                                selectedLibraryAssetPaths =
-                                                    if (isSelected) selectedLibraryAssetPaths - path
-                                                    else selectedLibraryAssetPaths + path
-                                            } else {
-                                                selectedAiCadStlFile = file
-                                            }
-                                        },
-                                        onLongClick = {
-                                            if (!libraryAssetEditMode) {
-                                                libraryAssetEditMode = true
-                                                selectedLibraryAssetPaths = setOf(path)
-                                            }
-                                        }
-                                    )
+                        aiCadDayGroups.forEach { (dayStart, filesInDay) ->
+                            item(
+                                span = { GridItemSpan(this.maxLineSpan) },
+                                key = "aicad_day_$dayStart"
                             ) {
-                                Box(
+                                Text(
+                                    text = formatKoreanDateHeader(dayStart),
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
                                     modifier = Modifier
-                                        .aspectRatio(1f)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(Color(0xFF1A1A1A))
-                                        .border(
-                                            width = if (isSelected) 4.dp else 1.dp,
-                                            color = if (isSelected) Color.Blue
-                                            else Color.White.copy(alpha = 0.2f),
-                                            shape = RoundedCornerShape(8.dp)
-                                        ),
-                                    contentAlignment = Alignment.Center
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 4.dp, vertical = 8.dp)
+                                )
+                            }
+                            items(
+                                items = filesInDay,
+                                key = { it.absolutePath }
+                            ) { file ->
+                                val path = file.absolutePath
+                                val isSelected = selectedLibraryAssetPaths.contains(path)
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier
+                                        .combinedClickable(
+                                            onClick = {
+                                                if (libraryAssetEditMode) {
+                                                    selectedLibraryAssetPaths =
+                                                        if (isSelected) selectedLibraryAssetPaths - path
+                                                        else selectedLibraryAssetPaths + path
+                                                } else {
+                                                    selectedAiCadStlFile = file
+                                                }
+                                            },
+                                            onLongClick = {
+                                                if (!libraryAssetEditMode) {
+                                                    libraryAssetEditMode = true
+                                                    selectedLibraryAssetPaths = setOf(path)
+                                                }
+                                            }
+                                        )
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Filled.Build,
-                                        contentDescription = "STL",
-                                        tint = Color(0xFF9CD83B),
-                                        modifier = Modifier.size(48.dp)
-                                    )
-                                    if (isSelected) {
-                                        Box(
-                                            modifier = Modifier
-                                                .align(Alignment.TopEnd)
-                                                .padding(8.dp)
-                                                .size(28.dp)
-                                                .background(Color(0xFF7ED321), CircleShape),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Filled.Check,
-                                                contentDescription = "선택됨",
-                                                tint = Color.White,
-                                                modifier = Modifier.size(18.dp)
-                                            )
+                                    Box(
+                                        modifier = Modifier
+                                            .aspectRatio(1f)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color(0xFF1A1A1A))
+                                            .border(
+                                                width = if (isSelected) 4.dp else 1.dp,
+                                                color = if (isSelected) Color.Blue
+                                                else Color.White.copy(alpha = 0.2f),
+                                                shape = RoundedCornerShape(8.dp)
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.Build,
+                                            contentDescription = "STL",
+                                            tint = Color(0xFF9CD83B),
+                                            modifier = Modifier.size(48.dp)
+                                        )
+                                        if (isSelected) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .padding(8.dp)
+                                                    .size(28.dp)
+                                                    .background(Color(0xFF7ED321), CircleShape),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.Check,
+                                                    contentDescription = "선택됨",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
                                         }
                                     }
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = file.nameWithoutExtension,
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        maxLines = 2,
+                                        textAlign = TextAlign.Center
+                                    )
                                 }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = file.nameWithoutExtension,
-                                    color = Color.White,
-                                    fontSize = 11.sp,
-                                    maxLines = 2,
-                                    textAlign = TextAlign.Center
-                                )
                             }
                         }
                     }
@@ -5349,30 +5894,52 @@ fun GalleryScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "데이터셋이 아직 없습니다",
+                            text = "데이터셋폴더에 이미지가 없습니다",
                             color = Color.White.copy(alpha = 0.7f),
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
                 } else {
+                    val datasetImageDayGroups = remember(datasetImages) {
+                        groupImagesByDayInOrder(context, datasetImages)
+                    }
                     LazyVerticalGrid(
-                        columns = GridCells.Fixed(3),
+                        columns = GridCells.Fixed(4),
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        items(datasetImages) { uri ->
-                            Image(
-                                painter = rememberAsyncImagePainter(uri),
-                                contentDescription = "데이터셋 이미지",
-                                modifier = Modifier
-                                    .aspectRatio(1f)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable { onMediaSelected(uri, datasetImages) },
-                                contentScale = ContentScale.Crop
-                            )
+                        datasetImageDayGroups.forEach { (dayStart, uris) ->
+                            item(
+                                span = { GridItemSpan(this.maxLineSpan) },
+                                key = "ds_img_day_$dayStart"
+                            ) {
+                                Text(
+                                    text = formatKoreanDateHeader(dayStart),
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 4.dp, vertical = 8.dp)
+                                )
+                            }
+                            items(
+                                items = uris,
+                                key = { it.toString() }
+                            ) { uri ->
+                                Image(
+                                    painter = rememberAsyncImagePainter(uri),
+                                    contentDescription = "데이터셋폴더 이미지",
+                                    modifier = Modifier
+                                        .aspectRatio(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { onMediaSelected(uri, datasetImages) },
+                                    contentScale = ContentScale.Crop
+                                )
+                            }
                         }
                     }
                 }
@@ -5383,7 +5950,7 @@ fun GalleryScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "데이터셋이 아직 없습니다",
+                        text = "데이터셋폴더가 아직 없습니다",
                         color = Color.White.copy(alpha = 0.7f),
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold
@@ -5448,8 +6015,13 @@ fun GalleryScreen(
                             }
                         }
                     }
+                    val datasetFolderDayGroups = remember(datasetFolders) {
+                        groupByDayConsecutiveDescending(
+                            datasetFolders.sortedByDescending { it.dir.lastModified() }
+                        ) { it.dir.lastModified() }
+                    }
                     LazyVerticalGrid(
-                        columns = GridCells.Fixed(3),
+                        columns = GridCells.Fixed(4),
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth(),
@@ -5457,7 +6029,25 @@ fun GalleryScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        items(datasetFolders) { folder ->
+                        datasetFolderDayGroups.forEach { (dayStart, foldersInDay) ->
+                            item(
+                                span = { GridItemSpan(this.maxLineSpan) },
+                                key = "ds_fold_day_$dayStart"
+                            ) {
+                                Text(
+                                    text = formatKoreanDateHeader(dayStart),
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 4.dp, vertical = 8.dp)
+                                )
+                            }
+                            items(
+                                items = foldersInDay,
+                                key = { it.dir.absolutePath }
+                            ) { folder ->
                         val folderPath = folder.dir.absolutePath
                         val isSelected = selectedDatasetFolders.contains(folderPath)
                         Column(
@@ -5502,7 +6092,7 @@ fun GalleryScreen(
                                 folder.coverUri?.let { uri ->
                                     Image(
                                         painter = rememberAsyncImagePainter(uri),
-                                        contentDescription = "데이터셋 표지",
+                                        contentDescription = "데이터셋폴더 표지",
                                         modifier = Modifier.fillMaxSize(),
                                         contentScale = ContentScale.Crop
                                     )
@@ -5536,6 +6126,7 @@ fun GalleryScreen(
                             )
                         }
                     }
+                    }
                 }
                 }
             }
@@ -5543,7 +6134,11 @@ fun GalleryScreen(
             Column(modifier = Modifier.fillMaxSize()) {
             if (isEditMode && pendingGalleryMenuAction != PendingGalleryMenuAction.None) {
                 Text(
-                    text = "이미지를 탭하여 선택한 뒤 상단 「확인」을 누르세요.",
+                    text = if (pendingGalleryMenuAction == PendingGalleryMenuAction.CreateDatasetFolder) {
+                        "폴더에 넣을 이미지를 선택한 뒤 상단 「확인」을 누르세요."
+                    } else {
+                        "이미지를 탭하여 선택한 뒤 상단 「확인」을 누르세요."
+                    },
                     color = Color.White.copy(alpha = 0.72f),
                     fontSize = 12.sp,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
@@ -5623,8 +6218,11 @@ fun GalleryScreen(
                     )
                 }
             } else {
+                val galleryDayGroups = remember(images) {
+                    groupImagesByDayInOrder(context, images)
+                }
                 LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
+                    columns = GridCells.Fixed(4),
                     state = galleryGridState,
                     modifier = Modifier
                         .weight(1f)
@@ -5633,7 +6231,25 @@ fun GalleryScreen(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    items(images) { mediaUri ->
+                    galleryDayGroups.forEach { (dayStart, uris) ->
+                        item(
+                            span = { GridItemSpan(this.maxLineSpan) },
+                            key = "gal_day_$dayStart"
+                        ) {
+                            Text(
+                                text = formatKoreanDateHeader(dayStart),
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 6.dp, vertical = 8.dp)
+                            )
+                        }
+                        items(
+                            items = uris,
+                            key = { it.toString() }
+                        ) { mediaUri ->
                         val isVideo = isVideoUri(context, mediaUri)
                         val isSelected = selectedItems.contains(mediaUri)
                         var videoThumbnail by remember(mediaUri) { mutableStateOf<Bitmap?>(null) }
@@ -5765,6 +6381,7 @@ fun GalleryScreen(
                                 }
                             }
                         }
+                    }
                     }
                 }
             }
@@ -6104,6 +6721,127 @@ fun GalleryScreen(
                                     )
                                     .clickable { glareResultMessage = null }
                                     .padding(horizontal = 20.dp, vertical = 10.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 새 데이터셋폴더: 이름 입력 후 복사 (앱 갤러리 원본은 유지)
+        if (showNewDatasetFolderNameDialog) {
+            Dialog(onDismissRequest = {
+                if (!isTransferring) showNewDatasetFolderNameDialog = false
+            }) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
+                        .padding(20.dp)
+                ) {
+                    Column {
+                        Text(
+                            text = "데이터셋폴더 이름",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        OutlinedTextField(
+                            value = newDatasetFolderNameInput,
+                            onValueChange = { newDatasetFolderNameInput = it },
+                            placeholder = {
+                                Text(
+                                    text = "비워 두면 자동으로 이름이 붙습니다.",
+                                    color = Color.White.copy(alpha = 0.35f),
+                                    fontSize = 13.sp
+                                )
+                            },
+                            singleLine = true,
+                            enabled = !isTransferring,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedBorderColor = Color(0xFF9CD83B),
+                                unfocusedBorderColor = Color.White.copy(alpha = 0.4f),
+                                cursorColor = Color(0xFF9CD83B),
+                                focusedContainerColor = Color(0xFF1E1E1E),
+                                unfocusedContainerColor = Color(0xFF1E1E1E),
+                                disabledTextColor = Color.White.copy(alpha = 0.5f),
+                                disabledBorderColor = Color.White.copy(alpha = 0.2f),
+                                disabledContainerColor = Color(0xFF1E1E1E)
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            Text(
+                                text = "취소",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                                    .clickable(enabled = !isTransferring) {
+                                        showNewDatasetFolderNameDialog = false
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (isTransferring) "저장 중…" else "확인",
+                                color = if (!isTransferring && pendingDatasetFolderImageUris.isNotEmpty()) {
+                                    Color.White
+                                } else {
+                                    Color.White.copy(alpha = 0.35f)
+                                },
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        if (!isTransferring && pendingDatasetFolderImageUris.isNotEmpty()) {
+                                            Color(0xFF1A6B2F)
+                                        } else {
+                                            Color(0xFF1A6B2F).copy(alpha = 0.3f)
+                                        }
+                                    )
+                                    .clickable(
+                                        enabled = !isTransferring && pendingDatasetFolderImageUris.isNotEmpty()
+                                    ) {
+                                        val urisCopy = pendingDatasetFolderImageUris.toList()
+                                        val nameInput = newDatasetFolderNameInput
+                                        showNewDatasetFolderNameDialog = false
+                                        isTransferring = true
+                                        uploadSourceTab = LibraryTab.GALLERY
+                                        uploadMessage = "데이터셋폴더에 복사 중..."
+                                        transferScope.launch {
+                                            val result = withContext(Dispatchers.IO) {
+                                                copyImagesToDatasetFolder(context, urisCopy, nameInput)
+                                            }
+                                            isTransferring = false
+                                            uploadMessage = result.message
+                                            Toast.makeText(
+                                                context,
+                                                result.message,
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                            if (result.successCount > 0) {
+                                                selectedItems = emptySet()
+                                                isEditMode = false
+                                                pendingGalleryMenuAction = PendingGalleryMenuAction.None
+                                                pendingDatasetFolderImageUris = emptyList()
+                                                newDatasetFolderNameInput = ""
+                                                loadDatasetFolders(context) { folders ->
+                                                    datasetFolders = folders
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp)
                             )
                         }
                     }
@@ -6758,13 +7496,21 @@ fun GalleryScreen(
                                             LibraryTab.MODEL_3D -> {
                                                 paths.forEach { p ->
                                                     val f = File(p)
-                                                    if (!deleteLibraryPlyFile(f)) anyFail = true
+                                                    if (!deleteLibraryModelFile(f)) anyFail = true
                                                     if (currentPlyModel?.file?.absolutePath == p) {
-                                                        libraryDetailScreen = LibraryDetailScreen.NONE
+                                                        libraryDetailScreen =
+                                                            if (f.extension.equals("obj", ignoreCase = true)) {
+                                                                LibraryDetailScreen.MODEL_3D_OBJ_LIST
+                                                            } else {
+                                                                LibraryDetailScreen.MODEL_3D_PLY_LIST
+                                                            }
                                                         currentPlyModel = null
                                                     }
                                                 }
-                                                loadPlyModels(context) { plyModels = it }
+                                                loadModel3dLibrary(context) { lib ->
+                                                    plyLibraryModels = lib.plyModels
+                                                    objLibraryModels = lib.objModels
+                                                }
                                             }
                                             LibraryTab.AI_CAD -> {
                                                 paths.forEach { p ->
@@ -8946,6 +9692,201 @@ private fun isVideoUri(context: Context, uri: Uri): Boolean {
     }
 }
 
+/** EXIF 촬영/생성 시각(없으면 null) — 정렬용 */
+private fun exifSortTimeMillis(path: String): Long? {
+    return try {
+        val exif = ExifInterface(path)
+        val raw = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
+            ?: exif.getAttribute(ExifInterface.TAG_DATETIME_DIGITIZED)
+            ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
+        if (raw.isNullOrBlank()) return null
+        val fmt = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US)
+        fmt.parse(raw)?.time
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun parseVideoMetadataDateMillis(raw: String?): Long? {
+    if (raw.isNullOrBlank()) return null
+    val s = raw.trim()
+    if (s.all { it.isDigit() }) {
+        when (s.length) {
+            13 -> return s.toLongOrNull()
+            10 -> return s.toLongOrNull()?.times(1000L)
+        }
+    }
+    val patterns = arrayOf(
+        "yyyyMMdd'T'HHmmss",
+        "yyyyMMdd'T'HHmmss.SSS",
+        "yyyyMMdd'T'HHmmss.SSSZ",
+        "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+        "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
+        "yyyyMMddHHmmss"
+    )
+    for (p in patterns) {
+        try {
+            val sdf = SimpleDateFormat(p, Locale.US)
+            sdf.isLenient = false
+            sdf.timeZone = TimeZone.getTimeZone("UTC")
+            sdf.parse(s)?.time?.let { return it }
+        } catch (_: Exception) {
+        }
+    }
+    try {
+        val sdf = SimpleDateFormat("EEE MMM dd HH:mm:ss zzz yyyy", Locale.US)
+        return sdf.parse(s)?.time
+    } catch (_: Exception) {
+    }
+    return null
+}
+
+private fun videoSortTimeMillis(file: File): Long {
+    var r: MediaMetadataRetriever? = null
+    return try {
+        r = MediaMetadataRetriever()
+        r.setDataSource(file.absolutePath)
+        val d = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE)
+        parseVideoMetadataDateMillis(d) ?: file.lastModified()
+    } catch (_: Exception) {
+        file.lastModified()
+    } finally {
+        try {
+            r?.release()
+        } catch (_: Exception) {
+        }
+    }
+}
+
+/**
+ * 갤러리 정렬용: 사진·이미지는 EXIF 촬영 시각, 동영상은 메타데이터 촬영 시각, 없으면 [File.lastModified].
+ */
+private fun mediaSortTimeMillis(file: File): Long {
+    if (!file.isFile) return 0L
+    return when (file.extension.lowercase(Locale.ROOT)) {
+        "mp4" -> videoSortTimeMillis(file)
+        "jpg", "jpeg", "png", "webp", "heic", "heif" ->
+            exifSortTimeMillis(file.absolutePath) ?: file.lastModified()
+        else -> file.lastModified()
+    }
+}
+
+/** 로컬 자정 기준 일 단위 키 (날짜 헤더·그룹용) */
+private fun startOfDayLocalMillis(millis: Long): Long {
+    val cal = Calendar.getInstance(Locale.getDefault())
+    cal.timeInMillis = millis
+    cal.set(Calendar.HOUR_OF_DAY, 0)
+    cal.set(Calendar.MINUTE, 0)
+    cal.set(Calendar.SECOND, 0)
+    cal.set(Calendar.MILLISECOND, 0)
+    return cal.timeInMillis
+}
+
+/** 갤러리 날짜 헤더: `2024년 12월 15일` */
+private fun formatKoreanDateHeader(dayStartMillis: Long): String {
+    val cal = Calendar.getInstance(Locale.getDefault())
+    cal.timeInMillis = dayStartMillis
+    val y = cal.get(Calendar.YEAR)
+    val m = cal.get(Calendar.MONTH) + 1
+    val d = cal.get(Calendar.DAY_OF_MONTH)
+    return "${y}년 ${m}월 ${d}일"
+}
+
+/**
+ * [sortedItemsNewestFirst]는 시각 내림차순(최신 먼저)이어야 같은 날짜끼리 연속으로 묶입니다.
+ */
+private fun <T> groupByDayConsecutiveDescending(
+    sortedItemsNewestFirst: List<T>,
+    millisOf: (T) -> Long
+): List<Pair<Long, List<T>>> {
+    if (sortedItemsNewestFirst.isEmpty()) return emptyList()
+    val out = mutableListOf<Pair<Long, List<T>>>()
+    var currentDay: Long? = null
+    var bucket = mutableListOf<T>()
+    for (item in sortedItemsNewestFirst) {
+        val day = startOfDayLocalMillis(millisOf(item))
+        when {
+            currentDay == null -> {
+                currentDay = day
+                bucket.add(item)
+            }
+            day == currentDay -> bucket.add(item)
+            else -> {
+                out.add(currentDay!! to bucket.toList())
+                currentDay = day
+                bucket = mutableListOf(item)
+            }
+        }
+    }
+    if (bucket.isNotEmpty() && currentDay != null) {
+        out.add(currentDay to bucket.toList())
+    }
+    return out
+}
+
+private fun gallerySortMillisForUri(context: Context, uri: Uri): Long {
+    return try {
+        when (uri.scheme?.lowercase(Locale.ROOT)) {
+            "file" -> {
+                val path = uri.path ?: return System.currentTimeMillis()
+                val f = File(path)
+                if (f.isFile) mediaSortTimeMillis(f) else System.currentTimeMillis()
+            }
+            "content" -> {
+                val p = uri.path
+                if (p != null && p.startsWith("/")) {
+                    val f = File(p)
+                    if (f.isFile) return mediaSortTimeMillis(f)
+                }
+                context.contentResolver.query(
+                    uri,
+                    arrayOf(MediaStore.MediaColumns.DATE_TAKEN),
+                    null,
+                    null,
+                    null
+                )?.use { c ->
+                    if (c.moveToFirst()) {
+                        val idx = c.getColumnIndex(MediaStore.MediaColumns.DATE_TAKEN)
+                        if (idx >= 0) {
+                            val dt = c.getLong(idx)
+                            if (dt > 0L) return dt
+                        }
+                    }
+                }
+                System.currentTimeMillis()
+            }
+            else -> System.currentTimeMillis()
+        }
+    } catch (_: Exception) {
+        System.currentTimeMillis()
+    }
+}
+
+private fun groupImagesByDayInOrder(context: Context, images: List<Uri>): List<Pair<Long, List<Uri>>> {
+    return groupByDayConsecutiveDescending(images) { gallerySortMillisForUri(context, it) }
+}
+
+/** 날짜 헤더 포함 시 [images]에서 미디어 인덱스에 해당하는 그리드 행 인덱스 */
+private fun gridItemIndexForMediaIndex(
+    mediaIndex: Int,
+    images: List<Uri>,
+    context: Context
+): Int {
+    if (mediaIndex !in images.indices) return 0
+    val groups = groupImagesByDayInOrder(context, images)
+    var gridIdx = 0
+    var mediaIdx = 0
+    for ((_, uris) in groups) {
+        gridIdx++
+        for (u in uris) {
+            if (mediaIdx == mediaIndex) return gridIdx
+            gridIdx++
+            mediaIdx++
+        }
+    }
+    return 0
+}
+
 private fun loadDatasetFolders(
     context: Context,
     onLoaded: (List<DatasetFolder>) -> Unit
@@ -8970,7 +9911,7 @@ private fun loadDatasetFoldersSync(context: Context): List<DatasetFolder> {
         ?.mapNotNull { dir ->
             val images = dir.listFiles { f ->
                 f.isFile && imageExts.contains(f.extension.lowercase())
-            }?.sortedBy { it.nameWithoutExtension.toIntOrNull() ?: Int.MAX_VALUE } ?: emptyList()
+            }?.sortedByDescending { mediaSortTimeMillis(it) } ?: emptyList()
 
             if (images.isEmpty()) {
                 // 이미지가 0개인 폴더는 주기적으로 자동 삭제
@@ -8991,7 +9932,7 @@ private fun loadDatasetFoldersSync(context: Context): List<DatasetFolder> {
                 count = images.size
             )
         }
-        ?.sortedByDescending { it.name }
+        ?.sortedByDescending { it.dir.lastModified() }
         ?: emptyList()
 }
 
@@ -9002,7 +9943,7 @@ private fun loadAllDatasetImages(context: Context, onLoaded: (List<Uri>) -> Unit
     val uris = folders.flatMap { folder ->
         folder.dir.listFiles { f ->
             f.isFile && imageExts.contains(f.extension.lowercase())
-        }?.map { Uri.fromFile(it) } ?: emptyList()
+        }?.sortedByDescending { mediaSortTimeMillis(it) }?.map { Uri.fromFile(it) } ?: emptyList()
     }
     onLoaded(uris)
 }
@@ -9015,9 +9956,10 @@ private fun loadDatasetImages(
         onLoaded(emptyList())
         return
     }
+    val imageExts = setOf("jpg", "jpeg", "png", "webp")
     val images = dir.listFiles { f ->
-        f.isFile && f.name.endsWith(".jpg", ignoreCase = true)
-    }?.sortedBy { it.nameWithoutExtension.toIntOrNull() ?: Int.MAX_VALUE } ?: emptyList()
+        f.isFile && imageExts.contains(f.extension.lowercase())
+    }?.sortedByDescending { mediaSortTimeMillis(it) } ?: emptyList()
 
     onLoaded(images.map { Uri.fromFile(it) })
 }
@@ -9054,7 +9996,7 @@ private fun shareLibraryFile(context: Context, file: File) {
 
 /**
  * 갤러리에 저장된 [Uri]를 공유용으로 정규화합니다.
- * [loadCapturedMedia] 등은 [Uri.fromFile]을 쓰므로 `file://`인데, 다른 앱으로 넘기려면
+ * [loadCapturedMediaSync] 등은 [Uri.fromFile]을 쓰므로 `file://`인데, 다른 앱으로 넘기려면
  * FileProvider `content://`가 필요합니다(API 24+).
  */
 private fun uriToShareableContentUri(context: Context, uri: Uri): Uri? {
@@ -9165,9 +10107,20 @@ private fun shareLibraryFiles(context: Context, files: List<File>) {
     context.startActivity(Intent.createChooser(intent, "공유"))
 }
 
-private fun deleteLibraryPlyFile(file: File): Boolean {
+private fun deleteLibraryModelFile(file: File): Boolean {
     return try {
-        file.exists() && file.isFile && file.delete()
+        if (!file.exists() || !file.isFile) return false
+        val ok = file.delete()
+        if (file.extension.equals("obj", ignoreCase = true)) {
+            val mtl = File(file.parentFile, "${file.nameWithoutExtension}.mtl")
+            if (mtl.exists()) {
+                try {
+                    mtl.delete()
+                } catch (_: Exception) {
+                }
+            }
+        }
+        ok
     } catch (_: Exception) {
         false
     }
@@ -9193,36 +10146,134 @@ private fun deleteAiCadArtifactsForStl(stlFile: File): Boolean {
     }
 }
 
-private fun loadPlyModels(
+private fun loadModel3dLibrary(
     context: Context,
-    onLoaded: (List<PlyModel>) -> Unit
+    onLoaded: (Model3dSplitLibrary) -> Unit
 ) {
-    val modelsDir = File(context.getExternalFilesDir(null), "models")
-    if (!modelsDir.exists()) {
-        onLoaded(emptyList())
-        return
-    }
-    val models = modelsDir.listFiles { f ->
-        f.isFile && f.name.endsWith(".ply", ignoreCase = true)
-    }?.map { f ->
-        PlyModel(
-            name = f.nameWithoutExtension,
-            file = f,
-            lastModified = f.lastModified()
-        )
-    }?.sortedByDescending { it.lastModified } ?: emptyList()
-
-    onLoaded(models)
+    ModelLibraryPaths.migrateFlatModelsIfNeeded(context)
+    val plyD = ModelLibraryPaths.plyDir(context)
+    val objD = ModelLibraryPaths.objDir(context)
+    val plyList = (plyD.listFiles { f -> f.isFile && f.name.endsWith(".ply", ignoreCase = true) }
+        ?: emptyArray())
+        .map { f ->
+            PlyModel(
+                name = f.nameWithoutExtension,
+                file = f,
+                lastModified = f.lastModified()
+            )
+        }
+        .sortedByDescending { it.lastModified }
+    val objList = (objD.listFiles { f -> f.isFile && f.name.endsWith(".obj", ignoreCase = true) }
+        ?: emptyArray())
+        .map { f ->
+            PlyModel(
+                name = f.nameWithoutExtension,
+                file = f,
+                lastModified = f.lastModified()
+            )
+        }
+        .sortedByDescending { it.lastModified }
+    onLoaded(Model3dSplitLibrary(plyList, objList))
 }
 
-private fun loadCapturedMedia(
+/**
+ * PLY→OBJ 변환 캐시 파일을 `models/obj/`에 OBJ(+MTL)로 복사합니다.
+ * PLY 원본과 models_obj 캐시는 삭제하지 않습니다. `mtllib` 경로는 저장 위치에 맞게 조정합니다.
+ * @return null 이면 성공, 아니면 오류 메시지
+ */
+private fun saveConvertedObjToModelsLibrary(
     context: Context,
-    onMediaLoaded: (List<Uri>) -> Unit
-) {
+    plySource: File,
+    cachedObj: File
+): String? {
+    if (!plySource.name.endsWith(".ply", ignoreCase = true)) {
+        return "PLY에서 변환된 OBJ만 저장할 수 있습니다."
+    }
+    if (!cachedObj.exists() || cachedObj.length() == 0L) return "OBJ 파일이 없습니다."
+    val modelsDir = ModelLibraryPaths.objDir(context)
+    val baseName = plySource.nameWithoutExtension
+    val destObj = File(modelsDir, "$baseName.obj")
+    val destMtlName = "$baseName.mtl"
+    val destMtl = File(modelsDir, destMtlName)
+    val cachedMtl = File(cachedObj.parentFile, "${cachedObj.nameWithoutExtension}.mtl")
+
+    return try {
+        val tmpObj = File(modelsDir, "$baseName.obj.tmp")
+        try {
+            if (tmpObj.exists()) tmpObj.delete()
+        } catch (_: Exception) {
+        }
+        cachedObj.bufferedReader(StandardCharsets.UTF_8).use { reader ->
+            tmpObj.bufferedWriter(StandardCharsets.UTF_8).use { writer ->
+                reader.forEachLine { line ->
+                    val t = line.trim()
+                    if (t.startsWith("mtllib", ignoreCase = true)) {
+                        writer.append("mtllib ")
+                        writer.append(destMtlName)
+                        writer.newLine()
+                    } else {
+                        writer.append(line)
+                        writer.newLine()
+                    }
+                }
+            }
+        }
+        if (!tmpObj.exists() || tmpObj.length() == 0L) return "OBJ 저장에 실패했습니다."
+        if (destObj.exists()) {
+            try {
+                destObj.delete()
+            } catch (_: Exception) {
+            }
+        }
+        if (!tmpObj.renameTo(destObj)) {
+            try {
+                tmpObj.copyTo(destObj, overwrite = true)
+                tmpObj.delete()
+            } catch (e: Exception) {
+                return "OBJ 저장에 실패했습니다: ${e.message ?: e.javaClass.simpleName}"
+            }
+        }
+        if (!destObj.exists() || destObj.length() == 0L) return "OBJ 저장에 실패했습니다."
+
+        if (cachedMtl.exists() && cachedMtl.length() > 0L) {
+            val tmpMtl = File(modelsDir, "$baseName.mtl.tmp")
+            try {
+                if (tmpMtl.exists()) tmpMtl.delete()
+                cachedMtl.copyTo(tmpMtl, overwrite = true)
+                if (destMtl.exists()) {
+                    try {
+                        destMtl.delete()
+                    } catch (_: Exception) {
+                    }
+                }
+                if (!tmpMtl.renameTo(destMtl)) {
+                    tmpMtl.copyTo(destMtl, overwrite = true)
+                    try {
+                        tmpMtl.delete()
+                    } catch (_: Exception) {
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        } else {
+            if (destMtl.exists()) {
+                try {
+                    destMtl.delete()
+                } catch (_: Exception) {}
+            }
+        }
+        null
+    } catch (e: Exception) {
+        e.printStackTrace()
+        "저장 실패: ${e.message ?: e.javaClass.simpleName}"
+    }
+}
+
+private fun loadCapturedMediaSync(context: Context): List<Uri> {
     val mediaDir = context.getExternalFilesDir(null)
     if (mediaDir == null || !mediaDir.exists()) {
-        onMediaLoaded(emptyList())
-        return
+        return emptyList()
     }
 
     val datasetsRoot = File(mediaDir, "datasets").absolutePath
@@ -9238,10 +10289,10 @@ private fun loadCapturedMedia(
                     file.name.endsWith(".mp4", ignoreCase = true)) &&
                 !file.absolutePath.startsWith(datasetsRoot)
         }
-        .map { file -> Uri.fromFile(file) to file.lastModified() }
+        .map { file -> Uri.fromFile(file) to mediaSortTimeMillis(file) }
         .toList()
 
-    onMediaLoaded(entries.sortedByDescending { it.second }.map { it.first })
+    return entries.sortedByDescending { it.second }.map { it.first }
 }
 
 /**
@@ -9597,7 +10648,7 @@ private suspend fun downloadPlyResult(context: Context, taskId: String): File? {
                 return@withContext null
             }
 
-            val modelsDir = File(context.getExternalFilesDir(null), "models").apply { mkdirs() }
+            val modelsDir = ModelLibraryPaths.plyDir(context)
             val outFile = File(modelsDir, "3d_model_$taskId.ply")
             body.byteStream().use { input ->
                 FileOutputStream(outFile).use { output ->
