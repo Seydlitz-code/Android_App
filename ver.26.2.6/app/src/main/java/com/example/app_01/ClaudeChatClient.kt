@@ -1,5 +1,6 @@
 package com.example.app_01
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.util.Base64
 import android.util.Log
@@ -23,8 +24,21 @@ import java.io.ByteArrayOutputStream
 object ClaudeChatClient {
     private const val TAG = "ClaudeChat"
     private const val MODEL = "claude-sonnet-4-6"
+    private const val OPENAI_MODEL = "gpt-4o-mini"
+    private const val GEMINI_MODEL = "gemini-2.0-flash"
+
+    @Volatile
+    private var appContext: Context? = null
+
+    fun init(context: Context) {
+        appContext = context.applicationContext
+    }
 
     private fun getApiKey(): String {
+        val ctx = appContext
+        if (ctx != null) {
+            return LlmApiKeyStore.getEffectiveApiKey(ctx)
+        }
         return try {
             BuildConfig.CLAUDE_API_KEY?.takeIf { it.isNotBlank() } ?: ""
         } catch (e: Throwable) {
@@ -77,7 +91,7 @@ object ClaudeChatClient {
     ): ChatResult = withContext(Dispatchers.IO) {
         val apiKey = getApiKey()
         if (apiKey.isBlank()) {
-            return@withContext ChatResult.Error("API 키가 설정되지 않았습니다. local.properties에 claude_api_key를 추가하세요.")
+            return@withContext ChatResult.Error("API 키가 설정되지 않았습니다. 프로필 → LLM API 키에서 입력하거나 local.properties에 claude_api_key를 추가하세요.")
         }
         val webSnippet = try {
             fetchWebSnippet(userText)
@@ -102,11 +116,30 @@ object ClaudeChatClient {
         maxTokens: Int,
         onDelta: suspend (String) -> Unit
     ): ChatResult = withContext(Dispatchers.IO) {
-        val apiKey = getApiKey()
+        val ctx = appContext
+            ?: return@withContext ChatResult.Error("앱 초기화 오류입니다.")
+        val provider = LlmApiKeyStore.getSelectedProvider(ctx)
+        val apiKey = LlmApiKeyStore.getEffectiveKey(ctx, provider)
         if (apiKey.isBlank()) {
-            return@withContext ChatResult.Error("API 키가 설정되지 않았습니다.")
+            return@withContext ChatResult.Error(
+                "API 키가 설정되지 않았습니다. 프로필 → LLM API 키에서 선택한 제공자의 키를 입력하세요."
+            )
         }
+        when (provider) {
+            LlmProvider.CLAUDE -> streamAnthropic(apiKey, userText, imageBase64List, system, maxTokens, onDelta)
+            LlmProvider.OPENAI -> streamOpenAi(apiKey, userText, imageBase64List, system, maxTokens, onDelta)
+            LlmProvider.GEMINI -> streamGemini(apiKey, userText, imageBase64List, system, maxTokens, onDelta)
+        }
+    }
 
+    private suspend fun streamAnthropic(
+        apiKey: String,
+        userText: String,
+        imageBase64List: List<String>,
+        system: String?,
+        maxTokens: Int,
+        onDelta: suspend (String) -> Unit
+    ): ChatResult {
         val bodyJson = buildRequestJson(userText, imageBase64List, system, maxTokens, stream = true)
         val request = Request.Builder()
             .url("https://api.anthropic.com/v1/messages")
@@ -114,16 +147,14 @@ object ClaudeChatClient {
             .addHeader("anthropic-version", "2023-06-01")
             .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
             .build()
-
-        return@withContext try {
+        return try {
             AiCadNetworkModule.okHttpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     val errBody = response.body?.string() ?: ""
-                    return@use ChatResult.Error("HTTP ${response.code}: $errBody")
+                    return ChatResult.Error("HTTP ${response.code}: $errBody")
                 }
                 val source = response.body?.source()
-                    ?: return@use ChatResult.Error("응답 본문이 없습니다.")
-
+                    ?: return ChatResult.Error("응답 본문이 없습니다.")
                 val fullText = StringBuilder()
                 while (!source.exhausted()) {
                     val line = source.readUtf8Line() ?: break
@@ -148,7 +179,112 @@ object ClaudeChatClient {
                 else ChatResult.Error("응답이 비어 있습니다.")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "스트리밍 실패", e)
+            Log.e(TAG, "Anthropic 스트리밍 실패", e)
+            ChatResult.Error("네트워크 오류: ${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    private suspend fun streamOpenAi(
+        apiKey: String,
+        userText: String,
+        imageBase64List: List<String>,
+        system: String?,
+        maxTokens: Int,
+        onDelta: suspend (String) -> Unit
+    ): ChatResult {
+        val bodyStr = buildOpenAiRequestJson(userText, imageBase64List, system, maxTokens, stream = true).toString()
+        val request = Request.Builder()
+            .url("https://api.openai.com/v1/chat/completions")
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(bodyStr.toRequestBody("application/json".toMediaType()))
+            .build()
+        return try {
+            AiCadNetworkModule.okHttpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val errBody = response.body?.string() ?: ""
+                    return ChatResult.Error("HTTP ${response.code}: $errBody")
+                }
+                val source = response.body?.source()
+                    ?: return ChatResult.Error("응답 본문이 없습니다.")
+                val fullText = StringBuilder()
+                while (!source.exhausted()) {
+                    val line = source.readUtf8Line() ?: break
+                    if (!line.startsWith("data: ")) continue
+                    val data = line.removePrefix("data: ").trim()
+                    if (data == "[DONE]") break
+                    try {
+                        val json = JSONObject(data)
+                        val choices = json.optJSONArray("choices") ?: continue
+                        if (choices.length() == 0) continue
+                        val delta = choices.getJSONObject(0).optJSONObject("delta") ?: continue
+                        val token = delta.optString("content", "")
+                        if (token.isNotEmpty()) {
+                            fullText.append(token)
+                            withContext(Dispatchers.Main) { onDelta(token) }
+                        }
+                    } catch (_: Exception) { /* 스킵 */ }
+                }
+                if (fullText.isNotBlank()) ChatResult.Success(fullText.toString())
+                else ChatResult.Error("응답이 비어 있습니다.")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "OpenAI 스트리밍 실패", e)
+            ChatResult.Error("네트워크 오류: ${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    private suspend fun streamGemini(
+        apiKey: String,
+        userText: String,
+        imageBase64List: List<String>,
+        system: String?,
+        maxTokens: Int,
+        onDelta: suspend (String) -> Unit
+    ): ChatResult {
+        val bodyStr = buildGeminiRequestJson(userText, imageBase64List, system, maxTokens, stream = true).toString()
+        val url =
+            "https://generativelanguage.googleapis.com/v1beta/models/$GEMINI_MODEL:streamGenerateContent?key=$apiKey&alt=sse"
+        val request = Request.Builder()
+            .url(url)
+            .addHeader("Content-Type", "application/json")
+            .post(bodyStr.toRequestBody("application/json".toMediaType()))
+            .build()
+        return try {
+            AiCadNetworkModule.okHttpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val errBody = response.body?.string() ?: ""
+                    return ChatResult.Error("HTTP ${response.code}: $errBody")
+                }
+                val source = response.body?.source()
+                    ?: return ChatResult.Error("응답 본문이 없습니다.")
+                val fullText = StringBuilder()
+                while (!source.exhausted()) {
+                    val line = source.readUtf8Line() ?: break
+                    if (!line.startsWith("data: ")) continue
+                    val data = line.removePrefix("data: ").trim()
+                    if (data.isEmpty()) continue
+                    try {
+                        val json = JSONObject(data)
+                        val candidates = json.optJSONArray("candidates") ?: continue
+                        val first = candidates.optJSONObject(0) ?: continue
+                        val content = first.optJSONObject("content") ?: continue
+                        val parts = content.optJSONArray("parts") ?: continue
+                        for (i in 0 until parts.length()) {
+                            val part = parts.optJSONObject(i) ?: continue
+                            val token = part.optString("text", "")
+                            if (token.isNotEmpty()) {
+                                fullText.append(token)
+                                withContext(Dispatchers.Main) { onDelta(token) }
+                            }
+                        }
+                    } catch (_: Exception) { /* 스킵 */ }
+                }
+                if (fullText.isNotBlank()) ChatResult.Success(fullText.toString())
+                else ChatResult.Error("응답이 비어 있습니다.")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Gemini 스트리밍 실패", e)
             ChatResult.Error("네트워크 오류: ${e.message ?: e.javaClass.simpleName}")
         }
     }
@@ -174,7 +310,7 @@ object ClaudeChatClient {
     ): ChatResult = withContext(Dispatchers.IO) {
         val apiKey = getApiKey()
         if (apiKey.isBlank()) {
-            return@withContext ChatResult.Error("API 키가 설정되지 않았습니다. local.properties에 claude_api_key를 추가하세요.")
+            return@withContext ChatResult.Error("API 키가 설정되지 않았습니다. 프로필 → LLM API 키에서 입력하거나 local.properties에 claude_api_key를 추가하세요.")
         }
         val webSnippet = try {
             fetchWebSnippet(userText)
@@ -192,26 +328,26 @@ object ClaudeChatClient {
     }
 
     private const val AI_CAD_SYSTEM = """
-You are an expert OpenSCAD 3D modeling engine. The app renders **on the phone** with OpenSCAD WASM (no external libraries) and merges STL + colored GLB preview.
+You are an expert OpenSCAD 3D modeling engine. The app renders **on the phone** with OpenSCAD WASM (no external libraries) and saves the result as a binary STL file.
 
 STRICT OUTPUT RULES:
 - Reply with **ONLY** OpenSCAD source code. No Korean or English explanations, no greetings, no bullet lists, no markdown headings.
 - Do **not** wrap in markdown code fences unless you must; raw `.scad` text alone is preferred.
-- If you use a fence, use exactly one block: ```openscad ... ``` and put nothing outside it.
-- Comments: only valid OpenSCAD (`//` line comments or `/* */`). Never put English prose on lines without `//` — that breaks the script.
-- Never split a comment across lines like `// text` then `more text` on the next line without `//` on that line. Put full English on the same line after `//` or start the next line with `//`.
+- If you use a fence, use **one** final openscad/scad fenced block with the **complete** model. Do not put long alternate examples or templates above the real answer — the app keeps the last such block.
+- Geometry must match the user's request (object type, rough proportions). Do not default every request to the same rounded-rectangle hull unless they clearly asked for that shape.
+
+OPENSCAD / COMMENTS:
+- Comments: only valid OpenSCAD (`//` line comments or `/* */`). Every comment line MUST start with `//`. Never continue a comment on the next line without `//`.
 - Units: millimeters (mm). The first non-whitespace character must start valid OpenSCAD (e.g. //, ${'$'}fn, union, module).
+
+ROUNDED BOX-LIKE SHELLS (only when the user wants that):
+- A classic rounded rectangular shell uses hull() around **eight** sphere(r) calls at the eight corners of the box (inset by r). Fewer than eight spheres creates a broken wedge/shard, not a box.
+- For mugs, tools, characters, mechanical parts, etc., use cubes/cylinders/spheres/hull/difference appropriate to that object.
 
 MOBILE / PERFORMANCE (mandatory — keep the mesh light):
 - Prefer **3–6** main parts only. Model **recognizable features** (body, lid, panel, buttons, feet) with **simple primitives**: `cube`, `cylinder`, `sphere`, `hull`, `difference`, `union`.
-- Set **`${'$'}fn` between 16 and 48** (default ~24–32). Never above 64 unless a single tiny cylinder needs it.
-- Avoid deep `minkowski()`, huge `hull()` chains, or many `difference()` cuts. **Do not** nest `color()` inside another `color()` block.
-
-PART COLORS (mandatory for multi-part objects):
-- Wrap **each logical part** in its own block: `color([r,g,b]) { ... }` with **RGB in 0..1** (e.g. `[0.85, 0.86, 0.88]` for body, `[0.2, 0.2, 0.22]` for a dark panel).
-- Use **sibling** `color([...]) { ... }` statements inside one `union() { ... }`. Example structure:
-  `union() { color([0.9,0.9,0.95]) { cube([40,30,12], center=true); } color([0.25,0.25,0.28]) { translate([0,0,7]) cube([38,28,2], center=true); } }`
-- If the object is a single solid, still use **2–3** `color()` regions (body / accent / base) so the preview shows material separation.
+- Set **`${'$'}fn` between 16 and 32** (default 24). Never above 48.
+- Avoid deep `minkowski()`, huge `hull()` chains, or many `difference()` cuts.
 
 """
 
@@ -365,30 +501,244 @@ ${rawUser.trim()}
         system: String?,
         maxTokens: Int
     ): ChatResult = withContext(Dispatchers.IO) {
-        val apiKey = getApiKey()
+        val ctx = appContext
+            ?: return@withContext ChatResult.Error("앱 초기화 오류입니다.")
+        val provider = LlmApiKeyStore.getSelectedProvider(ctx)
+        val apiKey = LlmApiKeyStore.getEffectiveKey(ctx, provider)
         if (apiKey.isBlank()) {
-            Log.w(TAG, "Claude API 키가 설정되지 않았습니다.")
-            return@withContext ChatResult.Error("API 키가 설정되지 않았습니다. local.properties에 claude_api_key를 추가하세요.")
+            Log.w(TAG, "LLM API 키가 설정되지 않았습니다.")
+            return@withContext ChatResult.Error(
+                "API 키가 설정되지 않았습니다. 프로필 → LLM API 키에서 선택한 제공자의 키를 입력하세요."
+            )
         }
-        val body = buildRequestJson(userText, imageBase64List, system, maxTokens, stream = false)
-        return@withContext try {
-            val resp = AiCadNetworkModule.anthropicApi.createMessage(apiKey, body = body)
-            parseTextFromAnthropicResponse(resp)?.let { ChatResult.Success(it) }
-                ?: ChatResult.Error("응답 파싱 실패")
-        } catch (e: HttpException) {
-            val raw = e.response()?.errorBody()?.string().orEmpty()
-            Log.e(TAG, "API 오류: ${e.code()} $raw", e)
-            val errMsg = try {
-                AiCadNetworkModule.gson.fromJson(raw, AnthropicErrorEnvelope::class.java)
-                    ?.error?.message?.takeIf { !it.isNullOrBlank() }
-                    ?: "HTTP ${e.code()}: $raw"
-            } catch (_: Exception) {
-                "HTTP ${e.code()}: ${e.message ?: ""}"
+        when (provider) {
+            LlmProvider.CLAUDE -> {
+                val body = buildRequestJson(userText, imageBase64List, system, maxTokens, stream = false)
+                try {
+                    val resp = AiCadNetworkModule.anthropicApi.createMessage(apiKey, body = body)
+                    parseTextFromAnthropicResponse(resp)?.let { ChatResult.Success(it) }
+                        ?: ChatResult.Error("응답 파싱 실패")
+                } catch (e: HttpException) {
+                    val raw = e.response()?.errorBody()?.string().orEmpty()
+                    Log.e(TAG, "API 오류: ${e.code()} $raw", e)
+                    val errMsg = try {
+                        AiCadNetworkModule.gson.fromJson(raw, AnthropicErrorEnvelope::class.java)
+                            ?.error?.message?.takeIf { !it.isNullOrBlank() }
+                            ?: "HTTP ${e.code()}: $raw"
+                    } catch (_: Exception) {
+                        "HTTP ${e.code()}: ${e.message ?: ""}"
+                    }
+                    ChatResult.Error(errMsg)
+                } catch (e: Exception) {
+                    Log.e(TAG, "API 호출 실패", e)
+                    ChatResult.Error("네트워크 오류: ${e.message ?: e.javaClass.simpleName}")
+                }
             }
-            ChatResult.Error(errMsg)
+            LlmProvider.OPENAI -> sendOpenAiNonStream(apiKey, userText, imageBase64List, system, maxTokens)
+            LlmProvider.GEMINI -> sendGeminiNonStream(apiKey, userText, imageBase64List, system, maxTokens)
+        }
+    }
+
+    private suspend fun sendOpenAiNonStream(
+        apiKey: String,
+        userText: String,
+        imageBase64List: List<String>,
+        system: String?,
+        maxTokens: Int
+    ): ChatResult {
+        val bodyStr = buildOpenAiRequestJson(userText, imageBase64List, system, maxTokens, stream = false).toString()
+        val request = Request.Builder()
+            .url("https://api.openai.com/v1/chat/completions")
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(bodyStr.toRequestBody("application/json".toMediaType()))
+            .build()
+        return try {
+            AiCadNetworkModule.okHttpClient.newCall(request).execute().use { resp ->
+                val bodyString = resp.body?.string() ?: ""
+                if (!resp.isSuccessful) {
+                    return ChatResult.Error("HTTP ${resp.code}: $bodyString")
+                }
+                parseOpenAiMessageText(bodyString)?.let { ChatResult.Success(it) }
+                    ?: ChatResult.Error("응답 파싱 실패")
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "API 호출 실패", e)
+            Log.e(TAG, "OpenAI 호출 실패", e)
             ChatResult.Error("네트워크 오류: ${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    private suspend fun sendGeminiNonStream(
+        apiKey: String,
+        userText: String,
+        imageBase64List: List<String>,
+        system: String?,
+        maxTokens: Int
+    ): ChatResult {
+        val bodyStr = buildGeminiRequestJson(userText, imageBase64List, system, maxTokens, stream = false).toString()
+        val url =
+            "https://generativelanguage.googleapis.com/v1beta/models/$GEMINI_MODEL:generateContent?key=$apiKey"
+        val request = Request.Builder()
+            .url(url)
+            .addHeader("Content-Type", "application/json")
+            .post(bodyStr.toRequestBody("application/json".toMediaType()))
+            .build()
+        return try {
+            AiCadNetworkModule.okHttpClient.newCall(request).execute().use { resp ->
+                val bodyString = resp.body?.string() ?: ""
+                if (!resp.isSuccessful) {
+                    return ChatResult.Error("HTTP ${resp.code}: $bodyString")
+                }
+                parseGeminiMessageText(bodyString)?.let { ChatResult.Success(it) }
+                    ?: ChatResult.Error("응답 파싱 실패")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Gemini 호출 실패", e)
+            ChatResult.Error("네트워크 오류: ${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    private fun buildOpenAiRequestJson(
+        userText: String,
+        imageBase64List: List<String>,
+        system: String?,
+        maxTokens: Int,
+        stream: Boolean
+    ): JsonObject {
+        val messages = JsonArray()
+        if (!system.isNullOrBlank()) {
+            messages.add(JsonObject().apply {
+                addProperty("role", "system")
+                addProperty("content", system)
+            })
+        }
+        val userMsg = JsonObject().apply {
+            addProperty("role", "user")
+            if (imageBase64List.isEmpty()) {
+                addProperty(
+                    "content",
+                    userText.ifBlank {
+                        "무엇을 도와드릴까요?"
+                    }
+                )
+            } else {
+                val parts = JsonArray()
+                if (userText.isNotBlank()) {
+                    parts.add(JsonObject().apply {
+                        addProperty("type", "text")
+                        addProperty("text", userText)
+                    })
+                }
+                for (b64 in imageBase64List) {
+                    parts.add(JsonObject().apply {
+                        addProperty("type", "image_url")
+                        add("image_url", JsonObject().apply {
+                            addProperty("url", "data:image/jpeg;base64,$b64")
+                        })
+                    })
+                }
+                if (parts.size() == 0) {
+                    parts.add(JsonObject().apply {
+                        addProperty("type", "text")
+                        addProperty("text", "이 이미지를 설명해 주세요.")
+                    })
+                }
+                add("content", parts)
+            }
+        }
+        messages.add(userMsg)
+        return JsonObject().apply {
+            addProperty("model", OPENAI_MODEL)
+            addProperty("max_tokens", maxTokens)
+            add("messages", messages)
+            if (stream) addProperty("stream", true)
+        }
+    }
+
+    private fun buildGeminiRequestJson(
+        userText: String,
+        imageBase64List: List<String>,
+        system: String?,
+        maxTokens: Int,
+        @Suppress("UNUSED_PARAMETER") stream: Boolean
+    ): JsonObject {
+        val parts = JsonArray()
+        if (userText.isNotBlank()) {
+            parts.add(JsonObject().apply { addProperty("text", userText) })
+        }
+        for (b64 in imageBase64List) {
+            parts.add(JsonObject().apply {
+                add("inline_data", JsonObject().apply {
+                    addProperty("mime_type", "image/jpeg")
+                    addProperty("data", b64)
+                })
+            })
+        }
+        if (parts.size() == 0) {
+            parts.add(JsonObject().apply { addProperty("text", "이미지를 설명해 주세요.") })
+        }
+        val contents = JsonArray()
+        contents.add(JsonObject().apply {
+            addProperty("role", "user")
+            add("parts", parts)
+        })
+        return JsonObject().apply {
+            add("contents", contents)
+            if (!system.isNullOrBlank()) {
+                add("systemInstruction", JsonObject().apply {
+                    add("parts", JsonArray().apply {
+                        add(JsonObject().apply { addProperty("text", system) })
+                    })
+                })
+            }
+            add("generationConfig", JsonObject().apply {
+                addProperty("maxOutputTokens", maxTokens)
+            })
+        }
+    }
+
+    private fun parseOpenAiMessageText(body: String): String? {
+        return try {
+            val json = JSONObject(body)
+            val choices = json.optJSONArray("choices") ?: return null
+            if (choices.length() == 0) return null
+            val message = choices.getJSONObject(0).optJSONObject("message") ?: return null
+            if (!message.has("content")) return null
+            when (val c = message.get("content")) {
+                is String -> c.takeIf { it.isNotBlank() }
+                is JSONArray -> {
+                    val sb = StringBuilder()
+                    for (i in 0 until c.length()) {
+                        val part = c.optJSONObject(i)
+                        if (part?.optString("type") == "text") {
+                            sb.append(part.optString("text"))
+                        }
+                    }
+                    sb.toString().takeIf { it.isNotBlank() }
+                }
+                else -> null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "OpenAI 응답 파싱 실패", e)
+            null
+        }
+    }
+
+    private fun parseGeminiMessageText(body: String): String? {
+        return try {
+            val json = JSONObject(body)
+            val candidates = json.optJSONArray("candidates") ?: return null
+            if (candidates.length() == 0) return null
+            val content = candidates.getJSONObject(0).optJSONObject("content") ?: return null
+            val parts = content.optJSONArray("parts") ?: return null
+            val sb = StringBuilder()
+            for (i in 0 until parts.length()) {
+                sb.append(parts.optJSONObject(i)?.optString("text") ?: "")
+            }
+            sb.toString().takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            Log.w(TAG, "Gemini 응답 파싱 실패", e)
+            null
         }
     }
 

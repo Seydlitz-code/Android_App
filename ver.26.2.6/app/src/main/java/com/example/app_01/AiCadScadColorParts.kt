@@ -10,8 +10,9 @@ object AiCadScadColorParts {
 
     data class ColorPart(val rgb: FloatArray, val bodyScad: String)
 
+    /** `color([r,g,b])` 또는 `color([r,g,b,a])` (OpenSCAD 4채널) */
     private val colorRe = Regex(
-        """color\s*\(\s*\[\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\]\s*\)""",
+        """color\s*\(\s*\[\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)(?:\s*,\s*[0-9.]+)?\s*\]\s*\)""",
         RegexOption.IGNORE_CASE
     )
 
@@ -19,6 +20,59 @@ object AiCadScadColorParts {
         source.lineSequence()
             .map { it.trim() }
             .firstOrNull { it.startsWith("\$fn") }
+
+    /**
+     * 소스에서 전역 변수·`$fn`·`module`·`function` 정의를 추출합니다.
+     * 각 color 블록을 **개별 WASM 렌더**할 때 이 정의들을 앞에 붙여야
+     * 내부에서 `rounded_box()` 등 사용자 모듈을 참조해도 렌더가 성공합니다.
+     */
+    fun extractDefinitions(source: String): String {
+        val lines = source.lines()
+        val sb = StringBuilder()
+        var i = 0
+        while (i < lines.size) {
+            val t = lines[i].trim()
+            when {
+                t.isEmpty() || t.startsWith("//") || t.startsWith("/*") || t.startsWith("*") -> i++
+
+                // module / function 정의 — 중괄호 균형으로 다중 줄 전체 수집
+                t.startsWith("module ", ignoreCase = true) ||
+                t.startsWith("function ", ignoreCase = true) -> {
+                    var depth = 0
+                    do {
+                        val l = lines[i]
+                        sb.appendLine(l)
+                        for (c in l) when (c) { '{' -> depth++; '}' -> depth-- }
+                        i++
+                    } while (i < lines.size && depth > 0)
+                }
+
+                // $fn / $fs / $fa 설정
+                t.startsWith("\$fn") || t.startsWith("\$fs") || t.startsWith("\$fa") -> {
+                    sb.appendLine(lines[i]); i++
+                }
+
+                // 전역 변수 할당: `NAME = value;`
+                // color / union / difference / intersection / translate / rotate 등 형상 문은 제외
+                t.matches(Regex("""^\w+\s*=\s*[^=].*;\s*$""")) &&
+                !t.startsWith("color", ignoreCase = true) &&
+                !t.startsWith("union", ignoreCase = true) &&
+                !t.startsWith("difference", ignoreCase = true) &&
+                !t.startsWith("intersection", ignoreCase = true) &&
+                !t.startsWith("translate", ignoreCase = true) &&
+                !t.startsWith("rotate", ignoreCase = true) &&
+                !t.startsWith("mirror", ignoreCase = true) &&
+                !t.startsWith("scale", ignoreCase = true) &&
+                !t.startsWith("hull", ignoreCase = true) &&
+                !t.startsWith("minkowski", ignoreCase = true) -> {
+                    sb.appendLine(lines[i]); i++
+                }
+
+                else -> i++
+            }
+        }
+        return sb.toString().trim()
+    }
 
     fun extractColorParts(source: String): List<ColorPart> {
         val out = mutableListOf<ColorPart>()
@@ -99,10 +153,18 @@ object AiCadScadColorParts {
         return source.length
     }
 
-    fun wrapPartForScad(body: String, fnPrefix: String?): String {
+    /**
+     * color 블록 하나를 독립 렌더 가능한 SCAD 소스로 포장합니다.
+     * [definitions]에는 `$fn`, 전역 변수, `module`/`function` 정의가 모두 포함되어야
+     * 블록 내에서 사용자 모듈을 참조해도 WASM 렌더가 성공합니다.
+     */
+    fun wrapPartForScad(body: String, definitions: String): String {
         val b = body.trim()
         val sb = StringBuilder()
-        fnPrefix?.takeIf { it.isNotBlank() }?.let { sb.appendLine(it) }
+        if (definitions.isNotBlank()) {
+            sb.appendLine(definitions)
+            sb.appendLine()
+        }
         sb.appendLine("union() {")
         sb.appendLine(b)
         sb.appendLine("}")

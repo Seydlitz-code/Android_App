@@ -304,7 +304,7 @@ private fun buildPreviewMeshFromPly(
 }
 
 /**
- * 라이브러리 썸네일용: PLY/OBJ를 동일한 [ObjParseResult]로 파싱합니다.
+ * 라이브러리 썸네일용: PLY/OBJ/STL을 동일한 [ObjParseResult]로 파싱합니다.
  * 과대 파일은 메모리 보호를 위해 생략합니다.
  */
 fun loadModelForThumbnailMesh(file: File): ObjParseResult? {
@@ -321,6 +321,8 @@ fun loadModelForThumbnailMesh(file: File): ObjParseResult? {
                     buildPreviewMeshFromPly(parsed.points, parsed.count, parsed.vertexColors, faces)
                 )
             }
+            file.extension.equals("stl", ignoreCase = true) ->
+                parseStlVertices(file)?.let { downsamplePreviewMesh(it) }
             else -> null
         }
     } catch (t: Throwable) {

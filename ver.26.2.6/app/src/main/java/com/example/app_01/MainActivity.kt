@@ -30,6 +30,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.Executors
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import androidx.compose.foundation.Canvas
@@ -45,9 +46,9 @@ import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
-import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.AspectRatio
@@ -95,6 +96,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
@@ -151,8 +153,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import java.util.Calendar
+import java.util.Date
 import java.util.UUID
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import androidx.compose.material3.MaterialTheme
@@ -171,9 +173,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.toMutableStateList
 import android.app.NotificationChannel
@@ -274,6 +278,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.sqrt
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
@@ -308,19 +313,6 @@ private const val SAM3_DEFAULT_PORT = 8001
 private const val PREF_SERVER_ADDRESS = "server_address"
 private const val PREF_SERVER_PORT = "server_port"
 private const val PREF_USE_HTTPS = "use_https"
-private const val PREF_AICAD_SERVER_BASE_URL = "aicad_server_base_url"
-
-/** PC AICAD 모델링 서버 베이스 URL (예: `http://192.168.0.10:8787`). 비어 있으면 기기 내 렌더만 사용 */
-private fun getAiCadServerBaseUrl(context: Context): String {
-    val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
-    return prefs.getString(PREF_AICAD_SERVER_BASE_URL, "")?.trim() ?: ""
-}
-
-private fun saveAiCadServerBaseUrl(context: Context, url: String) {
-    context.getSharedPreferences("app_settings", Context.MODE_PRIVATE).edit()
-        .putString(PREF_AICAD_SERVER_BASE_URL, url.trim())
-        .apply()
-}
 
 // SharedPreferences에서 서버 주소 가져오기
 private fun getServerAddress(context: Context): String {
@@ -492,6 +484,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        ClaudeChatClient.init(applicationContext)
 
         // (삭제) 광택/반사 제거 옵션 제거에 따라 OpenCV 초기화 제거
 
@@ -533,8 +526,8 @@ fun CameraApp(modifier: Modifier = Modifier) {
             }
         )
     }
+    var showLlmApiKeySettings by remember { mutableStateOf(false) }
     var showServerSettings by remember { mutableStateOf(false) }
-    var showAiCadServerSettings by remember { mutableStateOf(false) }
     var showSensorCheck by remember { mutableStateOf(false) }
     var showPermissions by remember { mutableStateOf(false) }
     var selectedTab by remember { mutableStateOf(MainTab.CAMERA) }
@@ -649,9 +642,9 @@ fun CameraApp(modifier: Modifier = Modifier) {
                     }
                 }
             )
-        } else if (showAiCadServerSettings) {
-            AiCadServerSettingsScreen(
-                onBack = { showAiCadServerSettings = false }
+        } else if (showLlmApiKeySettings) {
+            LlmApiKeySettingsScreen(
+                onBack = { showLlmApiKeySettings = false }
             )
         } else if (showServerSettings) {
             ServerSettingsScreen(
@@ -789,8 +782,8 @@ fun CameraApp(modifier: Modifier = Modifier) {
                     }
                     MainTab.PROFILE -> {
                         ProfileScreen(
+                            onLlmApiKeyClick = { showLlmApiKeySettings = true },
                             onServerSettingsClick = { showServerSettings = true },
-                            onAiCadServerSettingsClick = { showAiCadServerSettings = true },
                             onSensorCheckClick = { showSensorCheck = true },
                             onPermissionsClick = { showPermissions = true }
                         )
@@ -857,6 +850,12 @@ fun CameraScreen(
     var isDatasetCollectionEnabled by remember { mutableStateOf(true) }
     var selectedResolution by remember { mutableStateOf(ResolutionPreset.RESOLUTION_1024x1024) }
     var azimuthDegrees by remember { mutableStateOf(0f) }
+    /**
+     * 그리드 오버레이 및 커버리지 기록 전용 방위각.
+     * alpha=0.15 필터를 사용하는 azimuthDegrees와 달리 alpha=0.7(거의 실시간)을 적용해
+     * 카메라 회전 시 그리드가 물리 공간에 즉시 고정되어 보이도록 한다.
+     */
+    var azimuthForGrid by remember { mutableStateOf(0f) }
 
     // ── 후면 카메라 바인딩 정보 ──────────────────────────────────────────────
     // telephoto / wide 각각 "논리 카메라 ID" 또는 "물리 카메라 ID + 부모 논리 ID" 중 하나만 설정됨
@@ -968,8 +967,23 @@ fun CameraScreen(
         }
     }
 
-    // [추가] 모델링 부적합 경고 표시 상태
-    var showModelingWarning by remember { mutableStateOf(false) }
+    // 이동식 공간: 3D 격자 세션(구역 기억·수집 상태)
+    val mobileSpaceSession = remember { MobileSpaceCaptureSession(context.filesDir) }
+    var mobileSpaceUiRev by remember { mutableIntStateOf(0) }
+    val mobileSpaceOverlayState = remember(mobileSpaceUiRev, cameraEntryMode) {
+        if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
+            mobileSpaceSession.snapshotOverlay()
+        } else {
+            MobileSpaceGridOverlayState(0, 6, 4, 3, emptyList(), emptyList())
+        }
+    }
+    // 이동식 공간: 방향별 커버리지(빨강→투명 오버레이용)
+    val scanCoverage = remember { MobileSpaceScanCoverage() }
+    val meshAnalysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    val cameraEntryModeState = rememberUpdatedState(cameraEntryMode)
+    DisposableEffect(Unit) {
+        onDispose { meshAnalysisExecutor.shutdown() }
+    }
 
     // [추가] 사물 촬영(OBJECT) 전용: 사물이 중앙 가상 사각형(1000x1000) 밖으로 벗어났는지 경고
     DisposableEffect(Unit) {
@@ -991,6 +1005,8 @@ fun CameraScreen(
     var baseAzimuthDegrees by remember { mutableStateOf<Float?>(null) }
     // 수직(세로) 들었을 때 0도를 기준으로 하는 기울기
     var pitchDegrees by remember { mutableStateOf(0f) }
+    /** 이동식 공간 격자 롤 축(3D 보xel) */
+    var rollDegrees by remember { mutableStateOf(0f) }
     var basePitchDegrees by remember { mutableStateOf<Float?>(null) }
     var capturedSectors by remember { mutableStateOf<Set<Int>>(emptySet()) }
     val ringSize = 120.dp
@@ -1045,7 +1061,23 @@ fun CameraScreen(
         capturedSectors = emptySet()
         currentPitchIndex = 0
         basePitchDegrees = null
+        if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
+            mobileSpaceSession.loadFromDisk()
+            scanCoverage.reset()
+            mobileSpaceUiRev++
+        } else {
+            mobileSpaceSession.persistToDisk()
+            mobileSpaceSession.resetForModeExit()
+            mobileSpaceUiRev++
+        }
         onDispose { }
+    }
+
+    // 이동식 공간 진입 시 그리드용 방위를 나침반 방위와 즉시 일치 (초기 프레임 동기화)
+    LaunchedEffect(cameraEntryMode) {
+        if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
+            azimuthForGrid = azimuthDegrees
+        }
     }
 
     DisposableEffect(cameraEntryMode) {
@@ -1093,6 +1125,16 @@ fun CameraScreen(
 
                 azimuthDegrees = nextAzimuth
 
+                // 그리드 전용 방위: alpha=0.7 (거의 실시간) → 그리드가 물리 공간에 즉시 고정
+                val gridAlpha = 0.7f
+                var gridDelta = rawAzimuth - azimuthForGrid
+                if (gridDelta > 180f) gridDelta -= 360f
+                if (gridDelta < -180f) gridDelta += 360f
+                var nextGridAz = azimuthForGrid + gridDelta * gridAlpha
+                if (nextGridAz < 0f) nextGridAz += 360f
+                if (nextGridAz >= 360f) nextGridAz -= 360f
+                azimuthForGrid = nextGridAz
+
                 val rawPitch = Math.toDegrees(orientation[1].toDouble()).toFloat()
                 
                 // [개선] 중력 벡터를 이용한 절대 기울기 계산 (수직=90도)
@@ -1103,6 +1145,7 @@ fun CameraScreen(
                 
                 // 앞으로 숙이면 90도 미만, 뒤로 젖히면 90도 초과가 되도록 설정
                 pitchDegrees = 90f + angleDeg
+                rollDegrees = Math.toDegrees(orientation[2].toDouble()).toFloat()
             }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
@@ -1146,11 +1189,6 @@ fun CameraScreen(
     LaunchedEffect(isRecording, cameraEntryMode, captureMode, currentPitchIndex, isDatasetCollectionEnabled, datasetDir) {
         // [수정] 이동식 공간 촬영인 경우: 촬영 시작 3초 후(isDatasetCollectionEnabled=true) 1초 간격 자동 촬영
         if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
-            // 녹화가 아니거나 데이터셋 수집 중단 시 경고 끄기
-            if (!isRecording || !isDatasetCollectionEnabled) {
-                showModelingWarning = false
-            }
-
             if (captureMode == CaptureMode.VIDEO && isRecording && isDatasetCollectionEnabled) {
                 var captureCount = 0
                 val dir = datasetDir
@@ -1163,39 +1201,33 @@ fun CameraScreen(
                     while (isRecording && isDatasetCollectionEnabled) {
                         captureCount++
                         val fileName = "mobile_${captureCount}.jpg"
-                        
+
                         captureDatasetImage(context, 0, 0, dir, capture, fileName) { currentBitmap ->
-                            // 1. 모델링 적합성 검사 (경고 표시 업데이트)
-                            val isSuitable = checkModelingSuitability(currentBitmap)
-                            showModelingWarning = !isSuitable
-
-                            // [수정] 적합하지 않으면(경고 상태) 데이터셋 저장 중단 (파일도 삭제하는 것이 좋으나 captureDatasetImage 내부 구현상 파일은 이미 생성됨. 여기서는 리스트 관리나 후속 처리를 막음)
-                            // captureDatasetImage 함수가 파일을 이미 저장했으므로, 엄밀히는 파일을 지워야 하지만
-                            // 현재 구조상 콜백에서 파일을 지우기 어려우므로, 다음 비교 대상 갱신 등을 하지 않음으로서 논리적 제외 처리.
-                            // 하지만 파일이 남으면 안 되므로, 파일 삭제 로직 추가가 필요할 수 있음.
-                            // 일단 요청사항인 "수집이 이루어지지 않도록"을 위해 로직 흐름을 차단.
-                            if (!isSuitable) {
-                                // 생성된 파일 삭제
-                                val createdFile = File(dir, fileName)
-                                if (createdFile.exists()) {
-                                    createdFile.delete()
-                                }
-                                return@captureDatasetImage false
-                            }
-
-                            // [추가] 유사도 기반 저장 필터링
+                            // 그리드 전용 방위(azimuthForGrid)를 기준으로 커버리지 기록.
+                            // azimuthForGrid는 alpha=0.7 필터로 거의 실시간이므로
+                            // 오버레이(headingDeg=azimuthForGrid)와 동일 좌표계가 됨.
+                            val azNow    = azimuthForGrid          // 그리드 좌표계 방위 (0-360°)
+                            val pitchNow = effectivePitchDegrees
+                            val rollNow  = rollDegrees
                             if (lastSavedBitmapSmall == null) {
                                 // 첫 번째 데이터셋은 무조건 저장
                                 lastSavedBitmapSmall = android.graphics.Bitmap.createScaledBitmap(currentBitmap, 64, 64, true)
+                                mobileSpaceSession.recordAcceptedSample(azNow, pitchNow, rollNow)
+                                scanCoverage.recordFov(azNow, pitchNow)
+                                mobileSpaceUiRev++
                                 true
                             } else {
                                 // 현재 이미지와 직전 저장된 이미지 간의 구조적 유사도 비교
                                 val similarity = calculateImageSimilarity(lastSavedBitmapSmall!!, currentBitmap)
-                                
-                                // 유사도가 70% ~ 90% 사이일 경우에만 저장
-                                if (similarity >= 0.7f && similarity <= 0.9f) {
+                                val similarEnough = similarity >= 0.48f && similarity <= 0.985f
+                                val almostDuplicate = similarity > 0.985f && (captureCount % 4 == 0)
+                                val veryDifferent = similarity < 0.48f && (captureCount % 5 == 0)
+                                if (similarEnough || almostDuplicate || veryDifferent) {
                                     // 조건 만족: 저장하고 비교 기준 갱신
                                     lastSavedBitmapSmall = android.graphics.Bitmap.createScaledBitmap(currentBitmap, 64, 64, true)
+                                    mobileSpaceSession.recordAcceptedSample(azNow, pitchNow, rollNow)
+                                    scanCoverage.recordFov(azNow, pitchNow)
+                                    mobileSpaceUiRev++
                                     true
                                 } else {
                                     // 조건 불만족: 저장하지 않음 (너무 다르거나, 너무 비슷함) -> 파일 삭제
@@ -1350,20 +1382,70 @@ fun CameraScreen(
                 }
                 val newImageCapture = imageCaptureBuilder.build()
 
+                val includeMobileAnalysis = cameraEntryMode == CameraEntryMode.MOBILE_SPACE
+
+                fun buildMobileSpaceImageAnalysis(): ImageAnalysis {
+                    val analysisRes = ResolutionSelector.Builder()
+                        .setResolutionStrategy(
+                            ResolutionStrategy(
+                                Size(640, 480),
+                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                            )
+                        )
+                        .build()
+                    val iab = ImageAnalysis.Builder()
+                        .setResolutionSelector(analysisRes)
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                    if (physicalIdToApply != null) {
+                        @Suppress("UnsafeOptInUsageError")
+                        Camera2Interop.Extender(iab).setPhysicalCameraId(physicalIdToApply!!)
+                    }
+                    return iab.build().also { ia ->
+                        ia.setAnalyzer(meshAnalysisExecutor) { image ->
+                            try {
+                                if (cameraEntryModeState.value != CameraEntryMode.MOBILE_SPACE) return@setAnalyzer
+                                val bmp = imageProxyRgbaToBitmap(image) ?: return@setAnalyzer
+                                // 신규 구역 생성 여부를 판단하기 위해 호출 전 구역 수 기록
+                                val prevRegionCount = mobileSpaceSession.regionCount
+                                val changed = mobileSpaceSession.onSceneFrame(bmp)
+                                val newRegionCreated = mobileSpaceSession.regionCount > prevRegionCount
+                                if (!bmp.isRecycled) bmp.recycle()
+                                if (changed) {
+                                    Handler(Looper.getMainLooper()).post {
+                                        // 새로운 물리적 구역(방)으로 진입한 경우 커버리지 초기화
+                                        // → 새 구역 전체가 빨간 그리드로 다시 표시됨
+                                        if (newRegionCreated) {
+                                            scanCoverage.reset()
+                                        }
+                                        mobileSpaceUiRev++
+                                    }
+                                }
+                            } catch (ex: Exception) {
+                                ex.printStackTrace()
+                            } finally {
+                                image.close()
+                            }
+                        }
+                    }
+                }
+
                 if (captureMode == CaptureMode.PHOTO) {
                     imageCapture = newImageCapture
 
                     // UseCaseGroup을 사용하여 ViewPort 적용
-                    val useCaseGroup = androidx.camera.core.UseCaseGroup.Builder()
+                    val photoGroup = androidx.camera.core.UseCaseGroup.Builder()
                         .setViewPort(viewPort)
                         .addUseCase(preview)
                         .addUseCase(imageCapture!!)
-                        .build()
+                    if (includeMobileAnalysis) {
+                        photoGroup.addUseCase(buildMobileSpaceImageAnalysis())
+                    }
 
                     camera = cameraProvider.bindToLifecycle(
                         lifecycleOwner,
                         cameraSelector,
-                        useCaseGroup
+                        photoGroup.build()
                     )
                     videoCapture = null
                     isCameraReady = true
@@ -1383,17 +1465,19 @@ fun CameraScreen(
                     imageCapture = newImageCapture
 
                     // UseCaseGroup을 사용하여 ViewPort 적용
-                    val useCaseGroup = androidx.camera.core.UseCaseGroup.Builder()
+                    val videoGroup = androidx.camera.core.UseCaseGroup.Builder()
                         .setViewPort(viewPort)
                         .addUseCase(preview)
                         .addUseCase(videoCapture!!)
                         .addUseCase(imageCapture!!)
-                        .build()
+                    if (includeMobileAnalysis) {
+                        videoGroup.addUseCase(buildMobileSpaceImageAnalysis())
+                    }
 
                     camera = cameraProvider.bindToLifecycle(
                         lifecycleOwner,
                         cameraSelector,
-                        useCaseGroup
+                        videoGroup.build()
                     )
                     isCameraReady = true
                 }
@@ -1405,7 +1489,7 @@ fun CameraScreen(
 
     // lensFacing, captureMode, selectedResolution, 카메라ID 변경 시 재바인딩
     LaunchedEffect(lensFacing, captureMode, selectedResolution, previewView,
-        rearTelephotoLogicalId, rearTelephotoPhysId, rearWideId) {
+        rearTelephotoLogicalId, rearTelephotoPhysId, rearWideId, cameraEntryMode) {
         isCameraReady = false
         previewView?.let { bindCamera(it) }
     }
@@ -1442,6 +1526,15 @@ fun CameraScreen(
                     },
                     modifier = Modifier.fillMaxSize()
                 )
+                if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
+                    MobileSpaceScanOverlay(
+                        headingDeg = azimuthForGrid,        // 그리드 전용 방위 (recordFov 와 동일 좌표계, 실시간)
+                        pitchDeg = effectivePitchDegrees,
+                        coverage = scanCoverage,
+                        revisionTick = mobileSpaceUiRev,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
         }
 
@@ -1511,19 +1604,6 @@ fun CameraScreen(
                         }
                     }
 
-                    // 모델링 적합성 경고 (깊이 데이터 부족)
-                    // 이동식 공간 촬영인 경우에만 표시 (showModelingWarning은 이동식 공간 촬영에서만 갱신됨)
-                    if (showModelingWarning) {
-                        Text(
-                            text = "공간에 대한 깊이 데이터가 부족합니다.",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .background(Color.Red, RoundedCornerShape(8.dp))
-                                .padding(horizontal = 12.dp, vertical = 4.dp)
-                        )
-                    }
                 }
             }
         }
@@ -1787,6 +1867,11 @@ fun CameraScreen(
                                     recording = null
                                     isRecording = false
                                     recordingTime = 0L
+
+                                    if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
+                                        mobileSpaceSession.persistToDisk()
+                                        mobileSpaceUiRev++
+                                    }
 
                                     // [추가] 빈 데이터셋 폴더 정리
                                     // 데이터셋 폴더에 이미지가 하나도 없으면 폴더 자동 삭제
@@ -2559,8 +2644,10 @@ fun ClaudeChatScreen(
                         Box(modifier = Modifier.weight(1f)) {
                             if (messageText.isEmpty()) {
                                 Text(
-                                    text = if (aiTabMode == AiChatTabMode.AI_CAD)
-                                        "모델·치수 입력" else "메시지 입력…",
+                                    text = when (aiTabMode) {
+                                        AiChatTabMode.AI_CAD -> "모델·치수 입력"
+                                        else -> "메시지 입력…"
+                                    },
                                     color = Color(0xFF888888),
                                     fontSize = 15.sp
                                 )
@@ -2671,7 +2758,11 @@ fun ClaudeChatScreen(
                             }
                         )
                     })
-                    aiTabMode = if (thread.modeName == "AI_CAD") AiChatTabMode.AI_CAD else AiChatTabMode.CLAUDE
+                    aiTabMode = when (thread.modeName) {
+                        "AI_CAD" -> AiChatTabMode.AI_CAD
+                        "GEMMA4_ON_DEVICE" -> AiChatTabMode.CLAUDE // 구버전 스레드 호환
+                        else -> AiChatTabMode.CLAUDE
+                    }
                     currentThreadId = thread.id
                     streamingText = ""
                     errorMessage = null
@@ -2993,19 +3084,28 @@ private fun ThreadListItem(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // 모드 뱃지
+                val modeLabel = when (thread.modeName) {
+                    "AI_CAD" -> "AI CAD"
+                    else -> "클로드"
+                }
                 val isAiCad = thread.modeName == "AI_CAD"
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(4.dp))
                         .background(
-                            if (isAiCad) Color(0xFF9CD83B).copy(alpha = 0.15f)
-                            else Color(0xFF4A4AFF).copy(alpha = 0.18f)
+                            when {
+                                isAiCad -> Color(0xFF9CD83B).copy(alpha = 0.15f)
+                                else -> Color(0xFF4A4AFF).copy(alpha = 0.18f)
+                            }
                         )
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
-                        text = if (isAiCad) "AI CAD" else "클로드",
-                        color = if (isAiCad) Color(0xFF9CD83B) else Color(0xFF9898FF),
+                        text = modeLabel,
+                        color = when {
+                            isAiCad -> Color(0xFF9CD83B)
+                            else -> Color(0xFF9898FF)
+                        },
                         fontSize = 10.sp,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -3537,8 +3637,8 @@ fun CreatePlaceholderScreen() {
 
 @Composable
 fun ProfileScreen(
+    onLlmApiKeyClick: () -> Unit,
     onServerSettingsClick: () -> Unit,
-    onAiCadServerSettingsClick: () -> Unit,
     onSensorCheckClick: () -> Unit,
     onPermissionsClick: () -> Unit = {}
 ) {
@@ -3563,6 +3663,29 @@ fun ProfileScreen(
                 .height(1.dp)
                 .background(Color.White)
         )
+
+        // LLM API 키 (Anthropic / AI 메뉴)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onLlmApiKeyClick() }
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "LLM API 키",
+                color = Color.White,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        
+        // 구분선
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(Color.White)
+        )
         
         // 서버 설정 메뉴
         Box(
@@ -3573,29 +3696,6 @@ fun ProfileScreen(
         ) {
             Text(
                 text = "서버 설정",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-
-        // 구분선
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(Color.White)
-        )
-
-        // AICAD PC 모델링 서버
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onAiCadServerSettingsClick() }
-                .padding(16.dp)
-        ) {
-            Text(
-                text = "AICAD 서버",
                 color = Color.White,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold
@@ -3995,6 +4095,14 @@ private enum class PendingGalleryMenuAction {
     Share
 }
 
+/** 데이터셋폴더 목록에서 오버플로 메뉴 → 폴더 선택 후 확인 시 수행할 동작 */
+private enum class PendingDatasetMenuAction {
+    None,
+    BackgroundRemove,
+    GlareRemove,
+    Share
+}
+
 @Composable
 fun SensorGridItem(name: String, icon: ImageVector, isPresent: Boolean) {
     Column(
@@ -4151,6 +4259,44 @@ private fun PlyModelThumbnailImage(
                 imageVector = Icons.Filled.Public,
                 contentDescription = "3D Model",
                 tint = Color(0xFF7ED321),
+                modifier = Modifier.size(48.dp)
+            )
+        }
+    }
+}
+
+/** AI CAD 라이브러리 STL 그리드 셀: [Model3dThumbnail] + 그리드용 Coil 크기 */
+@Composable
+private fun AiCadStlGridThumbnail(
+    stlFile: File,
+    libraryVersion: Int,
+    thumbEdgePx: Int,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    var thumbUri by remember(stlFile.absolutePath, stlFile.lastModified(), libraryVersion) {
+        mutableStateOf<Uri?>(null)
+    }
+    LaunchedEffect(stlFile.absolutePath, stlFile.lastModified(), libraryVersion) {
+        thumbUri = try {
+            Model3dThumbnail.generateOrGetAsync(context, stlFile)?.let { Uri.fromFile(it) }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        if (thumbUri != null) {
+            Image(
+                painter = rememberGalleryGridPhotoPainter(thumbUri!!, thumbEdgePx),
+                contentDescription = "AI CAD STL 미리보기",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Filled.Build,
+                contentDescription = "STL",
+                tint = Color(0xFF9CD83B),
                 modifier = Modifier.size(48.dp)
             )
         }
@@ -4450,6 +4596,8 @@ fun GalleryScreen(
         androidx.compose.foundation.lazy.grid.rememberLazyGridState()
 ) {
     val context = LocalContext.current
+    /** 그리드 셀에 맞춘 디코딩 크기 — 사진(Coil)·동영상 첫 프레임 공통 */
+    val gridThumbPx = rememberGalleryGridThumbEdgePx(columns = 4)
     val noServerResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
     var isEditMode by remember { mutableStateOf(false) }
     var selectedItems by remember { mutableStateOf<Set<Uri>>(emptySet()) }
@@ -4469,7 +4617,14 @@ fun GalleryScreen(
     var selectedLibraryAssetPaths by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showLibraryAssetDeleteConfirm by remember { mutableStateOf(false) }
     var showGalleryOverflowMenu by remember { mutableStateOf(false) }
+    var showDatasetOverflowMenu by remember { mutableStateOf(false) }
     var pendingGalleryMenuAction by remember { mutableStateOf(PendingGalleryMenuAction.None) }
+    var pendingDatasetMenuAction by remember { mutableStateOf(PendingDatasetMenuAction.None) }
+    /** 갤러리 [selectedItems] 대신 배경 제거 대상(데이터셋폴더에서 모은 URI) */
+    var pendingBulkImageUrisForBgRemove by remember { mutableStateOf<List<Uri>?>(null) }
+    /** 배경 제거가 데이터셋 폴더에서 시작된 경우, 결과 저장용 새 폴더 이름에 쓸 원본 폴더 경로 집합 */
+    var pendingDatasetFolderPathsForBulkBgRemove by remember { mutableStateOf<Set<String>?>(null) }
+    var showDatasetDeleteAllConfirm by remember { mutableStateOf(false) }
     var showNewDatasetFolderNameDialog by remember { mutableStateOf(false) }
     var newDatasetFolderNameInput by remember { mutableStateOf("") }
     var pendingDatasetFolderImageUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
@@ -4704,20 +4859,26 @@ fun GalleryScreen(
         }
     }
 
-    fun runShareGallerySelection() {
-        if (selectedItems.isEmpty()) {
+    fun runShareGallerySelection(urisOverride: List<Uri>? = null) {
+        val list = urisOverride ?: selectedItems.toList()
+        if (list.isEmpty()) {
             Toast.makeText(context, "선택된 미디어가 없습니다.", Toast.LENGTH_SHORT).show()
             return
         }
-        shareGalleryMediaUris(context, selectedItems.toList())
+        shareGalleryMediaUris(context, list)
         if (pendingGalleryMenuAction == PendingGalleryMenuAction.Share) {
             pendingGalleryMenuAction = PendingGalleryMenuAction.None
         }
     }
 
-    fun runGlareRemovalOnGallerySelection() {
+    fun runGlareRemovalOnGallerySelection(
+        urisOverride: List<Uri>? = null,
+        datasetSourceFolderPaths: Set<String>? = null
+    ) {
+        val itemsFiltered = (urisOverride ?: selectedItems.toList())
+            .filter { !isVideoUri(context, it) }
         val glareEnabled =
-            selectedItems.isNotEmpty() && !isUploading && !isTransferring && !isGlareRemoving && !isBgRemoving
+            itemsFiltered.isNotEmpty() && !isUploading && !isTransferring && !isGlareRemoving && !isBgRemoving
         if (!glareEnabled) {
             Toast.makeText(
                 context,
@@ -4726,12 +4887,20 @@ fun GalleryScreen(
             ).show()
             return
         }
+        val fromDatasetFolders = urisOverride != null
+        val outputDir: File = if (
+            fromDatasetFolders &&
+            !datasetSourceFolderPaths.isNullOrEmpty()
+        ) {
+            createDatasetBatchResultFolder(context, datasetSourceFolderPaths, "광택제거")
+        } else {
+            context.getExternalFilesDir(null) ?: context.filesDir
+        }
         isGlareRemoving = true
         glareProgressPercent = 0
         glareProgressMessage = "준비 중..."
-        val items = selectedItems.toList()
+        val items = itemsFiltered
         val total = items.size
-        val outputDir = context.getExternalFilesDir(null)
         transferScope.launch {
             val glareStartMs = System.currentTimeMillis()
             startOrUpdateForegroundService(
@@ -4797,8 +4966,12 @@ fun GalleryScreen(
             glareProgressPercent = 100
             isGlareRemoving = false
             glareResultMessage = when {
+                successCount > 0 && failCount == 0 && fromDatasetFolders ->
+                    "광택 제거 완료\n${successCount}장이 새 데이터셋 폴더 「${outputDir.name}」에 저장되었습니다."
                 successCount > 0 && failCount == 0 ->
                     "광택 제거 완료\n${successCount}장이 앱 갤러리에 저장되었습니다."
+                successCount > 0 && fromDatasetFolders ->
+                    "광택 제거 완료\n${successCount}장 성공, ${failCount}장 실패\n성공분은 「${outputDir.name}」에 저장되었습니다."
                 successCount > 0 ->
                     "광택 제거 완료\n${successCount}장 성공, ${failCount}장 실패"
                 else ->
@@ -4810,6 +4983,12 @@ fun GalleryScreen(
                 selectedItems = emptySet()
                 isEditMode = false
                 pendingGalleryMenuAction = PendingGalleryMenuAction.None
+                if (fromDatasetFolders) {
+                    isDatasetEditMode = false
+                    selectedDatasetFolders = emptySet()
+                    pendingDatasetMenuAction = PendingDatasetMenuAction.None
+                    loadDatasetFolders(context) { datasetFolders = it }
+                }
                 onImageDeleted()
             }
         }
@@ -4821,6 +5000,7 @@ fun GalleryScreen(
             libraryTab == LibraryTab.DATASET && isDatasetEditMode -> {
                 isDatasetEditMode = false
                 selectedDatasetFolders = emptySet()
+                pendingDatasetMenuAction = PendingDatasetMenuAction.None
             }
             libraryAssetEditMode -> {
                 libraryAssetEditMode = false
@@ -5062,6 +5242,107 @@ fun GalleryScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                     }
+                    if (libraryTab == LibraryTab.DATASET && !showLibraryHub &&
+                        libraryDetailScreen == LibraryDetailScreen.NONE &&
+                        isDatasetEditMode &&
+                        pendingDatasetMenuAction != PendingDatasetMenuAction.None
+                    ) {
+                        Text(
+                            text = "확인",
+                            color = Color(0xFF9CD83B),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .border(1.dp, Color(0xFF9CD83B), RoundedCornerShape(12.dp))
+                                .clickable {
+                                    when (pendingDatasetMenuAction) {
+                                        PendingDatasetMenuAction.BackgroundRemove -> {
+                                            if (selectedDatasetFolders.isEmpty()) {
+                                                Toast.makeText(
+                                                    context,
+                                                    "선택된 폴더가 없습니다.",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            } else {
+                                                val uris = collectImageUrisFromDatasetFolderPaths(
+                                                    selectedDatasetFolders
+                                                ).filter { !isVideoUri(context, it) }
+                                                if (uris.isEmpty()) {
+                                                    Toast.makeText(
+                                                        context,
+                                                        "처리할 이미지가 없습니다.",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                } else {
+                                                    pendingBulkImageUrisForBgRemove = uris
+                                                    pendingDatasetFolderPathsForBulkBgRemove =
+                                                        selectedDatasetFolders.toSet()
+                                                    bgRemovePrompt = ""
+                                                    bgRemovePromptError = false
+                                                    showBgRemoveDialog = true
+                                                    pendingDatasetMenuAction = PendingDatasetMenuAction.None
+                                                }
+                                            }
+                                        }
+                                        PendingDatasetMenuAction.GlareRemove -> {
+                                            if (selectedDatasetFolders.isEmpty()) {
+                                                Toast.makeText(
+                                                    context,
+                                                    "선택된 폴더가 없습니다.",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            } else {
+                                                val uris = collectImageUrisFromDatasetFolderPaths(
+                                                    selectedDatasetFolders
+                                                ).filter { !isVideoUri(context, it) }
+                                                if (uris.isEmpty()) {
+                                                    Toast.makeText(
+                                                        context,
+                                                        "처리할 이미지가 없습니다.",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                } else {
+                                                    runGlareRemovalOnGallerySelection(
+                                                        urisOverride = uris,
+                                                        datasetSourceFolderPaths = selectedDatasetFolders.toSet()
+                                                    )
+                                                    pendingDatasetMenuAction = PendingDatasetMenuAction.None
+                                                }
+                                            }
+                                        }
+                                        PendingDatasetMenuAction.Share -> {
+                                            if (selectedDatasetFolders.isEmpty()) {
+                                                Toast.makeText(
+                                                    context,
+                                                    "선택된 폴더가 없습니다.",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            } else {
+                                                val uris = collectImageUrisFromDatasetFolderPaths(
+                                                    selectedDatasetFolders
+                                                ).filter { !isVideoUri(context, it) }
+                                                if (uris.isEmpty()) {
+                                                    Toast.makeText(
+                                                        context,
+                                                        "공유할 이미지가 없습니다.",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                } else {
+                                                    runShareGallerySelection(uris)
+                                                    isDatasetEditMode = false
+                                                    selectedDatasetFolders = emptySet()
+                                                    pendingDatasetMenuAction = PendingDatasetMenuAction.None
+                                                }
+                                            }
+                                        }
+                                        PendingDatasetMenuAction.None -> {}
+                                    }
+                                }
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
                     if (isEditMode || isDatasetEditMode || libraryAssetEditMode) {
                         Text(
                             text = "취소",
@@ -5076,6 +5357,7 @@ fun GalleryScreen(
                                         libraryTab == LibraryTab.DATASET && isDatasetEditMode -> {
                                             isDatasetEditMode = false
                                             selectedDatasetFolders = emptySet()
+                                            pendingDatasetMenuAction = PendingDatasetMenuAction.None
                                         }
                                         libraryAssetEditMode -> {
                                             libraryAssetEditMode = false
@@ -5316,6 +5598,141 @@ fun GalleryScreen(
                                         showGalleryOverflowMenu = false
                                         if (!isUploading && !isTransferring) {
                                             showDeleteAllConfirm = true
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    } else if (
+                        libraryTab == LibraryTab.DATASET &&
+                        !showLibraryHub &&
+                        libraryDetailScreen == LibraryDetailScreen.NONE
+                    ) {
+                        Box {
+                            IconButton(
+                                onClick = { showDatasetOverflowMenu = true },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.MoreVert,
+                                    contentDescription = "데이터셋폴더 메뉴",
+                                    tint = Color.White
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = showDatasetOverflowMenu,
+                                onDismissRequest = { showDatasetOverflowMenu = false },
+                                modifier = Modifier
+                                    .widthIn(min = 220.dp)
+                                    .background(Color(0xFF2F2F2F), RoundedCornerShape(14.dp))
+                            ) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "1차 배경 제거",
+                                            color = Color.White,
+                                            fontSize = 15.sp
+                                        )
+                                    },
+                                    onClick = {
+                                        showDatasetOverflowMenu = false
+                                        if (!isUploading && !isTransferring && !isGlareRemoving && !isBgRemoving) {
+                                            isDatasetEditMode = true
+                                            selectedDatasetFolders = emptySet()
+                                            pendingDatasetMenuAction =
+                                                PendingDatasetMenuAction.BackgroundRemove
+                                        } else {
+                                            Toast.makeText(
+                                                context,
+                                                "다른 작업이 진행 중입니다.",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "광택 제거",
+                                            color = Color.White,
+                                            fontSize = 15.sp
+                                        )
+                                    },
+                                    onClick = {
+                                        showDatasetOverflowMenu = false
+                                        if (!isUploading && !isTransferring && !isGlareRemoving && !isBgRemoving) {
+                                            isDatasetEditMode = true
+                                            selectedDatasetFolders = emptySet()
+                                            pendingDatasetMenuAction =
+                                                PendingDatasetMenuAction.GlareRemove
+                                        } else {
+                                            Toast.makeText(
+                                                context,
+                                                "다른 작업이 진행 중입니다.",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "공유하기",
+                                            color = Color.White,
+                                            fontSize = 15.sp
+                                        )
+                                    },
+                                    onClick = {
+                                        showDatasetOverflowMenu = false
+                                        if (!isUploading && !isTransferring) {
+                                            isDatasetEditMode = true
+                                            selectedDatasetFolders = emptySet()
+                                            pendingDatasetMenuAction = PendingDatasetMenuAction.Share
+                                        } else {
+                                            Toast.makeText(
+                                                context,
+                                                "다른 작업이 진행 중입니다.",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "전체선택",
+                                            color = Color.White,
+                                            fontSize = 15.sp
+                                        )
+                                    },
+                                    onClick = {
+                                        showDatasetOverflowMenu = false
+                                        if (datasetFolders.isNotEmpty()) {
+                                            isDatasetEditMode = true
+                                            selectedDatasetFolders =
+                                                datasetFolders.map { it.dir.absolutePath }.toSet()
+                                            pendingDatasetMenuAction = PendingDatasetMenuAction.None
+                                        } else {
+                                            Toast.makeText(
+                                                context,
+                                                "선택할 폴더가 없습니다.",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "전체삭제",
+                                            color = Color.White,
+                                            fontSize = 15.sp
+                                        )
+                                    },
+                                    onClick = {
+                                        showDatasetOverflowMenu = false
+                                        if (!isUploading && !isTransferring) {
+                                            showDatasetDeleteAllConfirm = true
                                         }
                                     }
                                 )
@@ -5844,11 +6261,11 @@ fun GalleryScreen(
                                             ),
                                         contentAlignment = Alignment.Center
                                     ) {
-                                        Icon(
-                                            imageVector = Icons.Filled.Build,
-                                            contentDescription = "STL",
-                                            tint = Color(0xFF9CD83B),
-                                            modifier = Modifier.size(48.dp)
+                                        AiCadStlGridThumbnail(
+                                            stlFile = file,
+                                            libraryVersion = aiCadLibraryVersion,
+                                            thumbEdgePx = gridThumbPx,
+                                            modifier = Modifier.fillMaxSize()
                                         )
                                         if (isSelected) {
                                             Box(
@@ -5931,7 +6348,7 @@ fun GalleryScreen(
                                 key = { it.toString() }
                             ) { uri ->
                                 Image(
-                                    painter = rememberAsyncImagePainter(uri),
+                                    painter = rememberGalleryGridPhotoPainter(uri, gridThumbPx),
                                     contentDescription = "데이터셋폴더 이미지",
                                     modifier = Modifier
                                         .aspectRatio(1f)
@@ -5959,7 +6376,21 @@ fun GalleryScreen(
             } else {
                 // Box 안에서 Row와 LazyVerticalGrid를 형제로 두면 그리드가 fillMaxSize로 메뉴 위에 그려짐 → Column으로 분리
                 Column(modifier = Modifier.fillMaxSize()) {
-                    if (isDatasetEditMode) {
+                    if (isDatasetEditMode && pendingDatasetMenuAction != PendingDatasetMenuAction.None) {
+                        Text(
+                            text = "폴더를 탭하여 선택한 뒤 상단 「확인」을 누르세요.",
+                            color = Color.White.copy(alpha = 0.72f),
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                        )
+                    }
+                    // 메뉴(배경제거·광택·공유 등)로 진입한 폴더 선택 모드에서는 업로드/삭제 바 숨김 — 길게 눌러 진입한 편집 모드에서만 표시
+                    // 배경 제거 프롬프트 다이얼로그가 뜨는 동안에는 pendingMenu가 None으로 바뀌므로, 대기 URI·다이얼로그 표시로 별도 판별
+                    if (isDatasetEditMode &&
+                        pendingDatasetMenuAction == PendingDatasetMenuAction.None &&
+                        !showBgRemoveDialog &&
+                        pendingBulkImageUrisForBgRemove == null
+                    ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -6091,7 +6522,7 @@ fun GalleryScreen(
                             ) {
                                 folder.coverUri?.let { uri ->
                                     Image(
-                                        painter = rememberAsyncImagePainter(uri),
+                                        painter = rememberGalleryGridPhotoPainter(uri, gridThumbPx),
                                         contentDescription = "데이터셋폴더 표지",
                                         modifier = Modifier.fillMaxSize(),
                                         contentScale = ContentScale.Crop
@@ -6149,17 +6580,17 @@ fun GalleryScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 업로드 버튼
+                    // 업로드 버튼 (데이터셋 라이브러리 편집 툴바와 동일 터치 영역)
                     Icon(
                         imageVector = Icons.Filled.CloudUpload,
                         contentDescription = "업로드",
                         tint = if (selectedItems.isNotEmpty()) Color(0xFF9CD83B) else Color(0xFF9CD83B).copy(alpha = 0.4f),
                         modifier = Modifier
-                            .size(20.dp)
+                            .size(32.dp)
                             .clickable {
                                 uploadSourceTab = LibraryTab.GALLERY
                                 when {
@@ -6185,18 +6616,18 @@ fun GalleryScreen(
                     Text(
                         text = "삭제",
                         color = if (selectedItems.isNotEmpty()) Color.White else Color.White.copy(alpha = 0.4f),
-                        fontSize = 9.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
                         softWrap = false,
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
+                            .clip(RoundedCornerShape(12.dp))
                             .background(if (selectedItems.isNotEmpty()) Color.Red else Color.Red.copy(alpha = 0.4f))
                             .clickable(enabled = !isUploading && !isTransferring && selectedItems.isNotEmpty()) {
                                 showDeleteConfirm = true
                             }
-                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
                     )
                 }
             }
@@ -6256,21 +6687,8 @@ fun GalleryScreen(
 
                         // 동영상 썸네일 로드
                         if (isVideo) {
-                            LaunchedEffect(mediaUri) {
-                                videoThumbnail = withContext(Dispatchers.IO) {
-                                    try {
-                                    val retriever = MediaMetadataRetriever()
-                                    try {
-                                        retriever.setDataSource(context, mediaUri)
-                                        retriever.getFrameAtTime(0)
-                                    } finally {
-                                        retriever.release()
-                                    }
-                                    } catch (e: Exception) {
-                                        e.printStackTrace()
-                                        null
-                                    }
-                                }
+                            LaunchedEffect(mediaUri, gridThumbPx) {
+                                videoThumbnail = decodeVideoGridThumbnail(context, mediaUri, gridThumbPx)
                             }
                         }
 
@@ -6355,7 +6773,7 @@ fun GalleryScreen(
                             } else {
                                 // 이미지
                                 Image(
-                                    painter = rememberAsyncImagePainter(mediaUri),
+                                    painter = rememberGalleryGridPhotoPainter(mediaUri, gridThumbPx),
                                     contentDescription = "촬영한 미디어",
                                     modifier = Modifier.fillMaxSize(),
                                     contentScale = ContentScale.Crop
@@ -6853,8 +7271,22 @@ fun GalleryScreen(
         if (showBgRemoveDialog) {
             val isPromptValid = !bgRemovePromptError
             val canApply = isPromptValid
+            /** 갤러리: bulk URI 없음 / 데이터셋: 확인 직후 bulk URI 설정 — 후자일 때 닫기면 폴더 선택·편집 모드까지 종료 */
+            val dismissBgRemoveDialogWithoutApply = {
+                val wasDatasetBulk = pendingBulkImageUrisForBgRemove != null
+                showBgRemoveDialog = false
+                pendingBulkImageUrisForBgRemove = null
+                pendingDatasetFolderPathsForBulkBgRemove = null
+                bgRemovePrompt = ""
+                bgRemovePromptError = false
+                if (wasDatasetBulk) {
+                    isDatasetEditMode = false
+                    selectedDatasetFolders = emptySet()
+                    pendingDatasetMenuAction = PendingDatasetMenuAction.None
+                }
+            }
 
-            Dialog(onDismissRequest = { showBgRemoveDialog = false }) {
+            Dialog(onDismissRequest = dismissBgRemoveDialogWithoutApply) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -6921,7 +7353,7 @@ fun GalleryScreen(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(12.dp))
                                     .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                                    .clickable { showBgRemoveDialog = false }
+                                    .clickable(onClick = dismissBgRemoveDialogWithoutApply)
                                     .padding(horizontal = 16.dp, vertical = 8.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
@@ -6937,14 +7369,30 @@ fun GalleryScreen(
                                         else Color(0xFF1A6B2F).copy(alpha = 0.3f)
                                     )
                                     .clickable(enabled = canApply) {
+                                        val bulkSnapshot = pendingBulkImageUrisForBgRemove
+                                        val fromDatasetFolders = bulkSnapshot != null
+                                        val datasetPathsSnapshot = pendingDatasetFolderPathsForBulkBgRemove
                                         showBgRemoveDialog = false
+                                        pendingBulkImageUrisForBgRemove = null
+                                        pendingDatasetFolderPathsForBulkBgRemove = null
                                         isBgRemoving = true
                                         sam3ProgressPercent = 0
                                         sam3ProgressMessage = "준비 중..."
                                         val prompt = bgRemovePrompt.trim()
-                                        val items = selectedItems.toList()
+                                        val items = bulkSnapshot ?: selectedItems.toList()
                                         val total = items.size
-                                        val outputDir = context.getExternalFilesDir(null)
+                                        val outputDir: File = if (
+                                            fromDatasetFolders &&
+                                            !datasetPathsSnapshot.isNullOrEmpty()
+                                        ) {
+                                            createDatasetBatchResultFolder(
+                                                context,
+                                                datasetPathsSnapshot,
+                                                "배경제거"
+                                            )
+                                        } else {
+                                            context.getExternalFilesDir(null) ?: context.filesDir
+                                        }
                                         transferScope.launch {
                                             val bgStartMs = System.currentTimeMillis()
                                             // 포그라운드 서비스 시작
@@ -7020,8 +7468,12 @@ fun GalleryScreen(
                                             sam3ProgressPercent = 100
                                             isBgRemoving = false
                                             sam3ResultMessage = when {
+                                                successCount > 0 && failCount == 0 && fromDatasetFolders ->
+                                                    "배경 제거 완료\n${successCount}장이 새 데이터셋 폴더 「${outputDir.name}」에 저장되었습니다."
                                                 successCount > 0 && failCount == 0 ->
                                                     "배경 제거 완료\n${successCount}장이 앱 갤러리에 저장되었습니다."
+                                                successCount > 0 && fromDatasetFolders ->
+                                                    "배경 제거 완료\n${successCount}장 성공, ${failCount}장 실패\n성공분은 「${outputDir.name}」에 저장되었습니다."
                                                 successCount > 0 ->
                                                     "배경 제거 완료\n${successCount}장 성공, ${failCount}장 실패"
                                                 else ->
@@ -7034,6 +7486,12 @@ fun GalleryScreen(
                                                 selectedItems = emptySet()
                                                 isEditMode = false
                                                 pendingGalleryMenuAction = PendingGalleryMenuAction.None
+                                                if (fromDatasetFolders) {
+                                                    isDatasetEditMode = false
+                                                    selectedDatasetFolders = emptySet()
+                                                    pendingDatasetMenuAction = PendingDatasetMenuAction.None
+                                                    loadDatasetFolders(context) { datasetFolders = it }
+                                                }
                                                 onImageDeleted()
                                             }
                                         }
@@ -7164,7 +7622,8 @@ fun GalleryScreen(
                                                             zipFile = zipFile,
                                                             prompt = promptSnapshot,
                                                             onProgress = { p, msg ->
-                                                                CoroutineScope(Dispatchers.Main).launch {
+                                                                // suspend 람다: withContext로 Main 전환 → Compose 상태 안전 업데이트
+                                                                withContext(Dispatchers.Main) {
                                                                     uploadProgress = p to 100
                                                                     uploadMessage = msg
                                                                 }
@@ -7213,7 +7672,8 @@ fun GalleryScreen(
                                                             zipFile = zipFile,
                                                             prompt = promptSnapshot,
                                                             onProgress = { p, msg ->
-                                                                CoroutineScope(Dispatchers.Main).launch {
+                                                                // suspend 람다: withContext로 Main 전환 → Compose 상태 안전 업데이트
+                                                                withContext(Dispatchers.Main) {
                                                                     uploadProgress = p to 100
                                                                     uploadMessage = msg
                                                                 }
@@ -7372,6 +7832,65 @@ fun GalleryScreen(
             }
         }
 
+        if (showDatasetDeleteAllConfirm) {
+            Dialog(onDismissRequest = { showDatasetDeleteAllConfirm = false }) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
+                        .padding(20.dp)
+                ) {
+                    Column {
+                        Text(
+                            text = "데이터셋폴더 전체 삭제",
+                            color = Color.White,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "모든 데이터셋 폴더와 그 안의 이미지를 삭제하겠습니까?",
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            Text(
+                                text = "취소",
+                                color = Color.White,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                                    .clickable { showDatasetDeleteAllConfirm = false }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "삭제",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color.Red)
+                                    .clickable {
+                                        deleteAllDatasetFolders(context)
+                                        showDatasetDeleteAllConfirm = false
+                                        isDatasetEditMode = false
+                                        selectedDatasetFolders = emptySet()
+                                        pendingDatasetMenuAction = PendingDatasetMenuAction.None
+                                        loadDatasetFolders(context) { datasetFolders = it }
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         if (showDatasetDeleteConfirm) {
             Dialog(onDismissRequest = { showDatasetDeleteConfirm = false }) {
                 Box(
@@ -7515,6 +8034,7 @@ fun GalleryScreen(
                                             LibraryTab.AI_CAD -> {
                                                 paths.forEach { p ->
                                                     val f = File(p)
+                                                    Model3dThumbnail.invalidateForModelFile(context, f)
                                                     if (!deleteAiCadArtifactsForStl(f)) anyFail = true
                                                     if (selectedAiCadStlFile?.absolutePath == p) {
                                                         selectedAiCadStlFile = null
@@ -9365,49 +9885,6 @@ private fun startVideoRecording(
 
 // (삭제) TFLite 기반 광택/반사 제거 기능: 요청에 따라 Inpainting 기반으로 전면 교체됨
 
-// [추가] 이미지 유사도 계산 (픽셀 기반 구조 비교, 0.0 ~ 1.0)
-private fun calculateImageSimilarity(bitmap1: android.graphics.Bitmap, bitmap2: android.graphics.Bitmap): Float {
-    val width = 64
-    val height = 64
-    // 성능을 위해 리사이징하여 비교
-    val s1 = android.graphics.Bitmap.createScaledBitmap(bitmap1, width, height, true)
-    val s2 = android.graphics.Bitmap.createScaledBitmap(bitmap2, width, height, true)
-    
-    val pixels1 = IntArray(width * height)
-    val pixels2 = IntArray(width * height)
-    
-    s1.getPixels(pixels1, 0, width, 0, 0, width, height)
-    s2.getPixels(pixels2, 0, width, 0, 0, width, height)
-    
-    var similaritySum = 0.0
-    val maxDist = Math.sqrt(255.0 * 255.0 * 3.0) // 가능한 최대 색상 거리
-    
-    for (i in pixels1.indices) {
-        val c1 = pixels1[i]
-        val c2 = pixels2[i]
-        
-        val r1 = (c1 shr 16) and 0xFF
-        val g1 = (c1 shr 8) and 0xFF
-        val b1 = c1 and 0xFF
-        
-        val r2 = (c2 shr 16) and 0xFF
-        val g2 = (c2 shr 8) and 0xFF
-        val b2 = c2 and 0xFF
-        
-        // 유클리드 거리 기반 색상 차이
-        val dist = Math.sqrt(
-            ((r1 - r2) * (r1 - r2) + (g1 - g2) * (g1 - g2) + (b1 - b2) * (b1 - b2)).toDouble()
-        )
-        // 유사도 누적 (1.0 = 일치, 0.0 = 불일치)
-        similaritySum += (1.0 - (dist / maxDist))
-    }
-    
-    if (s1 != bitmap1) s1.recycle()
-    if (s2 != bitmap2) s2.recycle()
-    
-    return (similaritySum / (width * height)).toFloat()
-}
-
 // [수정] 모델링 적합성 판단 (이동식 공간 촬영용)
 // - 기존: "가상 점 5개가 모두 같은 공간"과 유사한 개념을 십자선 전체 표준편차로 간접 판단
 // - 변경: 3x3 배열(9개)의 "가상 점(샘플 포인트)"을 중앙 주변에 배치하고,
@@ -9677,6 +10154,63 @@ private fun deleteDatasetFolder(folder: DatasetFolder) {
     } catch (e: Exception) {
         e.printStackTrace()
     }
+}
+
+/** 데이터셋폴더 라이브러리 전체 비우기 (`datasets/` 하위만) */
+private fun deleteAllDatasetFolders(context: Context) {
+    try {
+        val root = File(context.getExternalFilesDir(null), "datasets")
+        if (root.exists()) {
+            root.listFiles()?.forEach { child ->
+                if (child.isDirectory) child.deleteRecursively()
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+}
+
+/**
+ * 데이터셋 라이브러리에서 배경/광택 제거 등 배치 처리 시, [datasets] 아래 원본과 분리된 새 폴더를 만든다.
+ * 단일 원본 폴더: `원본폴더명_작업라벨_시각`, 복수: `작업라벨_N개폴더_시각`
+ */
+private fun createDatasetBatchResultFolder(
+    context: Context,
+    sourceFolderPaths: Set<String>,
+    operationLabel: String
+): File {
+    val root = File(context.getExternalFilesDir(null), "datasets")
+    root.mkdirs()
+    val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+    val safeOp = operationLabel.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+    val folderName = when (sourceFolderPaths.size) {
+        1 -> {
+            val base = File(sourceFolderPaths.first()).name.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+            "${base}_${safeOp}_$ts"
+        }
+        else -> "${safeOp}_${sourceFolderPaths.size}개폴더_$ts"
+    }
+    val out = File(root, folderName)
+    out.mkdirs()
+    return out
+}
+
+/** 선택한 데이터셋 폴더 경로들에서 이미지 파일 URI 수집 (동영상 제외는 호출부에서) */
+private fun collectImageUrisFromDatasetFolderPaths(
+    folderPaths: Set<String>
+): List<Uri> {
+    val imageExts = setOf("jpg", "jpeg", "png", "webp", "heic", "heif")
+    val uris = mutableListOf<Uri>()
+    for (path in folderPaths) {
+        val dir = File(path)
+        if (!dir.isDirectory) continue
+        dir.listFiles { f ->
+            f.isFile && imageExts.contains(f.extension.lowercase())
+        }?.sortedByDescending { it.lastModified() }?.forEach { f ->
+            uris.add(Uri.fromFile(f))
+        }
+    }
+    return uris
 }
 
 private fun isVideoUri(context: Context, uri: Uri): Boolean {
@@ -10270,6 +10804,12 @@ private fun saveConvertedObjToModelsLibrary(
     }
 }
 
+/** 갤러리 스캔 시 재귀를 막을 앱 전용 폴더 (gemma4 extracted·models 등은 파일 수가 매우 많음) */
+private fun skipGallerySubtreeDirName(name: String): Boolean = when (name.lowercase(Locale.ROOT)) {
+    "datasets", "gemma4", "models", "aicad_library" -> true
+    else -> false
+}
+
 private fun loadCapturedMediaSync(context: Context): List<Uri> {
     val mediaDir = context.getExternalFilesDir(null)
     if (mediaDir == null || !mediaDir.exists()) {
@@ -10278,6 +10818,9 @@ private fun loadCapturedMediaSync(context: Context): List<Uri> {
 
     val datasetsRoot = File(mediaDir, "datasets").absolutePath
     val entries = mediaDir.walkTopDown()
+        .onEnter { dir ->
+            dir == mediaDir || !skipGallerySubtreeDirName(dir.name)
+        }
         .filter { file ->
             file.isFile &&
                 (file.name.endsWith(".jpg", ignoreCase = true) ||
@@ -10296,14 +10839,39 @@ private fun loadCapturedMediaSync(context: Context): List<Uri> {
 }
 
 /**
+ * HTTPS를 지원하는 OkHttpClient 베이스 인스턴스.
+ * 호출부에서 [OkHttpClient.newBuilder]로 타임아웃만 조정하므로, SSL 초기화 비용은 모드별 1회로 캐시합니다.
+ */
+private val okHttpBaseLock = Any()
+@Volatile
+private var okHttpBasePlain: OkHttpClient? = null
+@Volatile
+private var okHttpBaseTrustAll: OkHttpClient? = null
+
+/**
  * HTTPS를 지원하는 OkHttpClient 생성
  */
 private fun createOkHttpClient(useHttps: Boolean = DEFAULT_USE_HTTPS): OkHttpClient {
+    if (useHttps) {
+        okHttpBaseTrustAll?.let { return it }
+        synchronized(okHttpBaseLock) {
+            okHttpBaseTrustAll?.let { return it }
+            return buildOkHttpClientBase(useHttps).also { okHttpBaseTrustAll = it }
+        }
+    }
+    okHttpBasePlain?.let { return it }
+    synchronized(okHttpBaseLock) {
+        okHttpBasePlain?.let { return it }
+        return buildOkHttpClientBase(useHttps).also { okHttpBasePlain = it }
+    }
+}
+
+private fun buildOkHttpClientBase(useHttps: Boolean): OkHttpClient {
     val builder = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
-    
+
     // HTTPS 사용 시 SSL 인증서 검증 우회 (개발/테스트 환경)
     if (useHttps) {
         val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
@@ -10319,7 +10887,7 @@ private fun createOkHttpClient(useHttps: Boolean = DEFAULT_USE_HTTPS): OkHttpCli
         builder.sslSocketFactory(sslSocketFactory, trustAllCerts[0] as X509TrustManager)
         builder.hostnameVerifier(HostnameVerifier { _, _ -> true })
     }
-    
+
     return builder.build()
 }
 
@@ -10517,9 +11085,16 @@ private suspend fun fetchServerTaskStatus(context: Context, taskId: String): Ser
             if (!ok) return@withContext null
 
             val json = JSONObject(body)
+            // FastAPI 서버(main_0316_postprocess.py)는 "progress" 키를 사용한다.
+            // 레거시 호환: "progress_percent"
+            val pct = when {
+                json.has("progress") -> json.optInt("progress", 0)
+                json.has("progress_percent") -> json.optInt("progress_percent", 0)
+                else -> 0
+            }
             ServerTaskStatus(
                 status = json.optString("status"),
-                progressPercent = json.optInt("progress_percent", 0),
+                progressPercent = pct,
                 message = json.optString("message", "처리 중..."),
                 downloadUrl = json.optString("download_url").takeIf { it.isNotBlank() }
             )
@@ -10631,52 +11206,74 @@ private suspend fun sam2RemoveBackground(
 }
 
 private suspend fun downloadPlyResult(context: Context, taskId: String): File? {
-    return withContext(Dispatchers.IO) {
-        try {
-            val serverAddress = getServerAddress(context)
-            val serverPort = getServerPort(context)
-            val useHttps = getUseHttps(context)
-            val client = createOkHttpClient(useHttps)
+    // 큰 PLY 파일 다운로드 — 타임아웃을 길게 설정하고 최대 3회 재시도
+    val maxAttempts = 3
+    repeat(maxAttempts) { attempt ->
+        val result = withContext(Dispatchers.IO) {
+            try {
+                val serverAddress = getServerAddress(context)
+                val serverPort = getServerPort(context)
+                val useHttps = getUseHttps(context)
+                // PLY 파일은 수백 MB에 달할 수 있으므로 readTimeout을 10분으로 확장
+                val client = createOkHttpClient(useHttps).newBuilder()
+                    .connectTimeout(30, TimeUnit.SECONDS)
+                    .readTimeout(600, TimeUnit.SECONDS)
+                    .callTimeout(620, TimeUnit.SECONDS)
+                    .build()
 
-            val protocol = if (useHttps) "https" else "http"
-            val url = "$protocol://$serverAddress:$serverPort$DOWNLOAD_ENDPOINT/$taskId"
-            val request = Request.Builder().url(url).get().build()
-            val response = client.newCall(request).execute()
-            val body = response.body
-            if (!response.isSuccessful || body == null) {
-                response.close()
-                return@withContext null
-            }
-
-            val modelsDir = ModelLibraryPaths.plyDir(context)
-            val outFile = File(modelsDir, "3d_model_$taskId.ply")
-            body.byteStream().use { input ->
-                FileOutputStream(outFile).use { output ->
-                    input.copyTo(output)
+                val protocol = if (useHttps) "https" else "http"
+                val url = "$protocol://$serverAddress:$serverPort$DOWNLOAD_ENDPOINT/$taskId"
+                val request = Request.Builder()
+                    .url(url)
+                    .get()
+                    .header("Connection", "keep-alive")
+                    .build()
+                val response = client.newCall(request).execute()
+                val body = response.body
+                if (!response.isSuccessful || body == null) {
+                    response.close()
+                    return@withContext null
                 }
+
+                val modelsDir = ModelLibraryPaths.plyDir(context)
+                val outFile = File(modelsDir, "3d_model_$taskId.ply")
+                body.byteStream().use { input ->
+                    FileOutputStream(outFile).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                response.close()
+                outFile
+            } catch (e: Exception) {
+                android.util.Log.w("downloadPlyResult", "다운로드 시도 ${attempt + 1}/$maxAttempts 실패", e)
+                null
             }
-            response.close()
-            outFile
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
         }
+        if (result != null) return result
+        // 마지막 시도가 아니면 지수 백오프 후 재시도 (5초, 10초)
+        if (attempt < maxAttempts - 1) delay(5_000L * (attempt + 1))
     }
+    return null
 }
 
 private suspend fun uploadZipAndRunPipeline(
     context: Context,
     zipFile: File,
     prompt: String = "",
-    onProgress: (progress: Int, message: String) -> Unit
+    onProgress: suspend (progress: Int, message: String) -> Unit
 ): Boolean {
     val taskTitle = "3D 모델 생성 중"
     val uploadStartMs = System.currentTimeMillis()
+    // 마지막으로 표시한 퍼센트 — 표시 값이 역행하지 않도록 추적
+    var lastShownProgress = 0
 
     // 공통 헬퍼: UI 콜백 + 포그라운드 서비스 알림 동시 업데이트
-    val updateNotification = { p: Int, msg: String ->
-        onProgress(p, msg)
-        startOrUpdateForegroundService(context, taskTitle, p, msg, uploadStartMs)
+    // 항상 lastShownProgress 이상의 값만 표시해 퍼센트 역행을 방지
+    suspend fun updateNotification(p: Int, msg: String) {
+        val safeP = p.coerceAtLeast(lastShownProgress).coerceIn(0, 100)
+        lastShownProgress = safeP
+        onProgress(safeP, msg)
+        startOrUpdateForegroundService(context, taskTitle, safeP, msg, uploadStartMs)
     }
 
     // 서비스 시작
@@ -10688,7 +11285,7 @@ private suspend fun uploadZipAndRunPipeline(
         val noResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
         val taskId = startServerTaskWithZip(context, zipFile, prompt)
         if (taskId.isNullOrBlank()) {
-            updateNotification(0, noResponseMsg)
+            onProgress(0, noResponseMsg)
             context.stopService(Intent(context, AppForegroundService::class.java))
             return false
         }
@@ -10696,15 +11293,18 @@ private suspend fun uploadZipAndRunPipeline(
         // 로컬 ZIP은 서버에 올라갔으면 삭제(저장공간 확보)
         try { zipFile.delete() } catch (_: Exception) {}
 
-        // 2) 상태 폴링
+        // 2) 상태 폴링 — 처음 2분은 2초 간격, 이후 5초 간격
         val start = System.currentTimeMillis()
         val timeoutMs = 30L * 60L * 1000L // 30분
         var lastServerResponseAt = System.currentTimeMillis()
+        var pollCount = 0
         while (System.currentTimeMillis() - start < timeoutMs) {
             val st = fetchServerTaskStatus(context, taskId)
             if (st != null) {
                 lastServerResponseAt = System.currentTimeMillis()
-                updateNotification(st.progressPercent.coerceIn(0, 99), st.message)
+                // 서버 STATUS_PROGRESS(5~100) 그대로 반영 — 잘못된 키 파싱 시 0만 오므로 역행 방지는 updateNotification 내부
+                val serverPct = st.progressPercent.coerceIn(0, 100)
+                updateNotification(serverPct, st.message)
                 when (st.status) {
                     "COMPLETED" -> break
                     "FAILED" -> {
@@ -10713,23 +11313,27 @@ private suspend fun uploadZipAndRunPipeline(
                     }
                 }
             } else {
-                // 60초 이상 서버 응답이 없으면 중단
-                if (System.currentTimeMillis() - lastServerResponseAt >= 60_000L) {
-                    updateNotification(0, noResponseMsg)
+                // 90초 이상 서버 응답이 없으면 중단 (일시적 네트워크 지연 허용)
+                if (System.currentTimeMillis() - lastServerResponseAt >= 90_000L) {
+                    onProgress(lastShownProgress, noResponseMsg)
                     context.stopService(Intent(context, AppForegroundService::class.java))
                     return false
                 }
             }
-            delay(1000)
+            pollCount++
+            // 처음 60회(2초 간격 = 2분)는 빠르게, 이후 5초 간격
+            delay(if (pollCount <= 60) 2_000L else 5_000L)
         }
 
         // 3) 결과 다운로드 (.ply)
-        updateNotification(95, "결과 다운로드 중...")
+        // lastShownProgress 이상 값으로 고정(역행 방지): 서버가 99%를 줬다면 다운로드도 99%에서 시작
+        updateNotification(lastShownProgress.coerceAtLeast(95), "결과 다운로드 중...")
         val result = downloadPlyResult(context, taskId) ?: run {
             context.stopService(Intent(context, AppForegroundService::class.java))
             return false
         }
 
+        updateNotification(100, "완료되었습니다!")
         stopForegroundService(context, "3D 모델 생성 완료", "완료되었습니다!")
         return true
     } catch (e: Exception) {
@@ -11232,42 +11836,122 @@ private suspend fun testServerConnection(
 }
 
 @Composable
-fun AiCadServerSettingsScreen(onBack: () -> Unit) {
+fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
-    var baseUrl by remember { mutableStateOf(getAiCadServerBaseUrl(context)) }
-    var isTesting by remember { mutableStateOf(false) }
-    var testResult by remember { mutableStateOf<String?>(null) }
-    val coroutineScope = rememberCoroutineScope()
+    var selectedProvider by remember {
+        mutableStateOf(LlmApiKeyStore.getSelectedProvider(context))
+    }
+    var claudeKey by remember {
+        mutableStateOf(LlmApiKeyStore.getValueForEditing(context, LlmProvider.CLAUDE))
+    }
+    var openaiKey by remember {
+        mutableStateOf(LlmApiKeyStore.getValueForEditing(context, LlmProvider.OPENAI))
+    }
+    var geminiKey by remember {
+        mutableStateOf(LlmApiKeyStore.getValueForEditing(context, LlmProvider.GEMINI))
+    }
 
     BackHandler { onBack() }
+
+    val keyLabel = when (selectedProvider) {
+        LlmProvider.CLAUDE -> "Anthropic (클로드) API 키"
+        LlmProvider.OPENAI -> "OpenAI (GPT) API 키"
+        LlmProvider.GEMINI -> "Google AI (제미나이) API 키"
+    }
+    val keyPlaceholder = when (selectedProvider) {
+        LlmProvider.CLAUDE -> "sk-ant-api03-…"
+        LlmProvider.OPENAI -> "sk-…"
+        LlmProvider.GEMINI -> "AIza…"
+    }
+    val keyValue = when (selectedProvider) {
+        LlmProvider.CLAUDE -> claudeKey
+        LlmProvider.OPENAI -> openaiKey
+        LlmProvider.GEMINI -> geminiKey
+    }
+    val onKeyChange: (String) -> Unit = { v ->
+        when (selectedProvider) {
+            LlmProvider.CLAUDE -> claudeKey = v
+            LlmProvider.OPENAI -> openaiKey = v
+            LlmProvider.GEMINI -> geminiKey = v
+        }
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(AppBackgroundColor)
             .padding(16.dp)
+            .verticalScroll(rememberScrollState())
     ) {
         Text(
-            text = "AICAD 서버",
+            text = "LLM API 키",
             fontSize = 24.sp,
             fontWeight = FontWeight.Bold,
             color = Color.White
         )
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(16.dp))
         Text(
-            text = "Windows PC 등에서 OpenSCAD로 렌더하는 서버의 베이스 URL을 입력하세요. 비우면 AI CAD 저장 시 이 기기에서만 렌더합니다.",
+            text = "AI 메뉴에서 사용할 LLM을 선택한 뒤 해당 API 키를 입력하세요. 기본값은 local.properties의 claude_api_key·openai_api_key·gemini_api_key(빌드 시 주입)입니다. 필드를 비우고 저장하면 해당 제공자는 빌드 기본 키를 사용합니다.",
             color = Color.White.copy(alpha = 0.75f),
             fontSize = 14.sp,
             lineHeight = 20.sp
         )
         Spacer(modifier = Modifier.height(20.dp))
-        OutlinedTextField(
-            value = baseUrl,
-            onValueChange = { baseUrl = it },
-            label = { Text("베이스 URL", color = Color.White) },
-            placeholder = { Text("http://192.168.0.10:8787", color = Color.LightGray) },
+        Text(
+            text = "AI 메뉴에 사용할 제공자",
+            color = Color.White.copy(alpha = 0.9f),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(
             modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilterChip(
+                selected = selectedProvider == LlmProvider.CLAUDE,
+                onClick = { selectedProvider = LlmProvider.CLAUDE },
+                label = { Text("클로드", fontSize = 13.sp) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = Color(0xFF9CD83B),
+                    selectedLabelColor = Color.Black,
+                    containerColor = Color(0xFF2A2A2A),
+                    labelColor = Color.White
+                )
+            )
+            FilterChip(
+                selected = selectedProvider == LlmProvider.OPENAI,
+                onClick = { selectedProvider = LlmProvider.OPENAI },
+                label = { Text("GPT", fontSize = 13.sp) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = Color(0xFF9CD83B),
+                    selectedLabelColor = Color.Black,
+                    containerColor = Color(0xFF2A2A2A),
+                    labelColor = Color.White
+                )
+            )
+            FilterChip(
+                selected = selectedProvider == LlmProvider.GEMINI,
+                onClick = { selectedProvider = LlmProvider.GEMINI },
+                label = { Text("제미나이", fontSize = 13.sp) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = Color(0xFF9CD83B),
+                    selectedLabelColor = Color.Black,
+                    containerColor = Color(0xFF2A2A2A),
+                    labelColor = Color.White
+                )
+            )
+        }
+        Spacer(modifier = Modifier.height(20.dp))
+        OutlinedTextField(
+            value = keyValue,
+            onValueChange = onKeyChange,
+            label = { Text(keyLabel, color = Color.White) },
+            placeholder = { Text(keyPlaceholder, color = Color.LightGray) },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 2,
+            maxLines = 4,
+            visualTransformation = PasswordVisualTransformation(),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = Color.White,
                 unfocusedTextColor = Color.White,
@@ -11280,69 +11964,38 @@ fun AiCadServerSettingsScreen(onBack: () -> Unit) {
                 unfocusedPlaceholderColor = Color.LightGray
             )
         )
-        Spacer(modifier = Modifier.height(12.dp))
-        Text(
-            text = "PC 서버가 구현할 API:\n" +
-                "• POST …/api/aicad/render — multipart 필드 file, 파일명 model.scad (UTF-8 OpenSCAD)\n" +
-                "• 응답: 바이너리 STL 또는 JSON { \"stl_base64\": \"…\" }\n" +
-                "• GET …/api/aicad/health — 연결 테스트(2xx)",
-            color = Color.White.copy(alpha = 0.55f),
-            fontSize = 12.sp,
-            lineHeight = 17.sp
-        )
-        Spacer(modifier = Modifier.height(20.dp))
-        val canTest = !isTesting && baseUrl.isNotBlank()
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(24.dp))
-                .background(if (canTest) Color.White else Color.Gray)
-                .clickable(enabled = canTest) {
-                    isTesting = true
-                    testResult = null
-                    coroutineScope.launch {
-                        val ok = AiCadRemoteServerClient.testConnection(baseUrl)
-                        testResult = if (ok) {
-                            "연결 성공 (GET /api/aicad/health)"
-                        } else {
-                            "실패. URL·방화벽·PC 서버 실행 여부를 확인하세요."
-                        }
-                        isTesting = false
-                    }
-                }
-                .padding(vertical = 14.dp),
-            contentAlignment = Alignment.Center
+        Spacer(modifier = Modifier.height(28.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                text = if (isTesting) "테스트 중…" else "연결 테스트",
-                color = Color.Black,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-        testResult?.let { r ->
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(text = r, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-        }
-        Spacer(modifier = Modifier.weight(1f))
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(24.dp))
-                .background(Color.White)
-                .clickable {
-                    saveAiCadServerBaseUrl(context, baseUrl)
+            OutlinedButton(
+                onClick = onBack,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.6f)),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("닫기")
+            }
+            Button(
+                onClick = {
+                    LlmApiKeyStore.saveAll(
+                        context,
+                        selectedProvider,
+                        claudeKey,
+                        openaiKey,
+                        geminiKey
+                    )
                     onBack()
-                }
-                .padding(vertical = 14.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = "저장",
-                color = Color.Black,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold
-            )
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF9CD83B),
+                    contentColor = Color.Black
+                ),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("저장", fontWeight = FontWeight.Bold)
+            }
         }
     }
 }

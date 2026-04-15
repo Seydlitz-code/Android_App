@@ -34,6 +34,10 @@ object OpenScadStlExporter {
     /** WebView·WASM 동시 실행 방지 — 겹치면 기기 부하·실패·「계속 변환 중」처럼 보임 */
     private val renderMutex = Mutex()
 
+    /**
+     * [scadSource]를 전처리(`prepareForRender`)한 뒤 WASM으로 렌더링합니다.
+     * 이미 전처리된 코드를 넘기면 idempotent하므로 결과는 같습니다.
+     */
     suspend fun renderStlBytes(context: Context, scadSource: String): Result<ByteArray> =
         renderMutex.withLock {
         withContext(Dispatchers.Main) {
@@ -223,7 +227,12 @@ async function go() {
     let out = null;
     for (let ai = 0; ai < attempts.length; ai++) {
       unlinkOut();
-      rc = instance.callMain(attempts[ai]);
+      try {
+        rc = instance.callMain(attempts[ai]);
+      } catch (e) {
+        // 일부 OpenSCAD/WASM 빌드는 파싱 실패 시 "종료 코드(숫자)"만 던지는 형태가 있습니다.
+        rc = e;
+      }
       out = readOutStl();
       if (out) break;
     }
@@ -238,7 +247,7 @@ async function go() {
       const diag = (stderrBuf + '\n' + stdoutBuf).trim();
       const tail = diag.length > 2500 ? diag.slice(-2500) : diag;
       ScadExportBridge.onError(
-        'STL 출력 파일이 없습니다 (OpenSCAD 종료 코드: ' + String(rc) + '). FS(/): ' + rootList +
+        'STL 출력 파일이 없습니다 (OpenSCAD 종료 코드/예외: ' + String(rc) + '). FS(/): ' + rootList +
           (tail ? '\n--- OpenSCAD 로그 ---\n' + tail : '')
       );
       return;
@@ -265,7 +274,11 @@ async function go() {
     }
     ScadExportBridge.onSuccess(u8ToB64(u8));
   } catch (e) {
-    ScadExportBridge.onError(String(e && (e.stack || e)));
+    const diag = (stderrBuf + '\n' + stdoutBuf).trim();
+    const tail = diag.length > 2500 ? diag.slice(-2500) : diag;
+    ScadExportBridge.onError(
+      String(e && (e.stack || e)) + (tail ? '\n--- OpenSCAD 로그 ---\n' + tail : '')
+    );
   }
 }
 function u8ToB64(u8) {

@@ -21,7 +21,7 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // API 키: local.properties에 claude_api_key, gemini_api_key 추가
+        // API 키: local.properties에 claude_api_key, openai_api_key, gemini_api_key 추가
         val localProperties = Properties()
         val localPropertiesFile = rootProject.file("local.properties")
         if (localPropertiesFile.exists()) {
@@ -31,6 +31,11 @@ android {
             "String",
             "CLAUDE_API_KEY",
             "\"${localProperties.getProperty("claude_api_key", "")}\""
+        )
+        buildConfigField(
+            "String",
+            "OPENAI_API_KEY",
+            "\"${localProperties.getProperty("openai_api_key", "")}\""
         )
         buildConfigField(
             "String",
@@ -61,7 +66,7 @@ android {
     }
     // 모델 파일 압축 방지 (assets에서 직접 로드)
     androidResources {
-        noCompress += listOf("tflite", "onnx")
+        noCompress += listOf("tflite", "onnx", "gz")
     }
     packaging {
         jniLibs {
@@ -114,7 +119,8 @@ dependencies {
     // (삭제) OpenCV: 광택/반사 제거 옵션 제거에 따라 의존성 제거
 
     // MediaPipe Tasks (사물 경계/크기 분석 - ObjectDetector, Interactive Segmenter)
-    implementation("com.google.mediapipe:tasks-vision:0.10.14")
+    val mediaPipeVer = "0.10.21"
+    implementation("com.google.mediapipe:tasks-vision:$mediaPipeVer")
 
     // ML Kit 제거: 네이티브 GPU/드라이버 비호환 크래시 문제로 MediaPipe InteractiveSegmenter로 교체
     // InteractiveSegmenter는 tasks-vision에 포함되어 있음 (별도 의존성 불필요)

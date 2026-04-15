@@ -15,7 +15,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
- * PLY/OBJ용 미리보기 PNG. [Context.filesDir] 전용 — 시스템 갤러리에 스캔되지 않습니다.
+ * PLY/OBJ/STL용 미리보기 PNG. [Context.filesDir] 전용 — 시스템 갤러리에 스캔되지 않습니다.
  * 생성은 [thumbMutex]로 직렬화하여 동시 다수 로드 시 프레임 드랍을 줄입니다.
  */
 object Model3dThumbnail {
