@@ -6,12 +6,14 @@ import java.util.UUID
 data class PersistedMessage(
     val text: String,
     val isUser: Boolean,
-    val imageUriStrings: List<String> = emptyList()
+    val imageUriStrings: List<String> = emptyList(),
+    /** MOBILE_3DGS 등에서 첨부한 JSON 파일 URI 문자열 */
+    val jsonUriStrings: List<String>? = null,
 )
 
 /**
  * 한 번의 대화 흐름을 나타내는 스레드.
- * [modeName]: "CLAUDE" or "AI_CAD"
+ * [modeName]: "CLAUDE", "AI_CAD", or "MOBILE_3DGS"
  */
 data class ConversationThread(
     val id: String = UUID.randomUUID().toString(),

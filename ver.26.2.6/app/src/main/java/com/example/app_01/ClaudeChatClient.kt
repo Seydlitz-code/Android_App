@@ -19,7 +19,7 @@ import java.io.ByteArrayOutputStream
 /**
  * Claude API를 통한 채팅 클라이언트.
  * - sendMessage / sendAiCadMessage : 전체 응답을 한 번에 반환 (기존)
- * - streamMessage / streamAiCadMessage : SSE 스트리밍으로 토큰 단위 콜백 (신규)
+ * - streamMessage / streamAiCadMessage / streamMobile3dGsAnalysisMessage : SSE 스트리밍
  */
 object ClaudeChatClient {
     private const val TAG = "ClaudeChat"
@@ -108,6 +108,22 @@ object ClaudeChatClient {
             onDelta = onDelta
         )
     }
+
+    /**
+     * Mobile 3D Gaussian Splatting 분석 모드: COLMAP·촬영·품질·앱 파이프라인 관련 질문에 답변 (스트리밍).
+     * 선택한 LLM 제공자(Claude/OpenAI/Gemini) 경로를 [streamInternal]과 동일하게 사용합니다.
+     */
+    suspend fun streamMobile3dGsAnalysisMessage(
+        userText: String,
+        imageBase64List: List<String> = emptyList(),
+        onDelta: suspend (String) -> Unit
+    ): ChatResult = streamInternal(
+        userText = userText.trim(),
+        imageBase64List = imageBase64List,
+        system = MOBILE_3DGS_ANALYSIS_SYSTEM,
+        maxTokens = 8192,
+        onDelta = onDelta
+    )
 
     private suspend fun streamInternal(
         userText: String,
@@ -348,6 +364,27 @@ MOBILE / PERFORMANCE (mandatory — keep the mesh light):
 - Prefer **3–6** main parts only. Model **recognizable features** (body, lid, panel, buttons, feet) with **simple primitives**: `cube`, `cylinder`, `sphere`, `hull`, `difference`, `union`.
 - Set **`${'$'}fn` between 16 and 32** (default 24). Never above 48.
 - Avoid deep `minkowski()`, huge `hull()` chains, or many `difference()` cuts.
+
+"""
+
+    private const val MOBILE_3DGS_ANALYSIS_SYSTEM = """
+You are a senior 3D vision engineer helping users with **Mobile 3D Gaussian Splatting (3DGS)** inside this Android app.
+
+LLM RUNTIME (important):
+- The app sends this chat to the user-configured **LLM API** (Profile → LLM API key). When the user chose **Anthropic / Claude**, requests go to the **Claude Messages API** with this system prompt. OpenAI or Gemini are also supported with the same instructions.
+- You are not executing COLMAP or training on the device; you give **analysis, checklists, and triage** in Korean.
+
+APP CONTEXT (align answers with the real app):
+- **COLMAP path**: User can pick `cameras.bin`, `images.bin`, `points3D.bin` from device storage (SAF). The viewer builds a splat scene primarily from **points3D**; cameras/images may be skipped if parsing fails but points are valid.
+- **Photo-only path**: Gallery / dataset folder images (up to 100) drive an **on-device heuristic / depth-style** pipeline when COLMAP is absent.
+- **Rendering**: GLES point-sprite splat viewer on phone — not desktop CUDA training; do not promise Vulkan/GPU release builds.
+
+YOUR JOB:
+- Answer in **Korean** (Markdown: headings, bullets, short tables OK).
+- Cover: multi-view capture, overlap, exposure, COLMAP export (binary vs text), sparse quality, image count, troubleshooting parse errors, and expected on-device viewing behavior.
+- If the user attaches images, briefly assess **photogrammetry / 3DGS suitability** (lighting, texture, motion blur, baseline).
+- Do **not** output OpenSCAD or STL. Do not claim you ran COLMAP on a server unless the user asks for generic CLI guidance only.
+- Stay factual; when uncertain, say what to verify on-device or in COLMAP logs.
 
 """
 

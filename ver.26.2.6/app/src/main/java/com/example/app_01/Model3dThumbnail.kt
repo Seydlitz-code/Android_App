@@ -27,9 +27,15 @@ object Model3dThumbnail {
     private fun thumbnailDir(context: Context): File =
         File(context.filesDir, "app_model_thumbs").apply { mkdirs() }
 
-    fun thumbnailFileForModel(context: Context, modelFile: File): File {
+    private fun thumbPathForTheme(context: Context, modelFile: File, lightBackground: Boolean): File {
         val id = stableThumbId(modelFile)
-        return File(thumbnailDir(context), "$id.png")
+        val suffix = if (lightBackground) "l" else "d"
+        return File(thumbnailDir(context), "${id}_$suffix.png")
+    }
+
+    fun thumbnailFileForModel(context: Context, modelFile: File): File {
+        val lightBg = readAppUiThemeMode(context) == AppUiThemeMode.LIGHT
+        return thumbPathForTheme(context, modelFile, lightBg)
     }
 
     private fun stableThumbId(modelFile: File): String {
@@ -41,7 +47,10 @@ object Model3dThumbnail {
 
     fun invalidateForModelFile(context: Context, modelFile: File) {
         try {
-            thumbnailFileForModel(context, modelFile).delete()
+            thumbPathForTheme(context, modelFile, lightBackground = true).delete()
+            thumbPathForTheme(context, modelFile, lightBackground = false).delete()
+            val id = stableThumbId(modelFile)
+            File(thumbnailDir(context), "$id.png").delete()
         } catch (_: Exception) {
         }
     }
@@ -69,7 +78,8 @@ object Model3dThumbnail {
                 return thumb
             }
             val mesh = loadModelForThumbnailMesh(modelFile) ?: return null
-            val bmp = renderMeshToBitmap(mesh, SIZE_PX) ?: return null
+            val lightBg = readAppUiThemeMode(context) == AppUiThemeMode.LIGHT
+            val bmp = renderMeshToBitmap(mesh, SIZE_PX, lightBg) ?: return null
             try {
                 FileOutputStream(thumb).use { out ->
                     if (!bmp.compress(Bitmap.CompressFormat.PNG, 90, out)) return null
@@ -86,12 +96,12 @@ object Model3dThumbnail {
     }
 }
 
-private fun renderMeshToBitmap(mesh: ObjParseResult, sizePx: Int): Bitmap? {
+private fun renderMeshToBitmap(mesh: ObjParseResult, sizePx: Int, lightBackground: Boolean): Bitmap? {
     val pts = mesh.points
     if (mesh.count <= 0 || pts.size < 3) return null
 
     val pad = 10f
-    val bgRgb = Color.rgb(26, 26, 26)
+    val bgRgb = if (lightBackground) Color.rgb(255, 255, 255) else Color.rgb(26, 26, 26)
     val defaultPointRgb = Color.rgb(0x7e, 0xd3, 0x21)
     val triStrokeRgb = Color.rgb(0x7e, 0xd3, 0x21)
     val triFillRgb = Color.argb(210, 0x4a, 0x8c, 0x6a)

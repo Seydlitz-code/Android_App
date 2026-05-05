@@ -17,6 +17,7 @@ import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.view.Surface
+import org.json.JSONArray
 import org.json.JSONObject
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
@@ -38,6 +39,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import android.content.pm.ServiceInfo
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import android.hardware.camera2.CameraCharacteristics
@@ -93,6 +95,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.ui.text.font.FontFamily
@@ -117,17 +120,23 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Camera
 import androidx.compose.material.icons.filled.CameraFront
 import androidx.compose.material.icons.filled.CameraRear
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.Public
-import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.outlined.Build
+import androidx.compose.material.icons.outlined.CameraAlt
+import androidx.compose.material.icons.outlined.Chat
+import androidx.compose.material.icons.outlined.Explore
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Navigation
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material.icons.outlined.ScreenRotation
+import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Add
@@ -168,6 +177,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -188,6 +198,7 @@ import android.content.Intent
 import android.os.IBinder
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.FileProvider
 import android.view.WindowManager
 import androidx.compose.ui.platform.LocalView
@@ -196,6 +207,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material.icons.filled.Lightbulb
@@ -222,6 +235,7 @@ import androidx.compose.material.icons.filled.Flip
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
@@ -239,6 +253,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -269,6 +284,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.example.app_01.ui.theme.App_01Theme
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -300,6 +316,10 @@ import java.security.cert.X509Certificate
 private const val UPLOAD_ENDPOINT = "/upload"
 private const val STATUS_ENDPOINT = "/status"
 private const val DOWNLOAD_ENDPOINT = "/download"
+/** FastAPI `GET /results/{task_id}` — 결과 파일 목록 + 개별 다운로드 URL */
+private const val RESULTS_ENDPOINT = "/results"
+/** 서버에서 PLY·대용량 결과 수신 시 네트워크→파일 스트리밍 복사 버퍼 (기본 8KB보다 처리량↑). */
+private const val SERVER_DOWNLOAD_BUFFER_BYTES = 512 * 1024
 private const val DEFAULT_SERVER_ADDRESS = "192.168.0.88"
 private const val DEFAULT_SERVER_PORT = 8000
 private const val DEFAULT_USE_HTTPS = false // HTTP 기본값
@@ -315,25 +335,25 @@ private const val PREF_SERVER_PORT = "server_port"
 private const val PREF_USE_HTTPS = "use_https"
 
 // SharedPreferences에서 서버 주소 가져오기
-private fun getServerAddress(context: Context): String {
+internal fun getServerAddress(context: Context): String {
     val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
     return prefs.getString(PREF_SERVER_ADDRESS, DEFAULT_SERVER_ADDRESS) ?: DEFAULT_SERVER_ADDRESS
 }
 
 // SharedPreferences에서 서버 포트 가져오기
-private fun getServerPort(context: Context): Int {
+internal fun getServerPort(context: Context): Int {
     val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
     return prefs.getInt(PREF_SERVER_PORT, DEFAULT_SERVER_PORT)
 }
 
 // SharedPreferences에서 HTTPS 사용 여부 가져오기
-private fun getUseHttps(context: Context): Boolean {
+internal fun getUseHttps(context: Context): Boolean {
     val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
     return prefs.getBoolean(PREF_USE_HTTPS, DEFAULT_USE_HTTPS)
 }
 
 /** 이미지 URI의 가로·세로 픽셀 크기 반환 (inJustDecodeBounds) */
-private fun getImageDimensions(context: Context, uri: Uri): Pair<Int, Int>? {
+internal fun getImageDimensions(context: Context, uri: Uri): Pair<Int, Int>? {
     return try {
         val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
@@ -363,7 +383,7 @@ private fun getImageDimensions(context: Context, uri: Uri): Pair<Int, Int>? {
 }
 
 /** OOM 방지: 최대 변 길이 이하로 디코딩. EXIF 회전을 적용해 표시 방향과 일치시킴 */
-private fun decodeBitmapWithMaxDimension(context: Context, uri: Uri, maxDim: Int): Bitmap? {
+internal fun decodeBitmapWithMaxDimension(context: Context, uri: Uri, maxDim: Int): Bitmap? {
     return try {
         // 원본 크기 확인
         val sizeOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -435,7 +455,7 @@ private fun decodeBitmapWithMaxDimension(context: Context, uri: Uri, maxDim: Int
 }
 
 // SharedPreferences에 서버 설정 저장하기
-private fun saveServerSettings(context: Context, address: String, port: Int, useHttps: Boolean) {
+internal fun saveServerSettings(context: Context, address: String, port: Int, useHttps: Boolean) {
     val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
     prefs.edit()
         .putString(PREF_SERVER_ADDRESS, address)
@@ -444,41 +464,6 @@ private fun saveServerSettings(context: Context, address: String, port: Int, use
         .apply()
 }
 
-enum class CaptureMode {
-    PHOTO, VIDEO
-}
-
-enum class ResolutionPreset(val width: Int, val height: Int) {
-    RESOLUTION_1024x1024(1024, 1024)   // 1024x1024 정사각형 (단일 해상도)
-}
-
-enum class MainTab {
-    LIBRARY, CLAUDE, CAMERA, CREATE, PROFILE
-}
-
-enum class LibraryTab {
-    GALLERY, DATASET, MODEL_3D, AI_CAD
-}
-
-enum class LibraryDetailScreen {
-    NONE,
-    DATASET_FOLDER,
-    MODEL_VIEWER,
-    OBJ_VIEWER,
-    /** 3D 모델 탭: PLY / OBJ 각각의 파일 목록 */
-    MODEL_3D_PLY_LIST,
-    MODEL_3D_OBJ_LIST,
-}
-
-enum class CameraEntryMode {
-    OBJECT, SPACE_2D, SPACE_3D, MOBILE_SPACE
-}
-
-private fun CameraEntryMode.isSpaceMode(): Boolean = this != CameraEntryMode.OBJECT
-private fun CameraEntryMode.isObjectMode(): Boolean = this == CameraEntryMode.OBJECT
-
-private val AppBackgroundColor = Color.Black
-private val BottomBarBackgroundColor = Color(0xFF9CD83B)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -489,11 +474,28 @@ class MainActivity : ComponentActivity() {
         // (삭제) 광택/반사 제거 옵션 제거에 따라 OpenCV 초기화 제거
 
         setContent {
-            App_01Theme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    CameraApp(
-                        modifier = Modifier.padding(innerPadding)
-                    )
+            var themeMode by remember { mutableStateOf(readAppUiThemeMode(this@MainActivity)) }
+            val palette = remember(themeMode) { appUiPaletteFor(themeMode) }
+            val setThemeMode = remember {
+                { m: AppUiThemeMode ->
+                    themeMode = m
+                    writeAppUiThemeMode(this@MainActivity, m)
+                }
+            }
+            App_01Theme(
+                darkTheme = themeMode == AppUiThemeMode.DARK,
+                dynamicColor = false
+            ) {
+                CompositionLocalProvider(
+                    LocalAppUiPalette provides palette,
+                    LocalAppUiThemeMode provides themeMode,
+                    LocalSetAppUiThemeMode provides setThemeMode
+                ) {
+                    Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                        CameraApp(
+                            modifier = Modifier.padding(innerPadding)
+                        )
+                    }
                 }
             }
         }
@@ -607,11 +609,17 @@ fun CameraApp(modifier: Modifier = Modifier) {
     var selectedMediaUri by remember { mutableStateOf<Uri?>(null) }
     var selectedMediaIndex by remember { mutableStateOf(0) }
     var viewingMediaList by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    
+
+    var pending3dgsServerAutoSend by remember { mutableStateOf<Pending3dgsServerAutoSend?>(null) }
+    var serverPipelineCompleteBundle by remember { mutableStateOf<ServerPipelineResultBundle?>(null) }
+    var serverArtifactLibraryVersion by remember { mutableIntStateOf(0) }
+    var server3dgsLlmAutoHandledTaskIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    val rootPalette = LocalAppUiPalette.current
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(AppBackgroundColor)
+            .background(rootPalette.background)
     ) {
         if (selectedMediaUri != null && viewingMediaList.isNotEmpty()) {
             MediaDetailScreen(
@@ -695,7 +703,58 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                 }
                             },
                             onAiCadLibraryInvalidate = { aiCadLibraryVersion++ },
-                            galleryGridState = galleryGridState
+                            galleryGridState = galleryGridState,
+                            serverPipelineCompleteBundle = serverPipelineCompleteBundle,
+                            onServerPipelineCompleteBundleChange = { bundle ->
+                                serverPipelineCompleteBundle = bundle
+                                if (bundle != null) serverArtifactLibraryVersion++
+                            },
+                            serverArtifactLibraryVersion = serverArtifactLibraryVersion,
+                            onEnqueueBackground3dgsFromBundle = { bundle ->
+                                if (bundle.taskId !in server3dgsLlmAutoHandledTaskIds) {
+                                    server3dgsLlmAutoHandledTaskIds =
+                                        server3dgsLlmAutoHandledTaskIds + bundle.taskId
+                                    val payload = buildPoliceInsurance3dgsPayload(context, bundle)
+                                    val jobPayload = Pending3dgsServerAutoSend(
+                                        nonce = System.nanoTime(),
+                                        promptText = payload.first,
+                                        imageUris = payload.second,
+                                        switchToAiTab = false,
+                                        sourceServerTaskId = bundle.taskId
+                                    )
+                                    galleryScope.launch {
+                                        val ok = runServer3dgsAnalysisInBackground(context, jobPayload)
+                                        if (ok) {
+                                            Toast.makeText(
+                                                context,
+                                                "3DGS 분석을 새 대화로 저장했습니다. AI 탭에서 확인할 수 있습니다.",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        } else {
+                                            Toast.makeText(
+                                                context,
+                                                "백그라운드 3DGS 분석에 실패했습니다. API 키·네트워크를 확인하세요.",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        }
+                                    }
+                                }
+                            },
+                            onServerPipelineOpenImageViewer = { uris ->
+                                if (uris.isNotEmpty()) {
+                                    viewingMediaList = uris
+                                    selectedMediaIndex = 0
+                                    selectedMediaUri = uris.first()
+                                }
+                            },
+                            onServerPipelineStart3dgsAi = { pending ->
+                                pending.sourceServerTaskId?.let { tid ->
+                                    server3dgsLlmAutoHandledTaskIds =
+                                        server3dgsLlmAutoHandledTaskIds + tid
+                                }
+                                pending3dgsServerAutoSend = pending
+                                selectedTab = MainTab.CLAUDE
+                            }
                         )
                     }
                     MainTab.CLAUDE -> {
@@ -710,7 +769,9 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                     }
                                 }
                             },
-                            onAiCadSavedToLibrary = { aiCadLibraryVersion++ }
+                            onAiCadSavedToLibrary = { aiCadLibraryVersion++ },
+                            pending3dgsServerAutoSend = pending3dgsServerAutoSend,
+                            onPending3dgsServerAutoSendConsumed = { pending3dgsServerAutoSend = null }
                         )
                     }
                     MainTab.CAMERA -> {
@@ -769,16 +830,16 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                 modifier = Modifier.fillMaxSize(),
                                 contentAlignment = Alignment.Center
                             ) {
-    Text(
+                                Text(
                                     text = "카메라 권한이 필요합니다",
                                     fontSize = 18.sp,
-                                    color = Color.White
+                                    color = LocalAppUiPalette.current.onBackground
                                 )
                             }
                         }
                     }
                     MainTab.CREATE -> {
-                        CreatePlaceholderScreen()
+                        Mobile3dGsScreen()
                     }
                     MainTab.PROFILE -> {
                         ProfileScreen(
@@ -813,7257 +874,7 @@ fun CameraApp(modifier: Modifier = Modifier) {
     }
 }
 
-/** 디바이스에서 발견된 개별 카메라 정보 */
 
-@Composable
-fun CameraScreen(
-    cameraEntryMode: CameraEntryMode,
-    lastCapturedImageUri: Uri?,
-    onImageCaptured: (Uri) -> Unit,
-    onVideoCaptured: (Uri) -> Unit,
-    onGalleryClick: () -> Unit
-) {
-    val context = LocalContext.current
-    val mediaActionSound = remember {
-        MediaActionSound().apply {
-            load(MediaActionSound.START_VIDEO_RECORDING)
-            load(MediaActionSound.STOP_VIDEO_RECORDING)
-        }
-    }
-    DisposableEffect(Unit) {
-        onDispose { mediaActionSound.release() }
-    }
-    val lifecycleOwner = LocalLifecycleOwner.current
-    var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
-    var videoCapture: VideoCapture<androidx.camera.video.Recorder>? by remember { mutableStateOf(null) }
-    var lensFacing by remember { mutableStateOf(CameraSelector.LENS_FACING_BACK) }
-    var captureMode by remember { mutableStateOf(CaptureMode.PHOTO) }
-    var isRecording by remember { mutableStateOf(false) }
-    var recordingTime by remember { mutableStateOf(0L) }
-    var recording: Recording? by remember { mutableStateOf(null) }
-    var previewView: PreviewView? by remember { mutableStateOf(null) }
-    var camera: Camera? by remember { mutableStateOf(null) }
-    var isCameraReady by remember { mutableStateOf(false) }
-    var isFlashOn by remember { mutableStateOf(false) }
-    var previewOriginInRoot by remember { mutableStateOf<Offset?>(null) }
-    var datasetDir by remember { mutableStateOf<File?>(null) }
-    var isDatasetCollectionEnabled by remember { mutableStateOf(true) }
-    var selectedResolution by remember { mutableStateOf(ResolutionPreset.RESOLUTION_1024x1024) }
-    var azimuthDegrees by remember { mutableStateOf(0f) }
-    /**
-     * 그리드 오버레이 및 커버리지 기록 전용 방위각.
-     * alpha=0.15 필터를 사용하는 azimuthDegrees와 달리 alpha=0.7(거의 실시간)을 적용해
-     * 카메라 회전 시 그리드가 물리 공간에 즉시 고정되어 보이도록 한다.
-     */
-    var azimuthForGrid by remember { mutableStateOf(0f) }
-
-    // ── 후면 카메라 바인딩 정보 ──────────────────────────────────────────────
-    // telephoto / wide 각각 "논리 카메라 ID" 또는 "물리 카메라 ID + 부모 논리 ID" 중 하나만 설정됨
-    var rearTelephotoLogicalId  by remember { mutableStateOf<String?>(null) }  // 논리 망원
-    var rearTelephotoPhysId     by remember { mutableStateOf<String?>(null) }  // 물리 망원
-    var rearTelephotoPhysParent by remember { mutableStateOf<String?>(null) }  // 물리 망원의 부모 논리 ID
-    var rearWideId              by remember { mutableStateOf<String?>(null) }  // 광각 논리
-
-    // 앱 시작 시 한 번: 2단계 탐색 (논리 → 물리 서브카메라 순)
-    LaunchedEffect(Unit) {
-        try {
-            val cameraProvider = withContext(Dispatchers.IO) {
-                ProcessCameraProvider.getInstance(context).get()
-            }
-            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-
-            // ── 1단계: CameraX 논리 카메라 탐색 ──────────────────────────────
-            data class LogicalCam(val id: String, val minFocal: Float)
-
-            @Suppress("UnsafeOptInUsageError")
-            val logicalBack: List<LogicalCam> = cameraProvider.availableCameraInfos
-                .filter { it.lensFacing == CameraSelector.LENS_FACING_BACK }
-                .mapNotNull { info ->
-                    val id = runCatching {
-                        Camera2CameraInfo.from(info).cameraId
-                    }.getOrNull() ?: return@mapNotNull null
-                    val focals = runCatching {
-                        cameraManager.getCameraCharacteristics(id)
-                            .get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                    }.getOrNull()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
-                    LogicalCam(id, focals.min())
-                }
-                .sortedBy { it.minFocal }
-
-            android.util.Log.d("CameraScreen",
-                "논리 후면 카메라: ${logicalBack.map { "${it.id}(${it.minFocal}mm)" }}")
-
-            if (logicalBack.size >= 2) {
-                // 논리 카메라가 2개 이상 → 초점거리 최대 = 망원, 3.5mm 근접 = 광각
-                rearTelephotoLogicalId = logicalBack.maxByOrNull { it.minFocal }?.id
-                rearWideId             = logicalBack.minByOrNull { Math.abs(it.minFocal - 3.5f) }?.id
-                android.util.Log.d("CameraScreen",
-                    "논리 선택 → 망원: $rearTelephotoLogicalId, 광각: $rearWideId")
-            } else {
-                // ── 2단계: 논리 카메라가 1개(퓨전 카메라)인 경우 → 물리 서브카메라 탐색 ──
-                rearWideId = logicalBack.firstOrNull()?.id
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    val logicalIds = logicalBack.map { it.id }
-                    var bestPhysId: String? = null
-                    var bestParentId: String? = null
-                    var bestFocal = 0f
-
-                    for (parentId in logicalIds) {
-                        val parentChars = runCatching {
-                            cameraManager.getCameraCharacteristics(parentId)
-                        }.getOrNull() ?: continue
-                        for (physId in parentChars.physicalCameraIds) {
-                            val chars = runCatching {
-                                cameraManager.getCameraCharacteristics(physId)
-                            }.getOrNull() ?: continue
-                            val focals = chars
-                                .get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                                ?.takeIf { it.isNotEmpty() } ?: continue
-                            val maxF = focals.max()
-                            if (maxF > bestFocal) {
-                                bestFocal = maxF; bestPhysId = physId; bestParentId = parentId
-                            }
-                        }
-                    }
-
-                    // 광각 초점거리보다 1.5배 이상 길어야 망원으로 인정
-                    val wideFocal = logicalBack.firstOrNull()?.minFocal ?: 3.5f
-                    if (bestPhysId != null && bestFocal > wideFocal * 1.5f) {
-                        rearTelephotoPhysId     = bestPhysId
-                        rearTelephotoPhysParent = bestParentId
-                    }
-                    android.util.Log.d("CameraScreen",
-                        "물리 선택 → 망원: $rearTelephotoPhysId(${bestFocal}mm, parent=$rearTelephotoPhysParent), 광각: $rearWideId")
-                }
-            }
-        } catch (e: Exception) {
-            android.util.Log.w("CameraScreen", "카메라 탐색 실패: ${e.message}")
-        }
-    }
-
-    // [추가] 촬영 중 화면 켜짐 유지
-    val view = LocalView.current
-    DisposableEffect(isRecording) {
-        if (isRecording) {
-            view.keepScreenOn = true
-        }
-        onDispose {
-            view.keepScreenOn = false
-        }
-    }
-
-    // [추가] 백그라운드 작업 유지를 위한 서비스 제어
-    LaunchedEffect(isRecording) {
-        val intent = Intent(context, AppForegroundService::class.java)
-        if (isRecording) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
-        } else {
-            context.stopService(intent)
-        }
-    }
-
-    // 이동식 공간: 3D 격자 세션(구역 기억·수집 상태)
-    val mobileSpaceSession = remember { MobileSpaceCaptureSession(context.filesDir) }
-    var mobileSpaceUiRev by remember { mutableIntStateOf(0) }
-    val mobileSpaceOverlayState = remember(mobileSpaceUiRev, cameraEntryMode) {
-        if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
-            mobileSpaceSession.snapshotOverlay()
-        } else {
-            MobileSpaceGridOverlayState(0, 6, 4, 3, emptyList(), emptyList())
-        }
-    }
-    // 이동식 공간: 방향별 커버리지(빨강→투명 오버레이용)
-    val scanCoverage = remember { MobileSpaceScanCoverage() }
-    val meshAnalysisExecutor = remember { Executors.newSingleThreadExecutor() }
-    val cameraEntryModeState = rememberUpdatedState(cameraEntryMode)
-    DisposableEffect(Unit) {
-        onDispose { meshAnalysisExecutor.shutdown() }
-    }
-
-    // [추가] 사물 촬영(OBJECT) 전용: 사물이 중앙 가상 사각형(1000x1000) 밖으로 벗어났는지 경고
-    DisposableEffect(Unit) {
-        onDispose {
-            try {
-                ObjectOutOfFrameWarning.close()
-            } catch (_: Exception) {
-            }
-        }
-    }
-
-    LaunchedEffect(isFlashOn, camera) {
-        try {
-            camera?.cameraControl?.enableTorch(isFlashOn)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-    var baseAzimuthDegrees by remember { mutableStateOf<Float?>(null) }
-    // 수직(세로) 들었을 때 0도를 기준으로 하는 기울기
-    var pitchDegrees by remember { mutableStateOf(0f) }
-    /** 이동식 공간 격자 롤 축(3D 보xel) */
-    var rollDegrees by remember { mutableStateOf(0f) }
-    var basePitchDegrees by remember { mutableStateOf<Float?>(null) }
-    var capturedSectors by remember { mutableStateOf<Set<Int>>(emptySet()) }
-    val ringSize = 120.dp
-
-    val sectorCount = 30
-    val sectorSize = 360f / sectorCount
-    // 지면-휴대폰 각도 기준: 90도, 110도, 70도 (공간 스캔 시)
-    val pitchTargets = remember(cameraEntryMode) {
-        if (cameraEntryMode.isSpaceMode()) listOf(90f, 110f, 70f) else listOf(120f)
-    }
-    val pitchTolerance = 10f
-    var currentPitchIndex by remember { mutableStateOf(0) }
-    val currentTargetPitchState = remember {
-        derivedStateOf { pitchTargets.getOrNull(currentPitchIndex) }
-    }
-    val currentTargetPitch by currentTargetPitchState
-    val effectivePitchDegreesState = remember {
-        // [최적화] pitchDegrees가 이제 중력 기준 절대 각도(수직=90)이므로 그대로 사용
-        derivedStateOf { pitchDegrees }
-    }
-    val effectivePitchDegrees by effectivePitchDegreesState
-    val isPitchAlignedState = remember {
-        derivedStateOf {
-            val target = currentTargetPitchState.value
-            target != null && abs(effectivePitchDegrees - target) <= pitchTolerance
-        }
-    }
-    val isPitchAligned by isPitchAlignedState
-    val relativeAzimuthDegrees by remember {
-        derivedStateOf {
-            val base = baseAzimuthDegrees
-            if (base == null) {
-                azimuthDegrees
-            } else {
-                var diff = azimuthDegrees - base
-                if (diff < 0f) diff += 360f
-                diff % 360f
-            }
-        }
-    }
-    val displayAzimuthDegrees by remember {
-        derivedStateOf { relativeAzimuthDegrees % 360f }
-    }
-
-    val currentSectorIndex by remember {
-        derivedStateOf {
-            ((displayAzimuthDegrees / sectorSize).toInt()).coerceIn(0, sectorCount - 1)
-        }
-    }
-
-    DisposableEffect(cameraEntryMode) {
-        capturedSectors = emptySet()
-        currentPitchIndex = 0
-        basePitchDegrees = null
-        if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
-            mobileSpaceSession.loadFromDisk()
-            scanCoverage.reset()
-            mobileSpaceUiRev++
-        } else {
-            mobileSpaceSession.persistToDisk()
-            mobileSpaceSession.resetForModeExit()
-            mobileSpaceUiRev++
-        }
-        onDispose { }
-    }
-
-    // 이동식 공간 진입 시 그리드용 방위를 나침반 방위와 즉시 일치 (초기 프레임 동기화)
-    LaunchedEffect(cameraEntryMode) {
-        if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
-            azimuthForGrid = azimuthDegrees
-        }
-    }
-
-    DisposableEffect(cameraEntryMode) {
-        val shouldUseSensors = cameraEntryMode.isSpaceMode() || cameraEntryMode.isObjectMode()
-        if (!shouldUseSensors) {
-            onDispose { }
-            return@DisposableEffect onDispose { }
-        }
-
-        val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        val rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
-            ?: sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
-        val listener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent) {
-                val rotationMatrix = FloatArray(9)
-                val orientation = FloatArray(3)
-                SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
-                val adjustedRotationMatrix = FloatArray(9)
-                val rotation = previewView?.display?.rotation ?: Surface.ROTATION_0
-                val (xAxis, yAxis) = when (rotation) {
-                    Surface.ROTATION_90 -> SensorManager.AXIS_Y to SensorManager.AXIS_MINUS_X
-                    Surface.ROTATION_180 -> SensorManager.AXIS_MINUS_X to SensorManager.AXIS_MINUS_Y
-                    Surface.ROTATION_270 -> SensorManager.AXIS_MINUS_Y to SensorManager.AXIS_X
-                    else -> SensorManager.AXIS_X to SensorManager.AXIS_Y
-                }
-                SensorManager.remapCoordinateSystem(
-                    rotationMatrix,
-                    xAxis,
-                    yAxis,
-                    adjustedRotationMatrix
-                )
-                SensorManager.getOrientation(adjustedRotationMatrix, orientation)
-                var rawAzimuth = Math.toDegrees(orientation[0].toDouble()).toFloat()
-                if (rawAzimuth < 0f) rawAzimuth += 360f
-
-                // [수정] Low-pass Filter 적용 (노이즈/Jitter 감소)
-                val alpha = 0.15f
-                val currentAzimuth = azimuthDegrees
-                var delta = rawAzimuth - currentAzimuth
-                if (delta > 180f) delta -= 360f
-                if (delta < -180f) delta += 360f
-                var nextAzimuth = currentAzimuth + delta * alpha
-                if (nextAzimuth < 0f) nextAzimuth += 360f
-                if (nextAzimuth >= 360f) nextAzimuth -= 360f
-
-                azimuthDegrees = nextAzimuth
-
-                // 그리드 전용 방위: alpha=0.7 (거의 실시간) → 그리드가 물리 공간에 즉시 고정
-                val gridAlpha = 0.7f
-                var gridDelta = rawAzimuth - azimuthForGrid
-                if (gridDelta > 180f) gridDelta -= 360f
-                if (gridDelta < -180f) gridDelta += 360f
-                var nextGridAz = azimuthForGrid + gridDelta * gridAlpha
-                if (nextGridAz < 0f) nextGridAz += 360f
-                if (nextGridAz >= 360f) nextGridAz -= 360f
-                azimuthForGrid = nextGridAz
-
-                val rawPitch = Math.toDegrees(orientation[1].toDouble()).toFloat()
-                
-                // [개선] 중력 벡터를 이용한 절대 기울기 계산 (수직=90도)
-                // rotationMatrix[7]: Y축 성분, rotationMatrix[8]: Z축 성분
-                val worldZInPhoneY = rotationMatrix[7]
-                val worldZInPhoneZ = rotationMatrix[8]
-                val angleDeg = Math.toDegrees(Math.atan2(worldZInPhoneZ.toDouble(), worldZInPhoneY.toDouble())).toFloat()
-                
-                // 앞으로 숙이면 90도 미만, 뒤로 젖히면 90도 초과가 되도록 설정
-                pitchDegrees = 90f + angleDeg
-                rollDegrees = Math.toDegrees(orientation[2].toDouble()).toFloat()
-            }
-
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-        }
-
-        if (rotationSensor != null) {
-            sensorManager.registerListener(
-                listener,
-                rotationSensor,
-                SensorManager.SENSOR_DELAY_UI
-            )
-        }
-
-        onDispose {
-            sensorManager.unregisterListener(listener)
-        }
-    }
-
-    // 동영상 촬영 시간 업데이트
-    LaunchedEffect(isRecording) {
-        while (isRecording) {
-            delay(100)
-            recordingTime += 100
-        }
-    }
-
-    // 동영상 촬영 시 데이터셋 수집 제어 (촬영 시작 3초 후 시작)
-    LaunchedEffect(isRecording, captureMode) {
-        if (captureMode != CaptureMode.VIDEO || !isRecording) {
-            isDatasetCollectionEnabled = true
-            return@LaunchedEffect
-        }
-        isDatasetCollectionEnabled = false
-        delay(3000)
-        if (isRecording && captureMode == CaptureMode.VIDEO) {
-            isDatasetCollectionEnabled = true
-        }
-    }
-
-    // 동영상 촬영 시 구역 체크: 1초 간격으로 현재 구역 기록 (사물/공간 모두)
-    LaunchedEffect(isRecording, cameraEntryMode, captureMode, currentPitchIndex, isDatasetCollectionEnabled, datasetDir) {
-        // [수정] 이동식 공간 촬영인 경우: 촬영 시작 3초 후(isDatasetCollectionEnabled=true) 1초 간격 자동 촬영
-        if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
-            if (captureMode == CaptureMode.VIDEO && isRecording && isDatasetCollectionEnabled) {
-                var captureCount = 0
-                val dir = datasetDir
-                val capture = imageCapture
-                
-                // 직전에 저장된 데이터셋 이미지의 축소본 (유사도 비교용)
-                var lastSavedBitmapSmall: android.graphics.Bitmap? = null
-
-                if (dir != null && capture != null) {
-                    while (isRecording && isDatasetCollectionEnabled) {
-                        captureCount++
-                        val fileName = "mobile_${captureCount}.jpg"
-
-                        captureDatasetImage(context, 0, 0, dir, capture, fileName) { currentBitmap ->
-                            // 그리드 전용 방위(azimuthForGrid)를 기준으로 커버리지 기록.
-                            // azimuthForGrid는 alpha=0.7 필터로 거의 실시간이므로
-                            // 오버레이(headingDeg=azimuthForGrid)와 동일 좌표계가 됨.
-                            val azNow    = azimuthForGrid          // 그리드 좌표계 방위 (0-360°)
-                            val pitchNow = effectivePitchDegrees
-                            val rollNow  = rollDegrees
-                            if (lastSavedBitmapSmall == null) {
-                                // 첫 번째 데이터셋은 무조건 저장
-                                lastSavedBitmapSmall = android.graphics.Bitmap.createScaledBitmap(currentBitmap, 64, 64, true)
-                                mobileSpaceSession.recordAcceptedSample(azNow, pitchNow, rollNow)
-                                scanCoverage.recordFov(azNow, pitchNow)
-                                mobileSpaceUiRev++
-                                true
-                            } else {
-                                // 현재 이미지와 직전 저장된 이미지 간의 구조적 유사도 비교
-                                val similarity = calculateImageSimilarity(lastSavedBitmapSmall!!, currentBitmap)
-                                val similarEnough = similarity >= 0.48f && similarity <= 0.985f
-                                val almostDuplicate = similarity > 0.985f && (captureCount % 4 == 0)
-                                val veryDifferent = similarity < 0.48f && (captureCount % 5 == 0)
-                                if (similarEnough || almostDuplicate || veryDifferent) {
-                                    // 조건 만족: 저장하고 비교 기준 갱신
-                                    lastSavedBitmapSmall = android.graphics.Bitmap.createScaledBitmap(currentBitmap, 64, 64, true)
-                                    mobileSpaceSession.recordAcceptedSample(azNow, pitchNow, rollNow)
-                                    scanCoverage.recordFov(azNow, pitchNow)
-                                    mobileSpaceUiRev++
-                                    true
-                                } else {
-                                    // 조건 불만족: 저장하지 않음 (너무 다르거나, 너무 비슷함) -> 파일 삭제
-                                    val createdFile = File(dir, fileName)
-                                    if (createdFile.exists()) {
-                                        createdFile.delete()
-                                    }
-                                    false
-                                }
-                            }
-                        }
-                        delay(1000) // 1초 간격
-                    }
-                }
-            }
-            return@LaunchedEffect
-        }
-
-        if (captureMode == CaptureMode.VIDEO && isRecording && isDatasetCollectionEnabled) {
-            // 사물/공간 촬영: 피치 각도 체크 (90도 등)
-            if (currentPitchIndex < pitchTargets.size) {
-                while (isRecording) {
-                    delay(500) // 딜레이 단축 (반응성 향상)
-                    val targetPitch = currentTargetPitchState.value
-                    val pitchNow = effectivePitchDegreesState.value
-                    val isAligned =
-                        targetPitch != null && abs(pitchNow - targetPitch) <= pitchTolerance
-                    if (isAligned) {
-                        val sectorIndex =
-                            ((displayAzimuthDegrees / sectorSize).toInt()).coerceIn(0, sectorCount - 1)
-                        if (!capturedSectors.contains(sectorIndex)) {
-                            // [수정] 선명도 보정(초점 재조정) 로직 제거됨 - 사용자 요청
-                            // Joint Reflection Removal and Depth Estimation 준비 단계
-                            
-                            capturedSectors = capturedSectors + sectorIndex
-                            val dir = datasetDir
-                            val capture = imageCapture
-                            if (dir != null && capture != null && targetPitch != null) {
-                                captureDatasetImage(context, sectorIndex, targetPitch.toInt(), dir, capture)
-                            }
-                            
-                            // 연속 촬영 방지를 위해 잠시 대기
-                            delay(300)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 한 각도에서 360도 촬영 완료 시 다음 각도로 전환
-    LaunchedEffect(capturedSectors, isRecording, cameraEntryMode, captureMode, currentPitchIndex) {
-        // [추가] 이동식 공간 촬영인 경우 섹터 로직 생략
-        if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
-            return@LaunchedEffect
-        }
-
-        if (captureMode == CaptureMode.VIDEO &&
-            isRecording &&
-            currentPitchIndex < pitchTargets.size &&
-            capturedSectors.size >= sectorCount
-        ) {
-            currentPitchIndex += 1
-            capturedSectors = emptySet()
-        }
-    }
-
-    // 카메라 바인딩 함수
-    fun bindCamera(view: PreviewView) {
-        val executor = ContextCompat.getMainExecutor(context)
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-
-        cameraProviderFuture.addListener({
-            try {
-                val cameraProvider = cameraProviderFuture.get()
-
-                // ── 후면 카메라 선택 우선순위 ────────────────────────────────
-                //  1) 망원 논리 카메라  2) 망원 물리 카메라(부모 논리 + setPhysicalCameraId)
-                //  3) 광각 논리 카메라  4) 기기 기본 후면 카메라(폴백)
-                // 전면: 기기 기본 전면 카메라
-                @Suppress("UnsafeOptInUsageError")
-                fun selectorByLogicalId(logicalId: String) = CameraSelector.Builder()
-                    .addCameraFilter { list ->
-                        val matched = list.filter {
-                            runCatching { Camera2CameraInfo.from(it).cameraId == logicalId }
-                                .getOrDefault(false)
-                        }
-                        matched.ifEmpty { list.filter { it.lensFacing == CameraSelector.LENS_FACING_BACK } }
-                    }
-                    .build()
-
-                // 물리 망원 카메라 사용 여부와 그 ID (Preview/ImageCapture 빌더에 적용)
-                val physicalIdToApply: String? = when {
-                    lensFacing == CameraSelector.LENS_FACING_BACK
-                        && rearTelephotoLogicalId == null
-                        && rearTelephotoPhysId != null -> rearTelephotoPhysId
-                    else -> null
-                }
-
-                val cameraSelector = when {
-                    lensFacing == CameraSelector.LENS_FACING_FRONT ->
-                        CameraSelector.DEFAULT_FRONT_CAMERA
-                    rearTelephotoLogicalId != null ->
-                        selectorByLogicalId(rearTelephotoLogicalId!!)
-                    rearTelephotoPhysParent != null ->
-                        selectorByLogicalId(rearTelephotoPhysParent!!)
-                    rearWideId != null ->
-                        selectorByLogicalId(rearWideId!!)
-                    else ->
-                        CameraSelector.DEFAULT_BACK_CAMERA
-                }
-
-                cameraProvider.unbindAll()
-
-                // 선택된 해상도
-                val targetSize = Size(selectedResolution.width, selectedResolution.height)
-                
-                // ViewPort 설정으로 명시적 비율 지정
-                val viewPort = androidx.camera.core.ViewPort.Builder(
-                    android.util.Rational(
-                        selectedResolution.width,
-                        selectedResolution.height
-                    ),
-                    view.display.rotation
-                ).setScaleType(androidx.camera.core.ViewPort.FILL_CENTER).build()
-                
-                val resolutionSelector = ResolutionSelector.Builder()
-                    .setResolutionStrategy(
-                        ResolutionStrategy(
-                            targetSize,
-                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
-                        )
-                    )
-                    .build()
-
-                val previewBuilder = Preview.Builder()
-                    .setResolutionSelector(resolutionSelector)
-                if (physicalIdToApply != null) {
-                    @Suppress("UnsafeOptInUsageError")
-                    Camera2Interop.Extender(previewBuilder).setPhysicalCameraId(physicalIdToApply)
-                }
-                val preview = previewBuilder.build().also {
-                    it.setSurfaceProvider(view.surfaceProvider)
-                }
-
-                val imageCaptureBuilder = ImageCapture.Builder()
-                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                    .setResolutionSelector(resolutionSelector)
-                if (physicalIdToApply != null) {
-                    @Suppress("UnsafeOptInUsageError")
-                    Camera2Interop.Extender(imageCaptureBuilder).setPhysicalCameraId(physicalIdToApply)
-                }
-                val newImageCapture = imageCaptureBuilder.build()
-
-                val includeMobileAnalysis = cameraEntryMode == CameraEntryMode.MOBILE_SPACE
-
-                fun buildMobileSpaceImageAnalysis(): ImageAnalysis {
-                    val analysisRes = ResolutionSelector.Builder()
-                        .setResolutionStrategy(
-                            ResolutionStrategy(
-                                Size(640, 480),
-                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
-                            )
-                        )
-                        .build()
-                    val iab = ImageAnalysis.Builder()
-                        .setResolutionSelector(analysisRes)
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                    if (physicalIdToApply != null) {
-                        @Suppress("UnsafeOptInUsageError")
-                        Camera2Interop.Extender(iab).setPhysicalCameraId(physicalIdToApply!!)
-                    }
-                    return iab.build().also { ia ->
-                        ia.setAnalyzer(meshAnalysisExecutor) { image ->
-                            try {
-                                if (cameraEntryModeState.value != CameraEntryMode.MOBILE_SPACE) return@setAnalyzer
-                                val bmp = imageProxyRgbaToBitmap(image) ?: return@setAnalyzer
-                                // 신규 구역 생성 여부를 판단하기 위해 호출 전 구역 수 기록
-                                val prevRegionCount = mobileSpaceSession.regionCount
-                                val changed = mobileSpaceSession.onSceneFrame(bmp)
-                                val newRegionCreated = mobileSpaceSession.regionCount > prevRegionCount
-                                if (!bmp.isRecycled) bmp.recycle()
-                                if (changed) {
-                                    Handler(Looper.getMainLooper()).post {
-                                        // 새로운 물리적 구역(방)으로 진입한 경우 커버리지 초기화
-                                        // → 새 구역 전체가 빨간 그리드로 다시 표시됨
-                                        if (newRegionCreated) {
-                                            scanCoverage.reset()
-                                        }
-                                        mobileSpaceUiRev++
-                                    }
-                                }
-                            } catch (ex: Exception) {
-                                ex.printStackTrace()
-                            } finally {
-                                image.close()
-                            }
-                        }
-                    }
-                }
-
-                if (captureMode == CaptureMode.PHOTO) {
-                    imageCapture = newImageCapture
-
-                    // UseCaseGroup을 사용하여 ViewPort 적용
-                    val photoGroup = androidx.camera.core.UseCaseGroup.Builder()
-                        .setViewPort(viewPort)
-                        .addUseCase(preview)
-                        .addUseCase(imageCapture!!)
-                    if (includeMobileAnalysis) {
-                        photoGroup.addUseCase(buildMobileSpaceImageAnalysis())
-                    }
-
-                    camera = cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        cameraSelector,
-                        photoGroup.build()
-                    )
-                    videoCapture = null
-                    isCameraReady = true
-                } else {
-                // VideoCapture에도 해상도 설정 적용
-                // Recorder는 해상도보다는 Quality를 사용하지만,
-                // 선택된 해상도에 따라 최대한 근접한 품질을 선택합니다.
-                val recorder = androidx.camera.video.Recorder.Builder()
-                    .setQualitySelector(
-                        androidx.camera.video.QualitySelector.from(
-                            androidx.camera.video.Quality.HIGHEST
-                        )
-                    )
-                    .build()
-
-                    videoCapture = VideoCapture.withOutput(recorder)
-                    imageCapture = newImageCapture
-
-                    // UseCaseGroup을 사용하여 ViewPort 적용
-                    val videoGroup = androidx.camera.core.UseCaseGroup.Builder()
-                        .setViewPort(viewPort)
-                        .addUseCase(preview)
-                        .addUseCase(videoCapture!!)
-                        .addUseCase(imageCapture!!)
-                    if (includeMobileAnalysis) {
-                        videoGroup.addUseCase(buildMobileSpaceImageAnalysis())
-                    }
-
-                    camera = cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        cameraSelector,
-                        videoGroup.build()
-                    )
-                    isCameraReady = true
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }, executor)
-    }
-
-    // lensFacing, captureMode, selectedResolution, 카메라ID 변경 시 재바인딩
-    LaunchedEffect(lensFacing, captureMode, selectedResolution, previewView,
-        rearTelephotoLogicalId, rearTelephotoPhysId, rearWideId, cameraEntryMode) {
-        isCameraReady = false
-        previewView?.let { bindCamera(it) }
-    }
-
-    // 선택된 해상도의 비율 계산 (정사각형: 1024/1024)
-    val density = LocalDensity.current
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black),
-        contentAlignment = Alignment.Center
-    ) {
-        // 해상도 변경 시 PreviewView를 완전히 재생성하기 위해 key 사용
-        key(selectedResolution) {
-            // 정사각형 해상도: 1:1 미리보기 강제 적용
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(1f)
-                    .clip(RectangleShape)
-                    .onGloballyPositioned { coords ->
-                        previewOriginInRoot = coords.positionInRoot()
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                AndroidView(
-                    factory = { ctx ->
-                        PreviewView(ctx).apply {
-                            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                            scaleType = PreviewView.ScaleType.FILL_CENTER
-                            previewView = this
-                        }
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
-                if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
-                    MobileSpaceScanOverlay(
-                        headingDeg = azimuthForGrid,        // 그리드 전용 방위 (recordFov 와 동일 좌표계, 실시간)
-                        pitchDeg = effectivePitchDegrees,
-                        coverage = scanCoverage,
-                        revisionTick = mobileSpaceUiRev,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
-            }
-        }
-
-        // 상단 바 배경
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .height(64.dp)
-                .background(Color.Black)
-        )
-
-        // 동영상 촬영 시간 표시 (상단 알약)
-        if (isRecording) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 72.dp)
-                    .background(Color.Red, RoundedCornerShape(16.dp))
-                    .padding(horizontal = 12.dp, vertical = 4.dp)
-            ) {
-                Text(
-                    text = "동영상 촬영 ${formatTime(recordingTime)}",
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-
-        // 통합 경고 메시지 영역 (기울기/모델링 적합성)
-        val shouldShowWarningColumn = captureMode == CaptureMode.VIDEO && isRecording
-        if (shouldShowWarningColumn) {
-            Column(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 110.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                if (captureMode == CaptureMode.VIDEO && isRecording) {
-                    // 기울기 경고 (이동식 공간 촬영 제외)
-                    if (cameraEntryMode != CameraEntryMode.MOBILE_SPACE) {
-                        val isAllPitchCompleted = currentPitchIndex >= pitchTargets.size
-                        if (!isAllPitchCompleted && !isPitchAligned) {
-                            val targetPitch = currentTargetPitch
-                            val warningMsg = if (targetPitch != null) {
-                                val delta = effectivePitchDegrees - targetPitch
-                                when {
-                                    delta < -pitchTolerance -> "기기를 아래쪽으로 기울여주세요."
-                                    delta > pitchTolerance -> "기기를 위쪽으로 기울여주세요."
-                                    else -> null
-                                }
-                            } else null
-
-                            if (warningMsg != null) {
-                                Text(
-                                    text = warningMsg,
-                                    color = Color.White,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier
-                                        .background(Color.Red, RoundedCornerShape(8.dp))
-                                        .padding(horizontal = 12.dp, vertical = 4.dp)
-                                )
-                            }
-                        }
-                    }
-
-                }
-            }
-        }
-
-        // 상단 모드 전환 + 해상도 선택 (한 줄, 알약 형태)
-        val topMenuPadding = 8.dp
-        Row(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .padding(top = topMenuPadding),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TopMenuSegmented(
-                leftText = "사진",
-                rightText = "동영상",
-                isLeftSelected = captureMode == CaptureMode.PHOTO,
-                onLeftClick = { captureMode = CaptureMode.PHOTO },
-                onRightClick = { captureMode = CaptureMode.VIDEO }
-            )
-            
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = { isFlashOn = !isFlashOn }) {
-                    Icon(
-                        imageVector = if (isFlashOn) Icons.Filled.FlashOn else Icons.Filled.FlashOff,
-                        contentDescription = "Flash",
-                        tint = Color.White
-                    )
-                }
-                
-            }
-        }
-
-        // 동영상 촬영 중 구역 수집 정보 표시 (사물/공간 모두) - 이동식 공간 촬영은 제외
-        if (captureMode == CaptureMode.VIDEO && isRecording && cameraEntryMode != CameraEntryMode.MOBILE_SPACE) {
-            // 구역 수집 진행률 표시
-            Text(
-                text = "${capturedSectors.size} / ${sectorCount}장",
-                color = Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 190.dp)
-                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
-            )
-            
-            // 동영상 촬영 안내 메시지 (사물/공간 모두 90도 촬영 지원)
-            val isAllPitchCompleted = currentPitchIndex >= pitchTargets.size
-            val instructionText = when {
-                isAllPitchCompleted -> "모든 각도 촬영 완료"
-                else -> currentTargetPitch?.let { "${it.toInt()}도 측정입니다" } ?: "촬영을 진행해주세요"
-            }
-            Text(
-                text = instructionText,
-                color = Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 230.dp)
-                    .background(
-                        if (isPitchAligned) Color(0xFF4CAF50).copy(alpha = 0.8f)
-                        else Color.Black.copy(alpha = 0.6f),
-                        RoundedCornerShape(12.dp)
-                    )
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
-            )
-            }
-        
-        // 하단 컨트롤 바
-        Row(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .background(Color.Black)
-                .padding(horizontal = 24.dp, vertical = 16.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // 마지막 촬영 사진 썸네일 또는 갤러리 버튼
-            Box(
-                modifier = Modifier
-                    .size(56.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .border(2.dp, Color.White, RoundedCornerShape(8.dp))
-                    .clickable { onGalleryClick() },
-                contentAlignment = Alignment.Center
-            ) {
-                if (lastCapturedImageUri != null) {
-                    val isVideo = isVideoUri(context, lastCapturedImageUri)
-                    var videoThumbnail by remember(lastCapturedImageUri) { mutableStateOf<Bitmap?>(null) }
-                    
-                    // 동영상 썸네일 로드
-                    if (isVideo) {
-                        LaunchedEffect(lastCapturedImageUri) {
-                            videoThumbnail = withContext(Dispatchers.IO) {
-                                try {
-                                    val retriever = MediaMetadataRetriever()
-                                    try {
-                                        retriever.setDataSource(context, lastCapturedImageUri)
-                                        retriever.getFrameAtTime(0)
-                                    } finally {
-                                        retriever.release()
-                                    }
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                    null
-                                }
-                            }
-                        }
-                        
-                        // 동영상 썸네일 표시
-                        if (videoThumbnail != null) {
-                            Image(
-                                bitmap = videoThumbnail!!.asImageBitmap(),
-                                contentDescription = "마지막 촬영 동영상",
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Crop
-                            )
-                            // 동영상 아이콘 오버레이
-                            Icon(
-                                imageVector = Icons.Filled.Videocam,
-                                contentDescription = "동영상",
-                                tint = Color.White,
-                                modifier = Modifier
-                                    .align(Alignment.BottomEnd)
-                                    .size(16.dp)
-                                    .padding(4.dp)
-                                    .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                                    .padding(2.dp)
-                            )
-                        } else {
-                            // 썸네일 로딩 중
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(Color.Black)
-                            )
-                            Icon(
-                                imageVector = Icons.Filled.Videocam,
-                                contentDescription = "동영상",
-                                tint = Color.White.copy(alpha = 0.7f),
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-                    } else {
-                        // 이미지 표시
-                        Image(
-                            painter = rememberAsyncImagePainter(lastCapturedImageUri),
-                            contentDescription = "마지막 촬영 사진",
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    }
-                } else {
-                    Icon(
-                        imageVector = Icons.Filled.PhotoLibrary,
-                        contentDescription = "갤러리",
-                        tint = Color.White,
-                        modifier = Modifier.size(32.dp)
-                    )
-                }
-            }
-
-            // 동영상 촬영 중 구역 링 표시 (사물/공간 모두) - 이동식 공간 촬영은 제외
-            val showRing = captureMode == CaptureMode.VIDEO && isRecording && cameraEntryMode != CameraEntryMode.MOBILE_SPACE
-            val captureButtonSize = if (isRecording) 64.dp else 72.dp
-
-            // 촬영 버튼 + 링 (중심 일치)
-            Box(
-                modifier = Modifier.size(if (showRing) ringSize else captureButtonSize)
-            ) {
-                if (showRing) {
-                    Canvas(modifier = Modifier.matchParentSize()) {
-                        val canvasCenter = Offset(size.width / 2f, size.height / 2f)
-                        val radius = size.minDimension / 2f
-                        val barEnd = radius * 0.84f
-                        val barStart = radius * 0.76f
-                        val stroke = 10f
-
-                        for (i in 0 until sectorCount) {
-                            val angle = i * (360f / sectorCount)
-                            val color = when {
-                                i == currentSectorIndex -> Color.White
-                                capturedSectors.contains(i) -> Color(0xFF4CAF50)
-                                else -> Color.DarkGray
-                            }
-                            rotate(degrees = angle, pivot = canvasCenter) {
-                                drawLine(
-                                    color = color,
-                                    start = Offset(canvasCenter.x, canvasCenter.y - barStart),
-                                    end = Offset(canvasCenter.x, canvasCenter.y - barEnd),
-                                    strokeWidth = stroke,
-                                    cap = StrokeCap.Round
-                                )
-                            }
-                        }
-                    }
-                }
-                Box(
-                    modifier = Modifier
-                        .size(captureButtonSize)
-                        .align(Alignment.Center)
-                        .clip(CircleShape)
-                        .background(if (isRecording) Color.Red else Color.White)
-                        .clickable(enabled = !isRecording || captureMode == CaptureMode.VIDEO) {
-                            if (captureMode == CaptureMode.PHOTO) {
-                                imageCapture?.let { capture ->
-                                    // 셔터 소리를 약 30% 수준으로 낮춤 (MediaActionSound는 볼륨 조절 불가)
-                                    SoftShutterSound.play(volume = 0.3f)
-                                    takePhoto(context, capture) { uri ->
-                                        onImageCaptured(uri)
-                                    }
-                                }
-                            } else {
-                                if (!isRecording) {
-                                    // 동영상 촬영 시작 - 카메라가 준비되었는지 확인
-                                    if (isCameraReady && videoCapture != null) {
-                                        videoCapture?.let { capture ->
-                                            mediaActionSound.play(MediaActionSound.START_VIDEO_RECORDING)
-                                            startVideoRecording(
-                                                context,
-                                                capture,
-                                                onRecordingStarted = { recordingInstance ->
-                                                    recording = recordingInstance
-                                                    isRecording = true
-                                                    recordingTime = 0L
-                                                    val sessionId = SimpleDateFormat(
-                                                        "yyyy-MM-dd-HH-mm-ss-SSS",
-                                                        Locale.US
-                                                    ).format(System.currentTimeMillis())
-                                                    val root = File(context.getExternalFilesDir(null), "datasets")
-                                                    if (!root.exists()) {
-                                                        root.mkdirs()
-                                                    }
-                                                    datasetDir = File(root, sessionId).apply {
-                                                        mkdirs()
-                                                    }
-                                                    // 동영상 촬영 시작 시 방위각 기준 설정
-                                                    baseAzimuthDegrees = azimuthDegrees
-                                                    capturedSectors = emptySet()
-                                                    basePitchDegrees = pitchDegrees
-                                                    currentPitchIndex = 0
-                                                },
-                                                onVideoSaved = { uri ->
-                                                    onVideoCaptured(uri)
-                                                }
-                                            )
-                                        }
-                                    }
-                                } else {
-                                    // 동영상 촬영 중지
-                                    mediaActionSound.play(MediaActionSound.STOP_VIDEO_RECORDING)
-                                    recording?.stop()
-                                    recording = null
-                                    isRecording = false
-                                    recordingTime = 0L
-
-                                    if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
-                                        mobileSpaceSession.persistToDisk()
-                                        mobileSpaceUiRev++
-                                    }
-
-                                    // [추가] 빈 데이터셋 폴더 정리
-                                    // 데이터셋 폴더에 이미지가 하나도 없으면 폴더 자동 삭제
-                                    val targetDir = datasetDir
-                                    if (targetDir != null && targetDir.exists() && targetDir.isDirectory) {
-                                        val files = targetDir.listFiles()
-                                        if (files == null || files.isEmpty()) {
-                                            targetDir.delete()
-                                        }
-                                    }
-
-                                    datasetDir = null
-                                    // 동영상 촬영 종료 시 상태 초기화
-                                    baseAzimuthDegrees = null
-                                    capturedSectors = emptySet()
-                                    basePitchDegrees = null
-                                    currentPitchIndex = 0
-                                }
-                            }
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (captureMode == CaptureMode.PHOTO) {
-                        Icon(
-                            imageVector = Icons.Filled.Camera,
-                            contentDescription = "촬영",
-                            tint = Color.Black,
-                            modifier = Modifier.size(36.dp)
-                        )
-                    } else {
-                        if (isRecording) {
-                            Box(
-                                modifier = Modifier
-                                    .size(24.dp)
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(Color.White)
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Filled.Videocam,
-                                contentDescription = "동영상 촬영",
-                                tint = Color.Black,
-                                modifier = Modifier.size(36.dp)
-                            )
-                        }
-                    }
-                }
-            }
-
-            // 전면/후면 카메라 전환 버튼
-            Icon(
-                imageVector = Icons.Filled.Cameraswitch,
-                contentDescription = "카메라 전환",
-                tint = Color.White,
-                modifier = Modifier
-                    .size(48.dp)
-                    .clickable {
-                        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK)
-                            CameraSelector.LENS_FACING_FRONT
-                        else
-                            CameraSelector.LENS_FACING_BACK
-                    }
-            )
-        }
-
-        // 링은 촬영 버튼 내부로 이동
-    }
-}
-
-@Composable
-fun CameraEntryScreen(
-    selectedMode: CameraEntryMode,
-    onModeSelected: (CameraEntryMode) -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(AppBackgroundColor)
-            .padding(16.dp)
-    ) {
-        Text(
-            text = "카메라",
-            color = Color.White,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold
-        )
-        Spacer(modifier = Modifier.height(72.dp))
-        CameraModeButton(
-            text = "사물 스캔",
-            isSelected = selectedMode == CameraEntryMode.OBJECT,
-            onClick = { onModeSelected(CameraEntryMode.OBJECT) }
-        )
-        Spacer(modifier = Modifier.height(20.dp))
-        CameraModeButton(
-            text = "2차원 공간 스캔",
-            isSelected = selectedMode == CameraEntryMode.SPACE_2D,
-            onClick = { onModeSelected(CameraEntryMode.SPACE_2D) }
-        )
-        Spacer(modifier = Modifier.height(20.dp))
-        CameraModeButton(
-            text = "3차원 공간 스캔",
-            isSelected = selectedMode == CameraEntryMode.SPACE_3D,
-            onClick = { onModeSelected(CameraEntryMode.SPACE_3D) }
-        )
-        Spacer(modifier = Modifier.height(20.dp))
-        CameraModeButton(
-            text = "이동식 공간 촬영",
-            isSelected = selectedMode == CameraEntryMode.MOBILE_SPACE,
-            onClick = { onModeSelected(CameraEntryMode.MOBILE_SPACE) }
-        )
-    }
-}
-
-@Composable
-fun CameraModeButton(
-    text: String,
-    isSelected: Boolean,
-    onClick: () -> Unit
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 48.dp)
-            .height(58.dp)
-            .clip(RoundedCornerShape(29.dp))
-            .background(if (isSelected) Color.White else Color.Transparent)
-            .border(1.dp, Color.White, RoundedCornerShape(28.dp))
-            .clickable { onClick() },
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = text,
-            color = if (isSelected) Color.Black else Color.White,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold
-        )
-    }
-}
-
-@Composable
-fun TopMenuPill(
-    text: String,
-    isSelected: Boolean,
-    onClick: () -> Unit
-) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(20.dp))
-            .background(if (isSelected) Color.White else Color.Transparent)
-            .border(1.dp, Color.White, RoundedCornerShape(20.dp))
-            .clickable { onClick() }
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = text,
-            color = if (isSelected) Color.Black else Color.White,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold
-        )
-    }
-}
-
-@Composable
-fun TopMenuSegmented(
-    leftText: String,
-    rightText: String,
-    isLeftSelected: Boolean,
-    onLeftClick: () -> Unit,
-    onRightClick: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .height(34.dp)
-            .clip(RoundedCornerShape(18.dp))
-            .background(Color.Black)
-            .border(1.dp, Color.White, RoundedCornerShape(18.dp))
-    ) {
-        Box(
-            modifier = Modifier
-                .clip(
-                    RoundedCornerShape(
-                        topStart = 18.dp,
-                        bottomStart = 18.dp,
-                        topEnd = 0.dp,
-                        bottomEnd = 0.dp
-                    )
-                )
-                .background(if (isLeftSelected) Color.White else Color.Black)
-                .clickable { onLeftClick() }
-                .padding(horizontal = 14.dp, vertical = 6.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = leftText,
-                color = if (isLeftSelected) Color.Black else Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-        Box(
-            modifier = Modifier
-                .width(1.dp)
-                .fillMaxHeight()
-                .background(Color.White)
-        )
-        Box(
-            modifier = Modifier
-                .clip(
-                    RoundedCornerShape(
-                        topStart = 0.dp,
-                        bottomStart = 0.dp,
-                        topEnd = 18.dp,
-                        bottomEnd = 18.dp
-                    )
-                )
-                .background(if (!isLeftSelected) Color.White else Color.Black)
-                .clickable { onRightClick() }
-                .padding(horizontal = 14.dp, vertical = 6.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = rightText,
-                color = if (!isLeftSelected) Color.Black else Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-    }
-}
-
-@Composable
-fun LibraryTabButton(
-    text: String,
-    isSelected: Boolean,
-    onClick: () -> Unit
-) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(20.dp))
-            .background(if (isSelected) Color.White else Color.Transparent)
-            .border(1.dp, Color.White, RoundedCornerShape(20.dp))
-            .clickable { onClick() }
-            .padding(horizontal = 16.dp, vertical = 7.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = text,
-            color = if (isSelected) Color.Black else Color.White,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Clip,
-            softWrap = false
-        )
-    }
-}
-
-@Composable
-fun ClaudeChatScreen(
-    galleryImages: List<Uri>,
-    onGalleryUpdated: () -> Unit = {},
-    onAiCadSavedToLibrary: () -> Unit = {}
-) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var messageText by remember { mutableStateOf("") }
-    val messages = remember { mutableStateListOf<ChatMessage>() }
-    var isStreaming by remember { mutableStateOf(false) }
-    var streamingText by remember { mutableStateOf("") }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    var showImageSelectDialog by remember { mutableStateOf(false) }
-    var datasetFolders by remember { mutableStateOf<List<DatasetFolder>>(emptyList()) }
-    var attachedImages by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    var aiTabMode by remember { mutableStateOf(AiChatTabMode.CLAUDE) }
-    var aiCadOption by remember { mutableStateOf(ClaudeChatClient.AiCadInputOption.DIMENSIONS_DIRECT) }
-    var modeMenuExpanded by remember { mutableStateOf(false) }
-    var stlDialogForIndex by remember { mutableStateOf<Int?>(null) }
-    var stlSaveNameInput by remember { mutableStateOf("") }
-    var stlBusyMessageIndex by remember { mutableStateOf<Int?>(null) }
-    val listState = rememberLazyListState()
-    // 스레드 관리 상태
-    var currentThreadId by remember { mutableStateOf<String?>(null) }
-    var isDrawerOpen by remember { mutableStateOf(false) }
-    var allThreads by remember { mutableStateOf<List<ConversationThread>>(emptyList()) }
-
-    LaunchedEffect(stlDialogForIndex) {
-        if (stlDialogForIndex != null) stlSaveNameInput = ""
-    }
-
-    // 갤러리: 이미지만 (동영상 제외)
-    val galleryImageUris = remember(galleryImages) {
-        galleryImages.filter { uri ->
-            val path = uri.path ?: ""
-            path.endsWith(".jpg", true) || path.endsWith(".jpeg", true) ||
-                path.endsWith(".png", true) || path.endsWith(".webp", true) ||
-                path.endsWith(".heic", true) || path.endsWith(".heif", true)
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        loadDatasetFolders(context) { datasetFolders = it }
-        allThreads = ChatThreadStorage.loadAll(context)
-    }
-
-    // 새 메시지 추가 또는 스트리밍 시작 시 최하단으로 스크롤
-    LaunchedEffect(messages.size, isStreaming) {
-        val total = messages.size + if (isStreaming) 1 else 0
-        if (total > 0) listState.animateScrollToItem(total - 1)
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(AppBackgroundColor)
-            .imePadding()
-    ) {
-        // ── 메인 콘텐츠 ──
-        Column(modifier = Modifier.fillMaxSize()) {
-
-        // ── 상단 헤더: [메뉴] [모드 드롭다운] [새 채팅] ──
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // 좌측: 드로어 열기
-            IconButton(onClick = { isDrawerOpen = true }) {
-                Icon(
-                    imageVector = Icons.Filled.Menu,
-                    contentDescription = "메뉴",
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-
-            // 중앙: 모드 드롭다운 (기존 방식)
-            Box(modifier = Modifier.weight(1f)) {
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { modeMenuExpanded = true }
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = when (aiTabMode) {
-                            AiChatTabMode.CLAUDE -> "클로드"
-                            AiChatTabMode.AI_CAD -> "AI CAD"
-                        },
-                        color = Color.White,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Icon(
-                        imageVector = Icons.Filled.ArrowDropDown,
-                        contentDescription = "모드 선택",
-                        tint = Color.White.copy(alpha = 0.85f),
-                        modifier = Modifier.size(28.dp)
-                    )
-                }
-                DropdownMenu(
-                    expanded = modeMenuExpanded,
-                    onDismissRequest = { modeMenuExpanded = false },
-                    modifier = Modifier.background(Color(0xFF2A2A2A))
-                ) {
-                    DropdownMenuItem(
-                        text = {
-                            Column {
-                                Text("클로드 AI LLM", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                Text(
-                                    "자연어 입력을 기반으로 답변을 생성합니다.",
-                                    color = Color.White.copy(alpha = 0.65f),
-                                    fontSize = 11.sp,
-                                    lineHeight = 14.sp
-                                )
-                            }
-                        },
-                        onClick = {
-                            aiTabMode = AiChatTabMode.CLAUDE
-                            modeMenuExpanded = false
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = {
-                            Column {
-                                Text("AI CAD", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                Text(
-                                    "OpenSCAD로 곡면·라운딩을 포함한 형상을 생성합니다.",
-                                    color = Color.White.copy(alpha = 0.65f),
-                                    fontSize = 11.sp,
-                                    lineHeight = 14.sp
-                                )
-                            }
-                        },
-                        onClick = {
-                            aiTabMode = AiChatTabMode.AI_CAD
-                            modeMenuExpanded = false
-                        }
-                    )
-                }
-            }
-
-            // 우측: 새 채팅
-            IconButton(onClick = {
-                messages.clear()
-                currentThreadId = null
-                streamingText = ""
-                errorMessage = null
-            }) {
-                Icon(
-                    imageVector = Icons.Filled.Edit,
-                    contentDescription = "새 채팅",
-                    tint = Color.White,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
-        }
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(Color.White.copy(alpha = 0.3f))
-        )
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f, fill = true)
-                .fillMaxWidth(),
-            state = listState,
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            itemsIndexed(messages) { index, msg ->
-                val code = remember(msg.text) { extractOpenCadCode(msg.text) }
-                val useAiCadWindow =
-                    aiTabMode == AiChatTabMode.AI_CAD && !msg.isUser && code != null && msg.imageUris.isEmpty()
-                if (useAiCadWindow) {
-                    AiCadScriptWindowBubble(
-                        codeText = code!!,
-                        isConverting = stlBusyMessageIndex == index,
-                        onSaveClick = { stlDialogForIndex = index }
-                    )
-                } else {
-                    ChatMessageItem(message = msg)
-                }
-            }
-            // 스트리밍 중: 실시간으로 들어오는 텍스트 표시
-            if (isStreaming) {
-                item(key = "streaming") {
-                    ChatMessageItem(
-                        message = ChatMessage(text = streamingText, isUser = false),
-                        isStreaming = true
-                    )
-                }
-            }
-        }
-        if (stlDialogForIndex != null) {
-            AlertDialog(
-                onDismissRequest = {
-                    if (stlBusyMessageIndex == null) stlDialogForIndex = null
-                },
-                title = {
-                    Text("모델 저장", color = Color.White, fontWeight = FontWeight.Bold)
-                },
-                text = {
-                    Column {
-                        Text(
-                            text = buildString {
-                                append("이름을 입력하거나 비워 두면 무작위 이름이 붙습니다.")
-                                append("\n\n이 기기에서 OpenSCAD(WASM)로 렌더한 뒤 AI CAD 라이브러리에 저장합니다.")
-                            },
-                            color = Color.White.copy(alpha = 0.75f),
-                            fontSize = 13.sp,
-                            lineHeight = 18.sp
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        OutlinedTextField(
-                            value = stlSaveNameInput,
-                            onValueChange = { stlSaveNameInput = it },
-                            singleLine = true,
-                            label = { Text("파일 이름 (선택)", color = Color.White.copy(alpha = 0.7f)) },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                focusedBorderColor = Color(0xFF9CD83B),
-                                unfocusedBorderColor = Color.White.copy(alpha = 0.35f),
-                                cursorColor = Color(0xFF9CD83B)
-                            )
-                        )
-                    }
-                },
-                confirmButton = {
-                    TextButton(
-                        enabled = stlBusyMessageIndex == null,
-                        onClick = {
-                            val idx = stlDialogForIndex ?: return@TextButton
-                            val raw = messages.getOrNull(idx)?.text ?: return@TextButton
-                            val c = extractOpenCadCode(raw) ?: return@TextButton
-                            stlDialogForIndex = null
-                            scope.launch {
-                                stlBusyMessageIndex = idx
-                                try {
-                                    val trimmed = stlSaveNameInput.trim()
-                                    val useRandom = trimmed.isEmpty()
-                                    AiCadSaveCoordinator.exportToLibrary(
-                                        context,
-                                        c,
-                                        preferredName = trimmed.takeIf { it.isNotEmpty() },
-                                        useRandomWhenNameBlank = useRandom
-                                    ).fold(
-                                        onSuccess = {
-                                            Toast.makeText(
-                                                context,
-                                                "기기에서 렌더한 모델을 AI CAD 라이브러리에 저장했습니다.",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                            onAiCadSavedToLibrary()
-                                        },
-                                        onFailure = { e ->
-                                            Toast.makeText(
-                                                context,
-                                                "저장 실패: ${e.userMessageForAiCad()}",
-                                                Toast.LENGTH_LONG
-                                            ).show()
-                                        }
-                                    )
-                                } catch (e: Throwable) {
-                                    Toast.makeText(
-                                        context,
-                                        "저장 실패: ${e.userMessageForAiCad()}",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                } finally {
-                                    stlBusyMessageIndex = null
-                                }
-                            }
-                        }
-                    ) {
-                        Text("저장", color = Color(0xFF9CD83B), fontWeight = FontWeight.Bold)
-                    }
-                },
-                dismissButton = {
-                    TextButton(
-                        onClick = { stlDialogForIndex = null },
-                        enabled = stlBusyMessageIndex == null
-                    ) {
-                        Text("취소", color = Color.White.copy(alpha = 0.85f))
-                    }
-                },
-                containerColor = Color(0xFF252525)
-            )
-        }
-        // ── 하단 입력 영역 (GPT 스타일) ─────────────────────────────────────────
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF111111))
-                .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 10.dp)
-        ) {
-            // 에러 메시지
-            errorMessage?.let { err ->
-                Text(
-                    text = err,
-                    color = Color(0xFFFF6B6B),
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(bottom = 4.dp)
-                )
-            }
-
-            // AI CAD 모드 옵션 칩 (컴팩트)
-            if (aiTabMode == AiChatTabMode.AI_CAD) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    listOf(
-                        ClaudeChatClient.AiCadInputOption.DIMENSIONS_DIRECT to "치수 직접 입력",
-                        ClaudeChatClient.AiCadInputOption.INTERNET_REF to "인터넷 참조"
-                    ).forEach { (option, label) ->
-                        val isSelected = aiCadOption == option
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(20.dp))
-                                .background(
-                                    if (isSelected) Color(0xFF9CD83B) else Color(0xFF2A2A2A)
-                                )
-                                .clickable { aiCadOption = option }
-                                .padding(horizontal = 14.dp, vertical = 6.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = label,
-                                color = if (isSelected) Color.Black else Color.White.copy(alpha = 0.75f),
-                                fontSize = 12.sp,
-                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
-                                maxLines = 1
-                            )
-                        }
-                    }
-                }
-            }
-
-            // 전송 로직 — 스트리밍 방식 (토큰 단위 onDelta 콜백)
-            val doSend: () -> Unit = sendLambda@{
-                if (isStreaming) return@sendLambda
-                val text = messageText.trim()
-                val images = attachedImages
-                if (text.isEmpty() && images.isEmpty()) return@sendLambda
-
-                messages.add(
-                    ChatMessage(
-                        text = if (text.isNotEmpty()) text else when {
-                            images.size > 1 -> "[${images.size}장의 이미지]"
-                            images.size == 1 -> "[이미지 1장]"
-                            else -> ""
-                        },
-                        isUser = true,
-                        imageUris = images
-                    )
-                )
-                messageText = ""
-                attachedImages = emptyList()
-                isStreaming = true
-                streamingText = ""
-                errorMessage = null
-
-                scope.launch {
-                    val imageBase64List = images.mapNotNull { uri ->
-                        try {
-                            context.contentResolver.openInputStream(uri)?.use { stream ->
-                                val bitmap = BitmapFactory.decodeStream(stream)
-                                bitmap?.let { ClaudeChatClient.bitmapToBase64(it) }
-                            }
-                        } catch (e: Exception) {
-                            null
-                        }
-                    }
-                    val defaultImgPrompt = when {
-                        imageBase64List.size > 1 -> "이 이미지들에 대해 설명해 주세요."
-                        imageBase64List.size == 1 -> "이 이미지에 대해 설명해 주세요."
-                        else -> ""
-                    }
-                    val streamBuffer = StringBuilder()
-                    val result = when (aiTabMode) {
-                        AiChatTabMode.CLAUDE -> ClaudeChatClient.streamMessage(
-                            text = text.ifBlank { defaultImgPrompt },
-                            imageBase64List = imageBase64List,
-                            onDelta = { delta ->
-                                streamBuffer.append(delta)
-                                streamingText = streamBuffer.toString()
-                            }
-                        )
-                        AiChatTabMode.AI_CAD -> ClaudeChatClient.streamAiCadMessage(
-                            userText = text.ifBlank { "첨부 이미지를 참고해 3D 모델 코드를 작성해 주세요." },
-                            imageBase64List = imageBase64List,
-                            option = aiCadOption,
-                            onDelta = { delta ->
-                                streamBuffer.append(delta)
-                                streamingText = streamBuffer.toString()
-                            }
-                        )
-                    }
-                    isStreaming = false
-                    streamingText = ""
-                    when (result) {
-                        is ClaudeChatClient.ChatResult.Success -> {
-                            val finalText = result.text
-                            messages.add(ChatMessage(text = finalText, isUser = false))
-                            // 스레드 자동 저장
-                            if (messages.isNotEmpty()) {
-                                val title = messages.firstOrNull { it.isUser }?.text
-                                    ?.take(48)?.replace('\n', ' ') ?: "새 대화"
-                                val threadId = currentThreadId ?: UUID.randomUUID().toString()
-                                val thread = ConversationThread(
-                                    id = threadId,
-                                    title = title,
-                                    modeName = aiTabMode.name,
-                                    messages = messages.map { m ->
-                                        PersistedMessage(m.text, m.isUser, m.imageUris.map { it.toString() })
-                                    },
-                                    updatedAt = System.currentTimeMillis()
-                                )
-                                currentThreadId = threadId
-                                ChatThreadStorage.save(context, thread)
-                                allThreads = ChatThreadStorage.loadAll(context)
-                            }
-                            if (aiTabMode == AiChatTabMode.AI_CAD) {
-                                val code = extractOpenCadCode(finalText)
-                                if (code != null) {
-                                    val assistantIdx = messages.lastIndex
-                                    stlBusyMessageIndex = assistantIdx
-                                    try {
-                                        AiCadSaveCoordinator.exportToLibrary(
-                                            context,
-                                            code
-                                        ).fold(
-                                            onSuccess = {
-                                                Toast.makeText(
-                                                    context,
-                                                    "기기에서 렌더한 모델을 AI CAD 라이브러리에 저장했습니다.",
-                                                    Toast.LENGTH_SHORT
-                                                ).show()
-                                                onAiCadSavedToLibrary()
-                                            },
-                                            onFailure = { e ->
-                                                Toast.makeText(
-                                                    context,
-                                                    "자동 저장 실패: ${e.userMessageForAiCad()}",
-                                                    Toast.LENGTH_LONG
-                                                ).show()
-                                            }
-                                        )
-                                    } catch (e: Throwable) {
-                                        Toast.makeText(
-                                            context,
-                                            "자동 저장 실패: ${e.userMessageForAiCad()}",
-                                            Toast.LENGTH_LONG
-                                        ).show()
-                                    } finally {
-                                        stlBusyMessageIndex = null
-                                    }
-                                }
-                            }
-                        }
-                        is ClaudeChatClient.ChatResult.Error ->
-                            errorMessage = result.message
-                    }
-                }
-            }
-
-            // 입력 바 (GPT 스타일 pill)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // 왼쪽 첨부 버튼 (원형)
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF2A2A2A))
-                        .clickable { showImageSelectDialog = true },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = if (aiTabMode == AiChatTabMode.AI_CAD)
-                            Icons.Filled.Add else Icons.Filled.AddPhotoAlternate,
-                        contentDescription = "첨부",
-                        tint = if (attachedImages.isNotEmpty()) Color(0xFF9CD83B)
-                               else Color.White.copy(alpha = 0.85f),
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-
-                // Pill 입력 컨테이너
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(26.dp))
-                        .background(Color(0xFF2A2A2A))
-                        .padding(start = 16.dp, end = 6.dp, top = 10.dp, bottom = 10.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(modifier = Modifier.weight(1f)) {
-                            if (messageText.isEmpty()) {
-                                Text(
-                                    text = when (aiTabMode) {
-                                        AiChatTabMode.AI_CAD -> "모델·치수 입력"
-                                        else -> "메시지 입력…"
-                                    },
-                                    color = Color(0xFF888888),
-                                    fontSize = 15.sp
-                                )
-                            }
-                            BasicTextField(
-                                value = messageText,
-                                onValueChange = { messageText = it },
-                                textStyle = TextStyle(
-                                    color = Color.White,
-                                    fontSize = 15.sp
-                                ),
-                                cursorBrush = SolidColor(Color.White),
-                                maxLines = 4,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(6.dp))
-                        // 전송 버튼 (pill 내부 오른쪽, 원형)
-                        val canSend = !isStreaming && (messageText.isNotBlank() || attachedImages.isNotEmpty())
-                        Box(
-                            modifier = Modifier
-                                .size(34.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (canSend) Color(0xFF9CD83B) else Color(0xFF3A3A3A)
-                                )
-                                .clickable(enabled = canSend) { doSend() },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (isStreaming) {
-                                CircularProgressIndicator(
-                                    color = Color.White,
-                                    strokeWidth = 2.dp,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Filled.Send,
-                                    contentDescription = "전송",
-                                    tint = if (canSend) Color.Black else Color.White.copy(alpha = 0.3f),
-                                    modifier = Modifier.size(17.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 이미지 선택 다이얼로그 (갤러리·데이터셋 폴더)
-        if (showImageSelectDialog) {
-            ClaudeImageSelectDialog(
-                galleryImages = galleryImageUris,
-                datasetFolders = datasetFolders,
-                onGalleryImageSelected = { uri ->
-                    attachedImages = listOf(uri)
-                    showImageSelectDialog = false
-                },
-                onDatasetFolderSelected = { folder ->
-                    val imageExts = setOf("jpg", "jpeg", "png", "webp")
-                    val uris = folder.dir.listFiles { f ->
-                        f.isFile && imageExts.contains(f.extension.lowercase())
-                    }?.sortedBy { it.nameWithoutExtension.toIntOrNull() ?: Int.MAX_VALUE }
-                        ?.map { Uri.fromFile(it) } ?: emptyList()
-                    attachedImages = uris
-                    showImageSelectDialog = false
-                },
-                onDismiss = { showImageSelectDialog = false }
-            )
-        }
-
-        } // end inner Column
-
-        // ── 드로어 스크림 ──
-        AnimatedVisibility(
-            visible = isDrawerOpen,
-            enter = fadeIn(),
-            exit = fadeOut()
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.55f))
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-                    ) { isDrawerOpen = false }
-            )
-        }
-
-        // ── 드로어 패널 ──
-        AnimatedVisibility(
-            visible = isDrawerOpen,
-            enter = slideInHorizontally { -it },
-            exit = slideOutHorizontally { -it }
-        ) {
-            ChatThreadDrawer(
-                threads = allThreads,
-                currentThreadId = currentThreadId,
-                onThreadSelected = { thread ->
-                    messages.clear()
-                    messages.addAll(thread.messages.map { msg ->
-                        ChatMessage(
-                            text = msg.text,
-                            isUser = msg.isUser,
-                            imageUris = msg.imageUriStrings.mapNotNull { s ->
-                                runCatching { android.net.Uri.parse(s) }.getOrNull()
-                            }
-                        )
-                    })
-                    aiTabMode = when (thread.modeName) {
-                        "AI_CAD" -> AiChatTabMode.AI_CAD
-                        "GEMMA4_ON_DEVICE" -> AiChatTabMode.CLAUDE // 구버전 스레드 호환
-                        else -> AiChatTabMode.CLAUDE
-                    }
-                    currentThreadId = thread.id
-                    streamingText = ""
-                    errorMessage = null
-                    isDrawerOpen = false
-                },
-                onNewChat = {
-                    messages.clear()
-                    currentThreadId = null
-                    streamingText = ""
-                    errorMessage = null
-                    isDrawerOpen = false
-                },
-                onDeleteThread = { threadId ->
-                    ChatThreadStorage.delete(context, threadId)
-                    if (currentThreadId == threadId) {
-                        messages.clear()
-                        currentThreadId = null
-                    }
-                    allThreads = ChatThreadStorage.loadAll(context)
-                },
-                onClose = { isDrawerOpen = false }
-            )
-        }
-
-    } // end outer Box
-}
-
-@Composable
-private fun ClaudeImageSelectDialog(
-    galleryImages: List<Uri>,
-    datasetFolders: List<DatasetFolder>,
-    onGalleryImageSelected: (Uri) -> Unit,
-    onDatasetFolderSelected: (DatasetFolder) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var selectedTab by remember { mutableStateOf(0) } // 0: 갤러리, 1: 데이터셋(폴더)
-
-    Dialog(onDismissRequest = onDismiss) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.7f)
-                .background(Color(0xFF1E1E1E), RoundedCornerShape(16.dp))
-                .padding(16.dp)
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "이미지 선택 (갤러리·데이터셋폴더)",
-                        color = Color.White,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Icon(
-                        imageVector = Icons.Filled.Close,
-                        contentDescription = "닫기",
-                        tint = Color.White,
-                        modifier = Modifier
-                            .size(24.dp)
-                            .clickable { onDismiss() }
-                    )
-                }
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    listOf("갤러리 (${galleryImages.size})" to 0, "데이터셋폴더 (${datasetFolders.size})" to 1).forEach { (label, index) ->
-                        val isSelected = selectedTab == index
-                        Text(
-                            text = label,
-                            color = if (isSelected) Color.Black else Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(
-                                    if (isSelected) Color(0xFF9CD83B) else Color.White.copy(alpha = 0.2f)
-                                )
-                                .clickable { selectedTab = index }
-                                .padding(horizontal = 14.dp, vertical = 8.dp)
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(12.dp))
-                when (selectedTab) {
-                    0 -> {
-                        if (galleryImages.isEmpty()) {
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxWidth(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "갤러리에 이미지가 없습니다.",
-                                    color = Color.White.copy(alpha = 0.7f),
-                                    fontSize = 14.sp
-                                )
-                            }
-                        } else {
-                            LazyVerticalGrid(
-                                columns = GridCells.Fixed(3),
-                                modifier = Modifier.weight(1f),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                items(galleryImages) { uri ->
-                                    Image(
-                                        painter = rememberAsyncImagePainter(uri),
-                                        contentDescription = null,
-                                        modifier = Modifier
-                                            .aspectRatio(1f)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .clickable { onGalleryImageSelected(uri) }
-                                            .border(1.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(8.dp)),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    1 -> {
-                        if (datasetFolders.isEmpty()) {
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxWidth(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "데이터셋폴더가 없습니다.",
-                                    color = Color.White.copy(alpha = 0.7f),
-                                    fontSize = 14.sp
-                                )
-                            }
-                        } else {
-                            LazyVerticalGrid(
-                                columns = GridCells.Fixed(2),
-                                modifier = Modifier.weight(1f),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                items(datasetFolders) { folder ->
-                                    Column(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .border(1.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
-                                            .clickable { onDatasetFolderSelected(folder) }
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .aspectRatio(1f)
-                                        ) {
-                                            folder.coverUri?.let { uri ->
-                                                Image(
-                                                    painter = rememberAsyncImagePainter(uri),
-                                                    contentDescription = null,
-                                                    modifier = Modifier.fillMaxSize(),
-                                                    contentScale = ContentScale.Crop
-                                                )
-                                            }
-                                            Box(
-                                                modifier = Modifier
-                                                    .align(Alignment.BottomCenter)
-                                                    .fillMaxWidth()
-                                                    .background(Color.Black.copy(alpha = 0.6f))
-                                                    .padding(4.dp)
-                                            ) {
-                                                Text(
-                                                    text = "${folder.name} (${folder.count}장)",
-                                                    color = Color.White,
-                                                    fontSize = 12.sp,
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    textAlign = TextAlign.Center
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-private enum class AiChatTabMode { CLAUDE, AI_CAD }
-
-// ─────────────────────────────────────────────────────────────
-// 대화 스레드 드로어 UI
-// ─────────────────────────────────────────────────────────────
-
-@Composable
-private fun ChatThreadDrawer(
-    threads: List<ConversationThread>,
-    currentThreadId: String?,
-    onThreadSelected: (ConversationThread) -> Unit,
-    onNewChat: () -> Unit,
-    onDeleteThread: (String) -> Unit,
-    onClose: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxHeight()
-            .fillMaxWidth(0.82f)
-            .background(Color(0xFF1C1C1E))
-            .systemBarsPadding()
-    ) {
-        // 헤더
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 16.dp, end = 4.dp, top = 12.dp, bottom = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                "채팅",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.weight(1f)
-            )
-            IconButton(onClick = onClose) {
-                Icon(Icons.Filled.Close, "닫기", tint = Color.White.copy(alpha = 0.6f))
-            }
-        }
-
-        // 새 채팅 버튼
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onNewChat() }
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Icon(
-                Icons.Filled.Edit,
-                contentDescription = "새 채팅",
-                tint = Color(0xFF9CD83B),
-                modifier = Modifier.size(18.dp)
-            )
-            Text("새 채팅", color = Color.White, fontSize = 15.sp)
-        }
-
-        androidx.compose.material3.HorizontalDivider(
-            color = Color.White.copy(alpha = 0.08f)
-        )
-
-        // 스레드 목록
-        if (threads.isEmpty()) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    "아직 대화 기록이 없습니다.",
-                    color = Color.White.copy(alpha = 0.35f),
-                    fontSize = 14.sp,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                )
-            }
-        } else {
-            Text(
-                "최근 채팅",
-                color = Color.White.copy(alpha = 0.4f),
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-            )
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                items(threads, key = { it.id }) { thread ->
-                    ThreadListItem(
-                        thread = thread,
-                        isActive = thread.id == currentThreadId,
-                        onClick = { onThreadSelected(thread) },
-                        onDelete = { onDeleteThread(thread.id) }
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ThreadListItem(
-    thread: ConversationThread,
-    isActive: Boolean,
-    onClick: () -> Unit,
-    onDelete: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(if (isActive) Color(0xFF2A2A2E) else Color.Transparent)
-            .clickable { onClick() }
-            .padding(start = 16.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = thread.title,
-                color = Color.White,
-                fontSize = 14.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(Modifier.height(3.dp))
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // 모드 뱃지
-                val modeLabel = when (thread.modeName) {
-                    "AI_CAD" -> "AI CAD"
-                    else -> "클로드"
-                }
-                val isAiCad = thread.modeName == "AI_CAD"
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(
-                            when {
-                                isAiCad -> Color(0xFF9CD83B).copy(alpha = 0.15f)
-                                else -> Color(0xFF4A4AFF).copy(alpha = 0.18f)
-                            }
-                        )
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        text = modeLabel,
-                        color = when {
-                            isAiCad -> Color(0xFF9CD83B)
-                            else -> Color(0xFF9898FF)
-                        },
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-                Text(
-                    text = formatThreadTime(thread.updatedAt),
-                    color = Color.White.copy(alpha = 0.35f),
-                    fontSize = 11.sp
-                )
-            }
-        }
-        IconButton(
-            onClick = onDelete,
-            modifier = Modifier.size(36.dp)
-        ) {
-            Icon(
-                Icons.Filled.Delete,
-                contentDescription = "삭제",
-                tint = Color.White.copy(alpha = 0.25f),
-                modifier = Modifier.size(16.dp)
-            )
-        }
-    }
-}
-
-private fun formatThreadTime(timestamp: Long): String {
-    val now = System.currentTimeMillis()
-    val diff = now - timestamp
-    return when {
-        diff < 60_000L -> "방금"
-        diff < 3_600_000L -> "${diff / 60_000}분 전"
-        diff < 86_400_000L -> "오늘"
-        diff < 172_800_000L -> "어제"
-        diff < 604_800_000L -> "${diff / 86_400_000}일 전"
-        else -> {
-            val cal = Calendar.getInstance().also { it.timeInMillis = timestamp }
-            "${cal.get(Calendar.MONTH) + 1}월 ${cal.get(Calendar.DAY_OF_MONTH)}일"
-        }
-    }
-}
-
-private data class ChatMessage(
-    val text: String,
-    val isUser: Boolean,
-    val imageUris: List<Uri> = emptyList()
-)
-
-/** 웹 LLM 스타일 OpenSCAD 창: 상단 저장, 본문 전체 스크롤(말줄임 없음) */
-@Composable
-private fun AiCadScriptWindowBubble(
-    codeText: String,
-    isConverting: Boolean,
-    onSaveClick: () -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.Start
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(end = 4.dp)
-        ) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFF0D0D0D),
-                shape = RoundedCornerShape(10.dp),
-                border = BorderStroke(1.dp, Color(0xFF3F3F3F)),
-                shadowElevation = 3.dp
-            ) {
-                Column {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Color(0xFF1A1A1A))
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(5.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            listOf(
-                                Color(0xFFFF5F57),
-                                Color(0xFFFFBD2E),
-                                Color(0xFF28C840)
-                            ).forEach { dot ->
-                                Box(
-                                    modifier = Modifier
-                                        .size(9.dp)
-                                        .background(dot, CircleShape)
-                                )
-                            }
-                            Text(
-                                text = "openscad",
-                                color = Color(0xFF9CD83B),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                        if (isConverting) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    color = Color(0xFF9CD83B),
-                                    strokeWidth = 2.dp
-                                )
-                                Text(
-                                    text = "STL 변환 중…",
-                                    color = Color.White.copy(alpha = 0.88f),
-                                    fontSize = 12.sp
-                                )
-                            }
-                        } else {
-                            TextButton(
-                                onClick = onSaveClick,
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                            ) {
-                                Text(
-                                    text = "저장",
-                                    color = Color(0xFF9CD83B),
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
-                    if (isConverting) {
-                        LinearProgressIndicator(
-                            modifier = Modifier.fillMaxWidth(),
-                            color = Color(0xFF9CD83B),
-                            trackColor = Color(0xFF2C2C2C)
-                        )
-                    }
-                    val codeScroll = rememberScrollState()
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 480.dp)
-                            .verticalScroll(codeScroll)
-                            .padding(horizontal = 12.dp, vertical = 10.dp)
-                    ) {
-                        Text(
-                            text = codeText,
-                            color = Color(0xFFD4D4D4),
-                            fontSize = 12.sp,
-                            lineHeight = 17.sp,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-/** GPT 스타일 메시지 아이템: 사용자 = 우측 말풍선, AI = 말풍선 없이 마크다운 렌더링 */
-@Composable
-private fun ChatMessageItem(
-    message: ChatMessage,
-    isStreaming: Boolean = false
-) {
-    if (message.isUser) {
-        // ── 사용자 메시지: 우측 정렬 말풍선 ──
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End
-        ) {
-            Box(
-                modifier = Modifier
-                    .widthIn(max = 270.dp)
-                    .clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = 18.dp, bottomEnd = 4.dp))
-                    .background(Color(0xFF2C2C2E))
-                    .padding(horizontal = 14.dp, vertical = 10.dp)
-            ) {
-                Column {
-                    if (message.imageUris.isNotEmpty()) {
-                        val showUris = message.imageUris.take(6)
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            showUris.chunked(3).forEach { rowUris ->
-                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    rowUris.forEach { uri ->
-                                        Image(
-                                            painter = rememberAsyncImagePainter(uri),
-                                            contentDescription = null,
-                                            modifier = Modifier
-                                                .size(72.dp)
-                                                .clip(RoundedCornerShape(6.dp)),
-                                            contentScale = ContentScale.Crop
-                                        )
-                                    }
-                                }
-                            }
-                            if (message.imageUris.size > 6) {
-                                Text(
-                                    text = "외 ${message.imageUris.size - 6}장",
-                                    color = Color.White.copy(alpha = 0.6f),
-                                    fontSize = 11.sp
-                                )
-                            }
-                        }
-                        if (message.text.isNotEmpty()) Spacer(Modifier.height(6.dp))
-                    }
-                    if (message.text.isNotEmpty()) {
-                        Text(
-                            text = message.text,
-                            color = Color.White,
-                            fontSize = 15.sp,
-                            lineHeight = 21.sp
-                        )
-                    }
-                }
-            }
-        }
-    } else {
-        // ── AI 메시지: 말풍선 없이 마크다운 렌더링 ──
-        Column(modifier = Modifier.fillMaxWidth().padding(end = 16.dp)) {
-            if (message.imageUris.isNotEmpty()) {
-                val showUris = message.imageUris.take(6)
-                Column(
-                    modifier = Modifier.padding(bottom = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    showUris.chunked(3).forEach { rowUris ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            rowUris.forEach { uri ->
-                                Image(
-                                    painter = rememberAsyncImagePainter(uri),
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .size(72.dp)
-                                        .clip(RoundedCornerShape(6.dp)),
-                                    contentScale = ContentScale.Crop
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-            val displayText = when {
-                isStreaming && message.text.isEmpty() -> "▊"
-                isStreaming -> message.text + " ▊"
-                else -> message.text
-            }
-            MarkdownText(text = displayText)
-        }
-    }
-}
-
-// ─────────────────────── 마크다운 렌더러 ───────────────────────
-
-private sealed class MarkdownBlock {
-    data class Heading(val level: Int, val text: String) : MarkdownBlock()
-    data class BulletItem(val text: String, val depth: Int = 0) : MarkdownBlock()
-    data class NumberedItem(val number: Int, val text: String) : MarkdownBlock()
-    data class CodeBlock(val language: String, val code: String) : MarkdownBlock()
-    object HRule : MarkdownBlock()
-    data class Paragraph(val text: String) : MarkdownBlock()
-}
-
-private fun parseMarkdownBlocks(text: String): List<MarkdownBlock> {
-    val blocks = mutableListOf<MarkdownBlock>()
-    val lines = text.split("\n")
-    var i = 0
-    while (i < lines.size) {
-        val line = lines[i]
-        val trimmed = line.trim()
-
-        // 코드 블록
-        if (trimmed.startsWith("```")) {
-            val lang = trimmed.removePrefix("```").trim()
-            val codeLines = mutableListOf<String>()
-            i++
-            while (i < lines.size && !lines[i].trim().startsWith("```")) {
-                codeLines.add(lines[i])
-                i++
-            }
-            if (i < lines.size) i++ // 닫는 ``` 건너뜀
-            blocks.add(MarkdownBlock.CodeBlock(lang, codeLines.joinToString("\n")))
-            continue
-        }
-
-        // 제목
-        val headingMatch = Regex("^(#{1,3}) (.+)").matchEntire(trimmed)
-        if (headingMatch != null) {
-            blocks.add(MarkdownBlock.Heading(headingMatch.groupValues[1].length, headingMatch.groupValues[2]))
-            i++; continue
-        }
-
-        // 불릿
-        val bulletMatch = Regex("^([ \t]*)[-*+] (.+)").matchEntire(line)
-        if (bulletMatch != null) {
-            val depth = bulletMatch.groupValues[1].length / 2
-            blocks.add(MarkdownBlock.BulletItem(bulletMatch.groupValues[2], depth))
-            i++; continue
-        }
-
-        // 번호 목록
-        val numMatch = Regex("^\\s*(\\d+)[.)\\s] (.+)").matchEntire(trimmed)
-        if (numMatch != null) {
-            blocks.add(MarkdownBlock.NumberedItem(numMatch.groupValues[1].toIntOrNull() ?: 1, numMatch.groupValues[2]))
-            i++; continue
-        }
-
-        // 수평선
-        if (trimmed.matches(Regex("^[-*_]{3,}$"))) {
-            blocks.add(MarkdownBlock.HRule); i++; continue
-        }
-
-        // 빈 줄
-        if (trimmed.isEmpty()) { i++; continue }
-
-        // 단락 (연속 줄 묶음)
-        val paraLines = mutableListOf(line)
-        i++
-        while (i < lines.size) {
-            val next = lines[i]; val nt = next.trim()
-            if (nt.isEmpty() || nt.startsWith("```") || Regex("^#{1,3} ").containsMatchIn(nt)
-                || Regex("^[-*+] ").containsMatchIn(nt) || Regex("^\\d+[.)\\s]").containsMatchIn(nt)
-                || nt.matches(Regex("^[-*_]{3,}$"))) break
-            paraLines.add(next); i++
-        }
-        blocks.add(MarkdownBlock.Paragraph(paraLines.joinToString("\n")))
-    }
-    return blocks
-}
-
-/** 인라인 마크다운 파싱 (Bold, Italic, InlineCode) → AnnotatedString */
-private fun buildInlineAnnotated(text: String): AnnotatedString = buildAnnotatedString {
-    var i = 0
-    while (i < text.length) {
-        when {
-            // Bold+Italic: ***
-            text.startsWith("***", i) -> {
-                val end = text.indexOf("***", i + 3)
-                if (end != -1) {
-                    withStyle(SpanStyle(fontWeight = FontWeight.Bold, fontStyle = FontStyle.Italic)) {
-                        append(text.substring(i + 3, end))
-                    }
-                    i = end + 3
-                } else append(text[i++])
-            }
-            // Bold: **
-            text.startsWith("**", i) -> {
-                val end = text.indexOf("**", i + 2)
-                if (end != -1) {
-                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(text.substring(i + 2, end)) }
-                    i = end + 2
-                } else append(text[i++])
-            }
-            // Italic: _text_
-            text.startsWith("_", i) && (i == 0 || text[i - 1] != '_') -> {
-                val end = text.indexOf("_", i + 1)
-                if (end != -1 && (end + 1 >= text.length || text[end + 1] != '_')) {
-                    withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(text.substring(i + 1, end)) }
-                    i = end + 1
-                } else append(text[i++])
-            }
-            // Inline code: `
-            text.startsWith("`", i) && !text.startsWith("```", i) -> {
-                val end = text.indexOf("`", i + 1)
-                if (end != -1) {
-                    withStyle(SpanStyle(
-                        fontFamily = FontFamily.Monospace,
-                        background = Color(0xFF2A2A2A),
-                        color = Color(0xFF9CD83B),
-                        fontSize = 13.sp
-                    )) { append(text.substring(i + 1, end)) }
-                    i = end + 1
-                } else append(text[i++])
-            }
-            else -> append(text[i++])
-        }
-    }
-}
-
-@Composable
-private fun MarkdownText(
-    text: String,
-    modifier: Modifier = Modifier,
-    textColor: Color = Color.White,
-    fontSize: TextUnit = 15.sp
-) {
-    val blocks = remember(text) { parseMarkdownBlocks(text) }
-    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        blocks.forEach { block ->
-            when (block) {
-                is MarkdownBlock.Heading -> {
-                    val headingSize: TextUnit = when (block.level) {
-                        1 -> (fontSize.value + 7).sp
-                        2 -> (fontSize.value + 4).sp
-                        else -> (fontSize.value + 2).sp
-                    }
-                    val headingWeight = if (block.level <= 2) FontWeight.Bold else FontWeight.SemiBold
-                    val headingTopPad = when (block.level) { 1 -> 10.dp; 2 -> 8.dp; else -> 6.dp }
-                    Text(
-                        text = buildInlineAnnotated(block.text),
-                        color = textColor,
-                        fontSize = headingSize,
-                        fontWeight = headingWeight,
-                        lineHeight = (headingSize.value * 1.3).sp,
-                        modifier = Modifier.padding(top = headingTopPad, bottom = 2.dp)
-                    )
-                }
-                is MarkdownBlock.BulletItem -> {
-                    Row(modifier = Modifier.padding(start = (block.depth * 14).dp)) {
-                        Text(
-                            "•",
-                            color = textColor.copy(alpha = 0.55f),
-                            fontSize = fontSize,
-                            modifier = Modifier.padding(end = 8.dp, top = 1.dp)
-                        )
-                        Text(
-                            text = buildInlineAnnotated(block.text),
-                            color = textColor,
-                            fontSize = fontSize,
-                            lineHeight = (fontSize.value * 1.5).sp,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-                is MarkdownBlock.NumberedItem -> {
-                    Row {
-                        Text(
-                            "${block.number}.",
-                            color = textColor.copy(alpha = 0.55f),
-                            fontSize = fontSize,
-                            modifier = Modifier.width(26.dp).padding(top = 1.dp)
-                        )
-                        Text(
-                            text = buildInlineAnnotated(block.text),
-                            color = textColor,
-                            fontSize = fontSize,
-                            lineHeight = (fontSize.value * 1.5).sp,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-                is MarkdownBlock.CodeBlock -> {
-                    MarkdownCodeBlock(language = block.language, code = block.code)
-                }
-                is MarkdownBlock.HRule -> {
-                    androidx.compose.material3.HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 6.dp),
-                        color = textColor.copy(alpha = 0.18f)
-                    )
-                }
-                is MarkdownBlock.Paragraph -> {
-                    Text(
-                        text = buildInlineAnnotated(block.text),
-                        color = textColor,
-                        fontSize = fontSize,
-                        lineHeight = (fontSize.value * 1.6).sp
-                    )
-                }
-            }
-        }
-    }
-}
-
-/** 마크다운 코드 블록 (AI CAD 전용 AiCadScriptWindowBubble과 별개) */
-@Composable
-private fun MarkdownCodeBlock(language: String, code: String) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = Color(0xFF1A1A1A),
-        shape = RoundedCornerShape(8.dp),
-        border = BorderStroke(1.dp, Color(0xFF3A3A3A))
-    ) {
-        Column {
-            if (language.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF252525))
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = language,
-                        color = Color(0xFF888888),
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-            }
-            val scroll = rememberScrollState()
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(scroll)
-                    .padding(12.dp)
-            ) {
-                Text(
-                    text = code,
-                    color = Color(0xFFD4D4D4),
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    lineHeight = 18.sp,
-                    softWrap = false
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun CreatePlaceholderScreen() {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(AppBackgroundColor)
-    ) {
-        Text(
-            text = "창작 마당",
-            color = Color.White,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(16.dp)
-        )
-    }
-}
-
-@Composable
-fun ProfileScreen(
-    onLlmApiKeyClick: () -> Unit,
-    onServerSettingsClick: () -> Unit,
-    onSensorCheckClick: () -> Unit,
-    onPermissionsClick: () -> Unit = {}
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(AppBackgroundColor)
-    ) {
-        // 타이틀: 프로필
-        Text(
-            text = "프로필",
-            color = Color.White,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(16.dp)
-        )
-        
-        // 구분선
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(Color.White)
-        )
-
-        // LLM API 키 (Anthropic / AI 메뉴)
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onLlmApiKeyClick() }
-                .padding(16.dp)
-        ) {
-            Text(
-                text = "LLM API 키",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-        
-        // 구분선
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(Color.White)
-        )
-        
-        // 서버 설정 메뉴
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onServerSettingsClick() }
-                .padding(16.dp)
-        ) {
-            Text(
-                text = "서버 설정",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-
-        // 구분선
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(Color.White)
-        )
-
-        // 센서 확인 메뉴
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onSensorCheckClick() }
-                .padding(16.dp)
-        ) {
-            Text(
-                text = "센서 확인",
-                color = Color.White,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-
-        // 구분선
-        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color.White))
-
-        // 권한 관리 메뉴
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onPermissionsClick() }
-                .padding(16.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = "권한 관리",
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                val context = LocalContext.current
-                val allGranted = AppPermissions.list(context).all { it.isGranted(context) }
-                if (!allGranted) {
-                    Text(
-                        text = "미승인 항목 있음",
-                        color = Color(0xFFFF6B6B),
-                        fontSize = 12.sp,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFFFF6B6B).copy(alpha = 0.15f))
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
-                }
-            }
-        }
-
-        // 마지막 구분선
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(Color.White)
-        )
-    }
-}
-
-// ── 앱 권한 목록 정의 ─────────────────────────────────────────────────────────
-
-data class AppPermissionInfo(
-    val name: String,
-    val description: String,
-    val manifestPermission: String,
-    val minSdk: Int = 0,
-    val maxSdk: Int = Int.MAX_VALUE
-) {
-    fun isApplicable(): Boolean {
-        val sdk = Build.VERSION.SDK_INT
-        return sdk >= minSdk && sdk <= maxSdk
-    }
-
-    fun isGranted(context: Context): Boolean {
-        if (!isApplicable()) return true   // 해당 OS에서 불필요한 권한은 자동 승인 처리
-        return ContextCompat.checkSelfPermission(context, manifestPermission) ==
-            PackageManager.PERMISSION_GRANTED
-    }
-}
-
-object AppPermissions {
-    fun list(context: Context): List<AppPermissionInfo> = buildList {
-        add(AppPermissionInfo(
-            name = "카메라",
-            description = "사진 및 동영상 촬영, 3D 스캔에 사용됩니다.",
-            manifestPermission = Manifest.permission.CAMERA
-        ))
-        add(AppPermissionInfo(
-            name = "마이크",
-            description = "동영상 녹화 시 음성 녹음에 사용됩니다.",
-            manifestPermission = Manifest.permission.RECORD_AUDIO
-        ))
-        add(AppPermissionInfo(
-            name = "미디어 파일 (이미지)",
-            description = "갤러리 이미지 불러오기 및 저장에 사용됩니다.",
-            manifestPermission = Manifest.permission.READ_MEDIA_IMAGES,
-            minSdk = Build.VERSION_CODES.TIRAMISU
-        ))
-        add(AppPermissionInfo(
-            name = "저장소",
-            description = "이미지 파일 읽기 및 쓰기에 사용됩니다. (Android 12 이하)",
-            manifestPermission = Manifest.permission.READ_EXTERNAL_STORAGE,
-            maxSdk = Build.VERSION_CODES.S_V2
-        ))
-        add(AppPermissionInfo(
-            name = "저장소 (쓰기)",
-            description = "이미지 파일 저장에 사용됩니다. (Android 9 이하)",
-            manifestPermission = Manifest.permission.WRITE_EXTERNAL_STORAGE,
-            maxSdk = Build.VERSION_CODES.P
-        ))
-        add(AppPermissionInfo(
-            name = "알림",
-            description = "업로드·배경 제거·광택 제거 등 백그라운드 작업 진행 상황을 알림 표시줄에 표시합니다.",
-            manifestPermission = Manifest.permission.POST_NOTIFICATIONS,
-            minSdk = Build.VERSION_CODES.TIRAMISU
-        ))
-    }.filter { it.isApplicable() }
-}
-
-// ── 권한 관리 화면 ─────────────────────────────────────────────────────────────
-
-@Composable
-fun PermissionManagementScreen(onBack: () -> Unit) {
-    val context = LocalContext.current
-
-    // 권한 상태를 실시간 반영하기 위해 화면이 포커스를 가질 때마다 다시 체크
-    var refreshKey by remember { mutableStateOf(0) }
-    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) refreshKey++
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    val permissions = remember(refreshKey) { AppPermissions.list(context) }
-
-    // 미승인 권한 일괄 요청 런처
-    val requestLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { refreshKey++ }
-
-    BackHandler { onBack() }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(AppBackgroundColor)
-    ) {
-        // ── 헤더 ──────────────────────────────────────────────────────────────
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "< 권한 관리",
-                color = Color.White,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier
-                    .weight(1f)
-                    .clickable { onBack() }
-                    .padding(8.dp)
-            )
-            // 미승인 권한이 있으면 일괄 요청 버튼 표시
-            val ungrantedApplicable = permissions.filter { !it.isGranted(context) }
-            if (ungrantedApplicable.isNotEmpty()) {
-                Text(
-                    text = "전체 허용",
-                    color = Color.White,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFF2A6EBB))
-                        .clickable {
-                            requestLauncher.launch(
-                                ungrantedApplicable.map { it.manifestPermission }.toTypedArray()
-                            )
-                        }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                )
-            }
-        }
-
-        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha = 0.3f)))
-
-        // ── 안내 문구 ──────────────────────────────────────────────────────────
-        Text(
-            text = "항목을 탭하면 안드로이드 설정에서 권한을 직접 변경할 수 있습니다.",
-            color = Color.White.copy(alpha = 0.6f),
-            fontSize = 12.sp,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-        )
-
-        // ── 권한 목록 ──────────────────────────────────────────────────────────
-        LazyColumn(modifier = Modifier.fillMaxSize()) {
-            items(permissions) { perm ->
-                val granted = perm.isGranted(context)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            // 앱 설정 화면으로 이동
-                            val intent = Intent(
-                                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                Uri.fromParts("package", context.packageName, null)
-                            )
-                            context.startActivity(intent)
-                        }
-                        .padding(horizontal = 16.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // 상태 아이콘
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(CircleShape)
-                            .background(
-                                if (granted) Color(0xFF1A6B2F) else Color(0xFF6B1A1A)
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = if (granted) Icons.Filled.Check else Icons.Filled.Close,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(14.dp))
-
-                    // 권한 이름 + 설명
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = perm.name,
-                            color = Color.White,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = perm.description,
-                            color = Color.White.copy(alpha = 0.65f),
-                            fontSize = 12.sp,
-                            lineHeight = 16.sp
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    // 상태 뱃지
-                    Text(
-                        text = if (granted) "허용됨" else "거부됨",
-                        color = if (granted) Color(0xFF4CAF50) else Color(0xFFFF6B6B),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(
-                                (if (granted) Color(0xFF4CAF50) else Color(0xFFFF6B6B))
-                                    .copy(alpha = 0.15f)
-                            )
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
-                }
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 66.dp)
-                        .height(0.5.dp)
-                        .background(Color.White.copy(alpha = 0.1f))
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun SensorCheckScreen(onBack: () -> Unit) {
-    val context = LocalContext.current
-    val sensorManager = remember { context.getSystemService(Context.SENSOR_SERVICE) as SensorManager }
-    
-    BackHandler {
-        onBack()
-    }
-
-    // 어플 구동(공간 촬영 및 기울기 측정)에 필수적인 센서만 구성
-    val sensorItems = remember {
-        listOf(
-            // 앱에서는 GAME_ROTATION_VECTOR를 우선 사용하고, 없으면 ROTATION_VECTOR로 대체함
-            SensorInfo("회전 벡터(게임/일반)", Sensor.TYPE_ROTATION_VECTOR, Icons.Default.Explore),
-            SensorInfo("자이로스코프", Sensor.TYPE_GYROSCOPE, Icons.Default.Public),
-            SensorInfo("가속도계", Sensor.TYPE_ACCELEROMETER, Icons.Default.Speed),
-            SensorInfo("자기장 센서", Sensor.TYPE_MAGNETIC_FIELD, Icons.Default.Public)
-        )
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .padding(16.dp)
-    ) {
-        // 헤더
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 24.dp),
-            horizontalArrangement = Arrangement.Start,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text(
-                    text = "센서 확인",
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Box(
-                    modifier = Modifier
-                        .width(100.dp)
-                        .height(2.dp)
-                        .background(Color.White)
-                )
-            }
-        }
-
-        // 3열 그리드 레이아웃
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(3),
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(32.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            items(sensorItems) { item ->
-                val isPresent = if (item.type == Sensor.TYPE_ROTATION_VECTOR) {
-                    sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR) != null ||
-                        sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR) != null
-                } else {
-                    sensorManager.getDefaultSensor(item.type) != null
-                }
-                SensorGridItem(item.name, item.icon, isPresent)
-            }
-        }
-    }
-}
-
-data class SensorInfo(val name: String, val type: Int, val icon: ImageVector)
-
-data class DatasetFolder(
-    val name: String,
-    val dir: File,
-    val coverUri: Uri?,
-    val count: Int
-)
-
-data class PlyModel(
-    val name: String,
-    val file: File,
-    val lastModified: Long
-)
-
-private data class Model3dSplitLibrary(
-    val plyModels: List<PlyModel>,
-    val objModels: List<PlyModel>,
-)
-
-/** 갤러리 오버플로 메뉴에서 선택한 뒤 이미지 선택·확인으로 이어지는 동작 */
-private enum class PendingGalleryMenuAction {
-    None,
-    BackgroundRemove,
-    GlareRemove,
-    CreateDatasetFolder,
-    Export,
-    Share
-}
-
-/** 데이터셋폴더 목록에서 오버플로 메뉴 → 폴더 선택 후 확인 시 수행할 동작 */
-private enum class PendingDatasetMenuAction {
-    None,
-    BackgroundRemove,
-    GlareRemove,
-    Share
-}
-
-@Composable
-fun SensorGridItem(name: String, icon: ImageVector, isPresent: Boolean) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Box(
-            modifier = Modifier
-                .size(64.dp)
-                .padding(8.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            // 메인 센서 아이콘
-            Icon(
-                imageVector = icon,
-                contentDescription = name,
-                tint = if (isPresent) Color(0xFF7ED321) else Color.Red,
-                modifier = Modifier.size(48.dp)
-            )
-            
-            // 미보유 시 빨간색 금지 표시 (원 + 사선)
-            if (!isPresent) {
-                Canvas(modifier = Modifier.size(48.dp)) {
-                    val strokeWidth = 3.dp.toPx()
-                    // 빨간 원
-                    drawCircle(
-                        color = Color.Red,
-                        style = Stroke(width = strokeWidth)
-                    )
-                    // 사선
-                    drawLine(
-                        color = Color.Red,
-                        start = Offset(size.width * 0.2f, size.height * 0.2f),
-                        end = Offset(size.width * 0.8f, size.height * 0.8f),
-                        strokeWidth = strokeWidth
-                    )
-                }
-            }
-        }
-        
-        Spacer(modifier = Modifier.height(8.dp))
-        
-        Text(
-            text = name,
-            color = if (isPresent) Color(0xFF7ED321) else Color.Red,
-            fontSize = 11.sp,
-            textAlign = TextAlign.Center,
-            lineHeight = 14.sp
-        )
-    }
-}
-
-@Composable
-fun BottomNavigationBar(
-    selectedTab: MainTab,
-    onTabSelected: (MainTab) -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(BottomBarBackgroundColor)
-            .padding(vertical = 6.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        BottomNavItem(
-            label = "라이브러리",
-            icon = Icons.Filled.PhotoLibrary,
-            isSelected = selectedTab == MainTab.LIBRARY,
-            onClick = { onTabSelected(MainTab.LIBRARY) }
-        )
-        BottomNavItem(
-            label = "AI",
-            icon = Icons.Filled.AutoAwesome,
-            isSelected = selectedTab == MainTab.CLAUDE,
-            onClick = { onTabSelected(MainTab.CLAUDE) }
-        )
-        BottomNavItem(
-            label = "카메라",
-            icon = Icons.Filled.Camera,
-            isSelected = selectedTab == MainTab.CAMERA,
-            onClick = { onTabSelected(MainTab.CAMERA) }
-        )
-        BottomNavItem(
-            label = "창작마당",
-            icon = Icons.Filled.Public,
-            isSelected = selectedTab == MainTab.CREATE,
-            onClick = { onTabSelected(MainTab.CREATE) }
-        )
-        BottomNavItem(
-            label = "프로필",
-            icon = Icons.Filled.Person,
-            isSelected = selectedTab == MainTab.PROFILE,
-            onClick = { onTabSelected(MainTab.PROFILE) }
-        )
-    }
-}
-
-@Composable
-fun BottomNavItem(
-    label: String,
-    icon: ImageVector,
-    isSelected: Boolean,
-    onClick: () -> Unit
-) {
-    val contentColor = if (isSelected) Color.Black else Color.Black.copy(alpha = 0.6f)
-    Column(
-        modifier = Modifier
-            .clickable { onClick() }
-            .padding(horizontal = 8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = label,
-            tint = contentColor,
-            modifier = Modifier.size(24.dp)
-        )
-        Text(
-            text = label,
-            color = contentColor,
-            fontSize = 12.sp
-        )
-    }
-}
-
-private val LibraryHubThumbRadius = 26.dp
-
-@Composable
-private fun PlyModelThumbnailImage(
-    model: PlyModel,
-    thumbRefresh: Int,
-    modifier: Modifier = Modifier
-) {
-    val context = LocalContext.current
-    var thumbUri by remember(model.file.absolutePath) { mutableStateOf<Uri?>(null) }
-    LaunchedEffect(model.file.absolutePath, model.lastModified, thumbRefresh) {
-        thumbUri = try {
-            Model3dThumbnail.generateOrGetAsync(context, model.file)?.let { Uri.fromFile(it) }
-        } catch (_: Throwable) {
-            null
-        }
-    }
-    Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        if (thumbUri != null) {
-            Image(
-                painter = rememberAsyncImagePainter(thumbUri),
-                contentDescription = model.name,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
-        } else {
-            Icon(
-                imageVector = Icons.Filled.Public,
-                contentDescription = "3D Model",
-                tint = Color(0xFF7ED321),
-                modifier = Modifier.size(48.dp)
-            )
-        }
-    }
-}
-
-/** AI CAD 라이브러리 STL 그리드 셀: [Model3dThumbnail] + 그리드용 Coil 크기 */
-@Composable
-private fun AiCadStlGridThumbnail(
-    stlFile: File,
-    libraryVersion: Int,
-    thumbEdgePx: Int,
-    modifier: Modifier = Modifier
-) {
-    val context = LocalContext.current
-    var thumbUri by remember(stlFile.absolutePath, stlFile.lastModified(), libraryVersion) {
-        mutableStateOf<Uri?>(null)
-    }
-    LaunchedEffect(stlFile.absolutePath, stlFile.lastModified(), libraryVersion) {
-        thumbUri = try {
-            Model3dThumbnail.generateOrGetAsync(context, stlFile)?.let { Uri.fromFile(it) }
-        } catch (_: Throwable) {
-            null
-        }
-    }
-    Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        if (thumbUri != null) {
-            Image(
-                painter = rememberGalleryGridPhotoPainter(thumbUri!!, thumbEdgePx),
-                contentDescription = "AI CAD STL 미리보기",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
-        } else {
-            Icon(
-                imageVector = Icons.Filled.Build,
-                contentDescription = "STL",
-                tint = Color(0xFF9CD83B),
-                modifier = Modifier.size(48.dp)
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun Model3dLibraryGridItem(
-    model: PlyModel,
-    thumbRefresh: Int,
-    isSelected: Boolean,
-    onClick: () -> Unit,
-    onLongClick: () -> Unit
-) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.combinedClickable(
-            onClick = onClick,
-            onLongClick = onLongClick
-        )
-    ) {
-        Box(
-            modifier = Modifier
-                .aspectRatio(1f)
-                .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xFF1A1A1A))
-                .border(
-                    width = if (isSelected) 4.dp else 1.dp,
-                    color = if (isSelected) Color.Blue
-                    else Color.White.copy(alpha = 0.2f),
-                    shape = RoundedCornerShape(8.dp)
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            PlyModelThumbnailImage(
-                model = model,
-                thumbRefresh = thumbRefresh,
-                modifier = Modifier.fillMaxSize()
-            )
-            if (isSelected) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(8.dp)
-                        .size(28.dp)
-                        .background(Color(0xFF7ED321), CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Check,
-                        contentDescription = "선택됨",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-            }
-        }
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = model.file.name,
-            color = Color.White,
-            fontSize = 12.sp,
-            maxLines = 1,
-            textAlign = TextAlign.Center
-        )
-    }
-}
-
-/** 3D 모델 탭: PLY / OBJ 포맷별 서브 라이브러리 카드 (메인 허브와 동일한 카드 스타일) */
-@Composable
-private fun Model3dFormatHubGrid(
-    plyCount: Int,
-    objCount: Int,
-    plyCoverUri: Uri?,
-    objCoverUri: Uri?,
-    onOpenPly: () -> Unit,
-    onOpenObj: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
-        modifier = modifier,
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp)
-    ) {
-        items(2, key = { if (it == 0) "hub_ply" else "hub_obj" }) { idx ->
-            val title = if (idx == 0) "PLY" else "OBJ"
-            val countLabel = if (idx == 0) "${plyCount}개" else "${objCount}개"
-            val coverUri = if (idx == 0) plyCoverUri else objCoverUri
-            val tint = if (idx == 0) Color(0xFF9CD83B) else Color(0xFF7ED321)
-            val onOpen = if (idx == 0) onOpenPly else onOpenObj
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onOpen),
-                horizontalAlignment = Alignment.Start
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1f)
-                        .clip(RoundedCornerShape(LibraryHubThumbRadius))
-                        .background(Color(0xFF1C1C1E))
-                ) {
-                    if (coverUri != null) {
-                        Image(
-                            painter = rememberAsyncImagePainter(coverUri),
-                            contentDescription = title,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    } else {
-                        Box(
-                            modifier = Modifier.fillMaxSize(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Public,
-                                contentDescription = null,
-                                tint = tint.copy(alpha = 0.85f),
-                                modifier = Modifier.size(44.dp)
-                            )
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = title,
-                    color = Color.White,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1
-                )
-                Text(
-                    text = countLabel,
-                    color = Color.White.copy(alpha = 0.45f),
-                    fontSize = 13.sp,
-                    maxLines = 1
-                )
-            }
-        }
-    }
-}
-
-/** 갤럭시 갤러리 스타일 라이브러리 앨범 허브 (3열 그리드) */
-@Composable
-private fun LibraryAlbumHubGrid(
-    images: List<Uri>,
-    datasetFolders: List<DatasetFolder>,
-    model3dTotalCount: Int,
-    model3dCoverUri: Uri?,
-    aiCadStlFiles: List<File>,
-    onOpenSection: (LibraryTab) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val galleryCover = images.firstOrNull()
-    val datasetCover = datasetFolders.maxByOrNull { it.dir.lastModified() }?.coverUri
-        ?: datasetFolders.firstOrNull()?.coverUri
-    val cadCoverUri: Uri? = aiCadStlFiles.firstOrNull()?.let { stl ->
-        val glb = File(stl.parent ?: "", "${stl.nameWithoutExtension}.glb")
-        if (glb.isFile) Uri.fromFile(glb) else null
-    }
-
-    data class HubEntry(
-        val tab: LibraryTab,
-        val title: String,
-        val countLabel: String,
-        val coverUri: Uri?,
-        val placeholderIcon: ImageVector,
-        val placeholderTint: Color
-    )
-
-    val entries = listOf(
-        HubEntry(
-            LibraryTab.MODEL_3D, "3D 모델",
-            "${model3dTotalCount}개",
-            model3dCoverUri,
-            Icons.Filled.Public,
-            Color(0xFF7ED321)
-        ),
-        HubEntry(
-            LibraryTab.AI_CAD, "AI CAD",
-            "${aiCadStlFiles.size}개",
-            cadCoverUri,
-            Icons.Filled.Build,
-            Color(0xFF9CD83B)
-        ),
-        HubEntry(
-            LibraryTab.DATASET, "데이터셋폴더",
-            "${datasetFolders.size}개",
-            datasetCover,
-            Icons.Filled.Folder,
-            Color(0xFF8E8E93)
-        ),
-        HubEntry(
-            LibraryTab.GALLERY, "갤러리",
-            "${images.size}장",
-            galleryCover,
-            Icons.Filled.PhotoLibrary,
-            Color(0xFF5AC8FA)
-        )
-    )
-
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(3),
-        modifier = modifier,
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp)
-    ) {
-        items(entries.size, key = { entries[it].tab.name }) { idx ->
-            val e = entries[idx]
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onOpenSection(e.tab) },
-                horizontalAlignment = Alignment.Start
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1f)
-                        .clip(RoundedCornerShape(LibraryHubThumbRadius))
-                        .background(Color(0xFF1C1C1E))
-                ) {
-                    if (e.coverUri != null) {
-                        Image(
-                            painter = rememberAsyncImagePainter(e.coverUri),
-                            contentDescription = e.title,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    } else {
-                        Box(
-                            modifier = Modifier.fillMaxSize(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = e.placeholderIcon,
-                                contentDescription = null,
-                                tint = e.placeholderTint.copy(alpha = 0.85f),
-                                modifier = Modifier.size(44.dp)
-                            )
-                        }
-                    }
-                    if (e.tab == LibraryTab.GALLERY) {
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.BottomStart)
-                                .padding(8.dp)
-                                .background(Color.Black.copy(alpha = 0.55f), CircleShape)
-                                .padding(5.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Camera,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = e.title,
-                    color = Color.White,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1
-                )
-                Text(
-                    text = e.countLabel,
-                    color = Color.White.copy(alpha = 0.45f),
-                    fontSize = 13.sp,
-                    maxLines = 1
-                )
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun GalleryScreen(
-    images: List<Uri>,
-    libraryTab: LibraryTab,
-    aiCadLibraryVersion: Int = 0,
-    showLibraryHub: Boolean,
-    onLibraryHubVisibilityChange: (Boolean) -> Unit,
-    onLibraryTabChange: (LibraryTab) -> Unit,
-    onMediaSelected: (Uri, List<Uri>) -> Unit,
-    onImageDeleted: () -> Unit,
-    onAiCadLibraryInvalidate: () -> Unit = {},
-    galleryGridState: androidx.compose.foundation.lazy.grid.LazyGridState =
-        androidx.compose.foundation.lazy.grid.rememberLazyGridState()
-) {
-    val context = LocalContext.current
-    /** 그리드 셀에 맞춘 디코딩 크기 — 사진(Coil)·동영상 첫 프레임 공통 */
-    val gridThumbPx = rememberGalleryGridThumbEdgePx(columns = 4)
-    val noServerResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
-    var isEditMode by remember { mutableStateOf(false) }
-    var selectedItems by remember { mutableStateOf<Set<Uri>>(emptySet()) }
-    var isUploading by remember { mutableStateOf(false) }
-    var uploadProgress by remember { mutableStateOf(0 to 0) } // (current, total)
-    var uploadMessage by remember { mutableStateOf<String?>(null) }
-    var uploadSourceTab by remember { mutableStateOf<LibraryTab?>(null) }
-    var showUploadResultPopup by remember { mutableStateOf(false) }
-    var uploadResultPopupMessage by remember { mutableStateOf<String?>(null) }
-    
-    var showDeleteConfirm by remember { mutableStateOf(false) }
-    var showDeleteAllConfirm by remember { mutableStateOf(false) }
-    var isDatasetEditMode by remember { mutableStateOf(false) }
-    var selectedDatasetFolders by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var showDatasetDeleteConfirm by remember { mutableStateOf(false) }
-    var libraryAssetEditMode by remember { mutableStateOf(false) }
-    var selectedLibraryAssetPaths by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var showLibraryAssetDeleteConfirm by remember { mutableStateOf(false) }
-    var showGalleryOverflowMenu by remember { mutableStateOf(false) }
-    var showDatasetOverflowMenu by remember { mutableStateOf(false) }
-    var pendingGalleryMenuAction by remember { mutableStateOf(PendingGalleryMenuAction.None) }
-    var pendingDatasetMenuAction by remember { mutableStateOf(PendingDatasetMenuAction.None) }
-    /** 갤러리 [selectedItems] 대신 배경 제거 대상(데이터셋폴더에서 모은 URI) */
-    var pendingBulkImageUrisForBgRemove by remember { mutableStateOf<List<Uri>?>(null) }
-    /** 배경 제거가 데이터셋 폴더에서 시작된 경우, 결과 저장용 새 폴더 이름에 쓸 원본 폴더 경로 집합 */
-    var pendingDatasetFolderPathsForBulkBgRemove by remember { mutableStateOf<Set<String>?>(null) }
-    var showDatasetDeleteAllConfirm by remember { mutableStateOf(false) }
-    var showNewDatasetFolderNameDialog by remember { mutableStateOf(false) }
-    var newDatasetFolderNameInput by remember { mutableStateOf("") }
-    var pendingDatasetFolderImageUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    var datasetFolders by remember { mutableStateOf<List<DatasetFolder>>(emptyList()) }
-    var datasetImages by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    var currentDatasetFolder by remember { mutableStateOf<DatasetFolder?>(null) }
-    var libraryDetailScreen by remember { mutableStateOf(LibraryDetailScreen.NONE) }
-    var plyLibraryModels by remember { mutableStateOf<List<PlyModel>>(emptyList()) }
-    var objLibraryModels by remember { mutableStateOf<List<PlyModel>>(emptyList()) }
-    val allModel3dLibrary = plyLibraryModels + objLibraryModels
-    var currentPlyModel by remember { mutableStateOf<PlyModel?>(null) }
-
-    val objViewerPathKey =
-        if (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER && currentPlyModel != null) {
-            currentPlyModel!!.file.absolutePath
-        } else {
-            null
-        }
-    var objViewerConverting by remember(objViewerPathKey) { mutableStateOf(true) }
-    var objViewerObjFile by remember(objViewerPathKey) { mutableStateOf<File?>(null) }
-    var objViewerPreviewMesh by remember(objViewerPathKey) { mutableStateOf<ObjParseResult?>(null) }
-    var objViewerError by remember(objViewerPathKey) { mutableStateOf<String?>(null) }
-    var objViewerSaving by remember(objViewerPathKey) { mutableStateOf(false) }
-
-    var libraryHubModel3dCoverUri by remember { mutableStateOf<Uri?>(null) }
-    var plySubHubCoverUri by remember { mutableStateOf<Uri?>(null) }
-    var objSubHubCoverUri by remember { mutableStateOf<Uri?>(null) }
-    var libraryModelThumbRefresh by remember { mutableStateOf(0) }
-
-    var aiCadStlFiles by remember { mutableStateOf<List<File>>(emptyList()) }
-    var selectedAiCadStlFile by remember { mutableStateOf<File?>(null) }
-
-    // [추가] 내보내기/가져오기 작업 상태
-    var isTransferring by remember { mutableStateOf(false) }
-    val transferScope = rememberCoroutineScope()
-
-    LaunchedEffect(objViewerPathKey) {
-        if (objViewerPathKey == null) return@LaunchedEffect
-        val plyFile = File(objViewerPathKey)
-        objViewerConverting = true
-        objViewerError = null
-        objViewerObjFile = null
-        objViewerPreviewMesh = null
-        objViewerSaving = false
-        try {
-            if (plyFile.extension.equals("obj", ignoreCase = true)) {
-                val mesh = withContext(Dispatchers.IO) {
-                    parseObjVertices(plyFile)
-                }
-                objViewerPreviewMesh = mesh
-                objViewerObjFile = plyFile
-                objViewerError = if (mesh == null) {
-                    "OBJ를 읽을 수 없습니다."
-                } else {
-                    null
-                }
-                objViewerConverting = false
-            } else {
-                val savedObj = File(ModelLibraryPaths.objDir(context), "${plyFile.nameWithoutExtension}.obj")
-                if (savedObj.exists() &&
-                    savedObj.length() > 0L &&
-                    savedObj.lastModified() >= plyFile.lastModified()
-                ) {
-                    val mesh = withContext(Dispatchers.IO) {
-                        parseObjVertices(savedObj)
-                    }
-                    objViewerPreviewMesh = mesh
-                    objViewerObjFile = savedObj
-                    objViewerError = if (mesh == null) {
-                        "저장된 OBJ를 읽을 수 없습니다."
-                    } else {
-                        null
-                    }
-                    objViewerConverting = false
-                } else {
-                    val result = withContext(Dispatchers.IO) {
-                        convertPlyToObjCached(context, plyFile)
-                    }
-                    val out = result.file
-                    objViewerPreviewMesh = result.previewMesh
-                    if (out == null || !out.exists()) {
-                        objViewerError = result.error ?: "OBJ 변환에 실패했습니다."
-                        objViewerConverting = false
-                    } else {
-                        objViewerObjFile = out
-                        objViewerConverting = false
-                    }
-                }
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            objViewerError = "처리 중 오류: ${t.message ?: t.javaClass.simpleName}"
-            objViewerConverting = false
-        }
-    }
-
-    val model3dCoverSource = remember(plyLibraryModels, objLibraryModels) {
-        (plyLibraryModels + objLibraryModels).maxByOrNull { it.lastModified }
-    }
-    LaunchedEffect(
-        model3dCoverSource?.file?.absolutePath,
-        model3dCoverSource?.lastModified,
-        libraryModelThumbRefresh
-    ) {
-        val f = model3dCoverSource?.file
-        if (f == null) {
-            libraryHubModel3dCoverUri = null
-            return@LaunchedEffect
-        }
-        libraryHubModel3dCoverUri = try {
-            Model3dThumbnail.generateOrGetAsync(context, f)?.let { Uri.fromFile(it) }
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
-    val plySubHubSource = remember(plyLibraryModels) {
-        plyLibraryModels.maxByOrNull { it.lastModified }?.file
-    }
-    LaunchedEffect(
-        plySubHubSource?.absolutePath,
-        plySubHubSource?.lastModified(),
-        libraryModelThumbRefresh
-    ) {
-        val f = plySubHubSource
-        if (f == null) {
-            plySubHubCoverUri = null
-            return@LaunchedEffect
-        }
-        plySubHubCoverUri = try {
-            Model3dThumbnail.generateOrGetAsync(context, f)?.let { Uri.fromFile(it) }
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
-    val objSubHubSource = remember(objLibraryModels) {
-        objLibraryModels.maxByOrNull { it.lastModified }?.file
-    }
-    LaunchedEffect(
-        objSubHubSource?.absolutePath,
-        objSubHubSource?.lastModified(),
-        libraryModelThumbRefresh
-    ) {
-        val f = objSubHubSource
-        if (f == null) {
-            objSubHubCoverUri = null
-            return@LaunchedEffect
-        }
-        objSubHubCoverUri = try {
-            Model3dThumbnail.generateOrGetAsync(context, f)?.let { Uri.fromFile(it) }
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
-    // [추가] 1차 배경제거 작업 상태
-    var isBgRemoving by remember { mutableStateOf(false) }
-    var showBgRemoveDialog by remember { mutableStateOf(false) }
-    var bgRemovePrompt by remember { mutableStateOf("") }
-    var bgRemovePromptError by remember { mutableStateOf(false) }
-
-    // [추가] 광택 제거 작업 상태
-    var isGlareRemoving by remember { mutableStateOf(false) }
-    var glareProgressPercent by remember { mutableStateOf(0) }
-    var glareProgressMessage by remember { mutableStateOf("") }
-    var glareResultMessage by remember { mutableStateOf<String?>(null) }
-
-    // 3D 모델링 전송 팝업 상태
-    var show3DModelingDialog by remember { mutableStateOf(false) }
-    var modelingPromptText by remember { mutableStateOf("") }
-    var modelingPromptError by remember { mutableStateOf(false) }
-    var pending3DSourceTab by remember { mutableStateOf<LibraryTab?>(null) }
-    var pending3DGalleryUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    var pending3DDatasetFolders by remember { mutableStateOf<List<String>>(emptyList()) }
-    var sam3ProgressPercent by remember { mutableStateOf(0) }
-    var sam3ProgressMessage by remember { mutableStateOf("") }
-    var sam3ResultMessage by remember { mutableStateOf<String?>(null) }
-
-    // [추가] 가져오기 런처 (시스템 갤러리/파일 선택)
-    val importLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetMultipleContents()
-    ) { uris ->
-        if (uris.isNullOrEmpty()) {
-            uploadSourceTab = LibraryTab.GALLERY
-            uploadMessage = "가져오기가 취소되었습니다."
-            return@rememberLauncherForActivityResult
-        }
-        if (isUploading || isTransferring) {
-            uploadSourceTab = LibraryTab.GALLERY
-            uploadMessage = "다른 작업이 진행 중입니다."
-            return@rememberLauncherForActivityResult
-        }
-        isTransferring = true
-        uploadSourceTab = LibraryTab.GALLERY
-        uploadMessage = "가져오는 중..."
-        transferScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                importImagesToAppLibrary(context, uris)
-            }
-            uploadMessage = result.message
-            isTransferring = false
-            if (result.successCount > 0) {
-                onImageDeleted() // 목록 갱신
-            }
-        }
-    }
-
-    fun runExportGallerySelection() {
-        if (selectedItems.isEmpty()) {
-            Toast.makeText(context, "선택된 이미지가 없습니다.", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (isUploading || isTransferring) {
-            Toast.makeText(context, "다른 작업이 진행 중입니다.", Toast.LENGTH_SHORT).show()
-            return
-        }
-        isTransferring = true
-        uploadSourceTab = LibraryTab.GALLERY
-        uploadMessage = "내보내는 중..."
-        val items = selectedItems.toList()
-        transferScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                exportImagesToSystemGallery(context, items)
-            }
-            uploadMessage = result.message
-            isTransferring = false
-            if (pendingGalleryMenuAction == PendingGalleryMenuAction.Export) {
-                pendingGalleryMenuAction = PendingGalleryMenuAction.None
-            }
-        }
-    }
-
-    fun runShareGallerySelection(urisOverride: List<Uri>? = null) {
-        val list = urisOverride ?: selectedItems.toList()
-        if (list.isEmpty()) {
-            Toast.makeText(context, "선택된 미디어가 없습니다.", Toast.LENGTH_SHORT).show()
-            return
-        }
-        shareGalleryMediaUris(context, list)
-        if (pendingGalleryMenuAction == PendingGalleryMenuAction.Share) {
-            pendingGalleryMenuAction = PendingGalleryMenuAction.None
-        }
-    }
-
-    fun runGlareRemovalOnGallerySelection(
-        urisOverride: List<Uri>? = null,
-        datasetSourceFolderPaths: Set<String>? = null
-    ) {
-        val itemsFiltered = (urisOverride ?: selectedItems.toList())
-            .filter { !isVideoUri(context, it) }
-        val glareEnabled =
-            itemsFiltered.isNotEmpty() && !isUploading && !isTransferring && !isGlareRemoving && !isBgRemoving
-        if (!glareEnabled) {
-            Toast.makeText(
-                context,
-                "선택된 이미지가 없거나 다른 작업 중입니다.",
-                Toast.LENGTH_SHORT
-            ).show()
-            return
-        }
-        val fromDatasetFolders = urisOverride != null
-        val outputDir: File = if (
-            fromDatasetFolders &&
-            !datasetSourceFolderPaths.isNullOrEmpty()
-        ) {
-            createDatasetBatchResultFolder(context, datasetSourceFolderPaths, "광택제거")
-        } else {
-            context.getExternalFilesDir(null) ?: context.filesDir
-        }
-        isGlareRemoving = true
-        glareProgressPercent = 0
-        glareProgressMessage = "준비 중..."
-        val items = itemsFiltered
-        val total = items.size
-        transferScope.launch {
-            val glareStartMs = System.currentTimeMillis()
-            startOrUpdateForegroundService(
-                context, "광택 제거 중 (${total}장)", 0, "준비 중...", glareStartMs
-            )
-            var successCount = 0
-            var failCount = 0
-            items.forEachIndexed { index, uri ->
-                val itemLabel = if (total > 1) " (${index + 1}/$total)" else ""
-                val basePercent = index * 95 / total
-                val nextPercent = (index + 1) * 95 / total
-
-                glareProgressPercent = basePercent
-                glareProgressMessage = "이미지 로드 중...$itemLabel"
-                startOrUpdateForegroundService(
-                    context, "광택 제거 중 (${total}장)",
-                    basePercent, "이미지 로드 중...$itemLabel", glareStartMs
-                )
-
-                val result = withContext(Dispatchers.IO) {
-                    GlareRemovalProcessor.removeGlare(
-                        context = context,
-                        sourceUri = uri,
-                        outputDir = outputDir,
-                        onProgress = { step, totalSteps ->
-                            if (totalSteps > 0) {
-                                val frac = step.toFloat() / totalSteps
-                                val mapped = basePercent +
-                                    (frac * (nextPercent - basePercent)).toInt()
-                                glareProgressPercent = mapped.coerceIn(basePercent, nextPercent - 1)
-                                val stepMsg = when (step) {
-                                    1 -> "이미지 로드...$itemLabel"
-                                    2 -> "빛반사 영역 탐지...$itemLabel"
-                                    3 -> "마스크 정제...$itemLabel"
-                                    4 -> "조명층 완화...$itemLabel"
-                                    5 -> "주변 색 맞춤...$itemLabel"
-                                    6 -> "경계·질감...$itemLabel"
-                                    7 -> "색 보정...$itemLabel"
-                                    else -> "저장 중...$itemLabel"
-                                }
-                                glareProgressMessage = stepMsg
-                                startOrUpdateForegroundService(
-                                    context, "광택 제거 중 (${total}장)",
-                                    glareProgressPercent, stepMsg, glareStartMs
-                                )
-                            }
-                        }
-                    )
-                }
-
-                when (result) {
-                    is GlareRemovalProcessor.Result.Success -> {
-                        successCount++
-                        glareProgressPercent = nextPercent
-                        glareProgressMessage = "완료$itemLabel"
-                    }
-                    is GlareRemovalProcessor.Result.Error -> {
-                        failCount++
-                        glareProgressMessage = "오류: ${result.message}"
-                    }
-                }
-            }
-            glareProgressPercent = 100
-            isGlareRemoving = false
-            glareResultMessage = when {
-                successCount > 0 && failCount == 0 && fromDatasetFolders ->
-                    "광택 제거 완료\n${successCount}장이 새 데이터셋 폴더 「${outputDir.name}」에 저장되었습니다."
-                successCount > 0 && failCount == 0 ->
-                    "광택 제거 완료\n${successCount}장이 앱 갤러리에 저장되었습니다."
-                successCount > 0 && fromDatasetFolders ->
-                    "광택 제거 완료\n${successCount}장 성공, ${failCount}장 실패\n성공분은 「${outputDir.name}」에 저장되었습니다."
-                successCount > 0 ->
-                    "광택 제거 완료\n${successCount}장 성공, ${failCount}장 실패"
-                else ->
-                    "광택 제거 실패\n이미지에서 광택이 검출되지 않았거나 처리 중 오류가 발생했습니다."
-            }
-            val doneMsg = if (successCount > 0) "${successCount}장 완료" else "처리 실패"
-            stopForegroundService(context, "광택 제거 완료", doneMsg)
-            if (successCount > 0) {
-                selectedItems = emptySet()
-                isEditMode = false
-                pendingGalleryMenuAction = PendingGalleryMenuAction.None
-                if (fromDatasetFolders) {
-                    isDatasetEditMode = false
-                    selectedDatasetFolders = emptySet()
-                    pendingDatasetMenuAction = PendingDatasetMenuAction.None
-                    loadDatasetFolders(context) { datasetFolders = it }
-                }
-                onImageDeleted()
-            }
-        }
-    }
-
-    // 뒤로가기 버튼 처리 (편집 모드에서만)
-    BackHandler(enabled = isEditMode || isDatasetEditMode || libraryAssetEditMode) {
-        when {
-            libraryTab == LibraryTab.DATASET && isDatasetEditMode -> {
-                isDatasetEditMode = false
-                selectedDatasetFolders = emptySet()
-                pendingDatasetMenuAction = PendingDatasetMenuAction.None
-            }
-            libraryAssetEditMode -> {
-                libraryAssetEditMode = false
-                selectedLibraryAssetPaths = emptySet()
-            }
-            else -> {
-                isEditMode = false
-                selectedItems = emptySet()
-                pendingGalleryMenuAction = PendingGalleryMenuAction.None
-            }
-        }
-    }
-
-    val atLibrarySectionRoot = !showLibraryHub &&
-        libraryDetailScreen == LibraryDetailScreen.NONE &&
-        selectedAiCadStlFile == null &&
-        !isEditMode &&
-        !isDatasetEditMode &&
-        !libraryAssetEditMode
-
-    BackHandler(enabled = atLibrarySectionRoot) {
-        onLibraryHubVisibilityChange(true)
-    }
-
-    LaunchedEffect(libraryTab) {
-        libraryAssetEditMode = false
-        selectedLibraryAssetPaths = emptySet()
-        showLibraryAssetDeleteConfirm = false
-        if (libraryTab != LibraryTab.GALLERY) {
-            showGalleryOverflowMenu = false
-            pendingGalleryMenuAction = PendingGalleryMenuAction.None
-        }
-        if (libraryTab != LibraryTab.GALLERY && isEditMode) {
-            isEditMode = false
-            selectedItems = emptySet()
-        }
-        if (libraryTab != LibraryTab.DATASET && isDatasetEditMode) {
-            isDatasetEditMode = false
-            selectedDatasetFolders = emptySet()
-        }
-        if (libraryTab == LibraryTab.DATASET) {
-            loadDatasetFolders(context) { folders ->
-                datasetFolders = folders
-            }
-        }
-        if (libraryTab == LibraryTab.MODEL_3D) {
-            loadModel3dLibrary(context) { lib ->
-                plyLibraryModels = lib.plyModels
-                objLibraryModels = lib.objModels
-            }
-        }
-        if (libraryTab != LibraryTab.MODEL_3D) {
-            if (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER ||
-                libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ||
-                libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST
-            ) {
-                libraryDetailScreen = LibraryDetailScreen.NONE
-                currentPlyModel = null
-            }
-        }
-    }
-
-    LaunchedEffect(showLibraryHub) {
-        if (showLibraryHub) {
-            libraryAssetEditMode = false
-            selectedLibraryAssetPaths = emptySet()
-            showLibraryAssetDeleteConfirm = false
-            showGalleryOverflowMenu = false
-            pendingGalleryMenuAction = PendingGalleryMenuAction.None
-        }
-    }
-
-    LaunchedEffect(libraryTab, aiCadLibraryVersion) {
-        if (libraryTab == LibraryTab.AI_CAD) {
-            aiCadStlFiles = withContext(Dispatchers.IO) { AiCadLibrary.listStlFiles(context) }
-        } else {
-            selectedAiCadStlFile = null
-        }
-    }
-
-    // [추가] 데이터셋 탭에서 0장(빈) 폴더 주기적 자동 삭제/갱신
-    // - 폴더 상세 화면에서는 폴더가 사라지면 UX가 깨질 수 있어 제외
-    LaunchedEffect(libraryTab, libraryDetailScreen) {
-        if (libraryTab != LibraryTab.DATASET) return@LaunchedEffect
-        if (libraryDetailScreen == LibraryDetailScreen.DATASET_FOLDER) return@LaunchedEffect
-
-        while (true) {
-            val folders = withContext(Dispatchers.IO) { loadDatasetFoldersSync(context) }
-            datasetFolders = folders
-            delay(10_000) // 10초마다 정리/갱신
-        }
-    }
-
-    // 앨범 허브에 표시할 최신 개수·표지용 데이터 선로드
-    LaunchedEffect(showLibraryHub, aiCadLibraryVersion, images.size) {
-        if (!showLibraryHub) return@LaunchedEffect
-        loadDatasetFolders(context) { datasetFolders = it }
-        loadModel3dLibrary(context) { lib ->
-            plyLibraryModels = lib.plyModels
-            objLibraryModels = lib.objModels
-        }
-        aiCadStlFiles = withContext(Dispatchers.IO) { AiCadLibrary.listStlFiles(context) }
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(AppBackgroundColor)
-    ) {
-        // 헤더 (허브: 제목만 / 구역: ‹ 뒤로 + 현재 구역명 + 취소)
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp)
-        ) {
-            if (showLibraryHub) {
-                Text(
-                    text = "라이브러리",
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
-            } else {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "‹",
-                        color = Color.White,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable {
-                                when {
-                                    libraryTab == LibraryTab.MODEL_3D &&
-                                        libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER -> {
-                                        val f = currentPlyModel?.file
-                                        libraryDetailScreen =
-                                            if (f?.extension?.equals("obj", ignoreCase = true) == true) {
-                                                LibraryDetailScreen.MODEL_3D_OBJ_LIST
-                                            } else {
-                                                LibraryDetailScreen.MODEL_3D_PLY_LIST
-                                            }
-                                        currentPlyModel = null
-                                    }
-                                    libraryTab == LibraryTab.MODEL_3D && (
-                                        libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ||
-                                            libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST
-                                        ) -> {
-                                        libraryDetailScreen = LibraryDetailScreen.NONE
-                                        libraryAssetEditMode = false
-                                        selectedLibraryAssetPaths = emptySet()
-                                    }
-                                    else -> onLibraryHubVisibilityChange(true)
-                                }
-                            }
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        text = when {
-                            libraryTab == LibraryTab.MODEL_3D &&
-                                libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER ->
-                                currentPlyModel?.file?.name ?: "3D 모델"
-                            libraryTab == LibraryTab.MODEL_3D &&
-                                libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ->
-                                "PLY 라이브러리"
-                            libraryTab == LibraryTab.MODEL_3D &&
-                                libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST ->
-                                "OBJ 라이브러리"
-                            else -> when (libraryTab) {
-                                LibraryTab.MODEL_3D -> "3D 모델"
-                                LibraryTab.AI_CAD -> "AI CAD"
-                                LibraryTab.DATASET -> "데이터셋폴더"
-                                LibraryTab.GALLERY -> "갤러리"
-                            }
-                        },
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        modifier = Modifier.weight(1f)
-                    )
-                    if (libraryTab == LibraryTab.GALLERY && !showLibraryHub &&
-                        isEditMode &&
-                        pendingGalleryMenuAction != PendingGalleryMenuAction.None
-                    ) {
-                        Text(
-                            text = "확인",
-                            color = Color(0xFF9CD83B),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
-                                .border(1.dp, Color(0xFF9CD83B), RoundedCornerShape(12.dp))
-                                .clickable {
-                                    when (pendingGalleryMenuAction) {
-                                        PendingGalleryMenuAction.BackgroundRemove -> {
-                                            if (selectedItems.isEmpty()) {
-                                                Toast.makeText(
-                                                    context,
-                                                    "선택된 이미지가 없습니다.",
-                                                    Toast.LENGTH_SHORT
-                                                ).show()
-                                            } else {
-                                                bgRemovePrompt = ""
-                                                bgRemovePromptError = false
-                                                showBgRemoveDialog = true
-                                            }
-                                        }
-                                        PendingGalleryMenuAction.GlareRemove -> {
-                                            runGlareRemovalOnGallerySelection()
-                                        }
-                                        PendingGalleryMenuAction.CreateDatasetFolder -> {
-                                            val imageUris = selectedItems.filter { !isVideoUri(context, it) }
-                                            if (imageUris.isEmpty()) {
-                                                Toast.makeText(
-                                                    context,
-                                                    "폴더에 넣을 이미지를 선택해 주세요. (동영상은 제외됩니다.)",
-                                                    Toast.LENGTH_SHORT
-                                                ).show()
-                                            } else {
-                                                pendingDatasetFolderImageUris = imageUris
-                                                newDatasetFolderNameInput = ""
-                                                showNewDatasetFolderNameDialog = true
-                                            }
-                                        }
-                                        PendingGalleryMenuAction.Export -> {
-                                            runExportGallerySelection()
-                                        }
-                                        PendingGalleryMenuAction.Share -> {
-                                            runShareGallerySelection()
-                                        }
-                                        PendingGalleryMenuAction.None -> {}
-                                    }
-                                }
-                                .padding(horizontal = 10.dp, vertical = 4.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                    }
-                    if (libraryTab == LibraryTab.DATASET && !showLibraryHub &&
-                        libraryDetailScreen == LibraryDetailScreen.NONE &&
-                        isDatasetEditMode &&
-                        pendingDatasetMenuAction != PendingDatasetMenuAction.None
-                    ) {
-                        Text(
-                            text = "확인",
-                            color = Color(0xFF9CD83B),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
-                                .border(1.dp, Color(0xFF9CD83B), RoundedCornerShape(12.dp))
-                                .clickable {
-                                    when (pendingDatasetMenuAction) {
-                                        PendingDatasetMenuAction.BackgroundRemove -> {
-                                            if (selectedDatasetFolders.isEmpty()) {
-                                                Toast.makeText(
-                                                    context,
-                                                    "선택된 폴더가 없습니다.",
-                                                    Toast.LENGTH_SHORT
-                                                ).show()
-                                            } else {
-                                                val uris = collectImageUrisFromDatasetFolderPaths(
-                                                    selectedDatasetFolders
-                                                ).filter { !isVideoUri(context, it) }
-                                                if (uris.isEmpty()) {
-                                                    Toast.makeText(
-                                                        context,
-                                                        "처리할 이미지가 없습니다.",
-                                                        Toast.LENGTH_SHORT
-                                                    ).show()
-                                                } else {
-                                                    pendingBulkImageUrisForBgRemove = uris
-                                                    pendingDatasetFolderPathsForBulkBgRemove =
-                                                        selectedDatasetFolders.toSet()
-                                                    bgRemovePrompt = ""
-                                                    bgRemovePromptError = false
-                                                    showBgRemoveDialog = true
-                                                    pendingDatasetMenuAction = PendingDatasetMenuAction.None
-                                                }
-                                            }
-                                        }
-                                        PendingDatasetMenuAction.GlareRemove -> {
-                                            if (selectedDatasetFolders.isEmpty()) {
-                                                Toast.makeText(
-                                                    context,
-                                                    "선택된 폴더가 없습니다.",
-                                                    Toast.LENGTH_SHORT
-                                                ).show()
-                                            } else {
-                                                val uris = collectImageUrisFromDatasetFolderPaths(
-                                                    selectedDatasetFolders
-                                                ).filter { !isVideoUri(context, it) }
-                                                if (uris.isEmpty()) {
-                                                    Toast.makeText(
-                                                        context,
-                                                        "처리할 이미지가 없습니다.",
-                                                        Toast.LENGTH_SHORT
-                                                    ).show()
-                                                } else {
-                                                    runGlareRemovalOnGallerySelection(
-                                                        urisOverride = uris,
-                                                        datasetSourceFolderPaths = selectedDatasetFolders.toSet()
-                                                    )
-                                                    pendingDatasetMenuAction = PendingDatasetMenuAction.None
-                                                }
-                                            }
-                                        }
-                                        PendingDatasetMenuAction.Share -> {
-                                            if (selectedDatasetFolders.isEmpty()) {
-                                                Toast.makeText(
-                                                    context,
-                                                    "선택된 폴더가 없습니다.",
-                                                    Toast.LENGTH_SHORT
-                                                ).show()
-                                            } else {
-                                                val uris = collectImageUrisFromDatasetFolderPaths(
-                                                    selectedDatasetFolders
-                                                ).filter { !isVideoUri(context, it) }
-                                                if (uris.isEmpty()) {
-                                                    Toast.makeText(
-                                                        context,
-                                                        "공유할 이미지가 없습니다.",
-                                                        Toast.LENGTH_SHORT
-                                                    ).show()
-                                                } else {
-                                                    runShareGallerySelection(uris)
-                                                    isDatasetEditMode = false
-                                                    selectedDatasetFolders = emptySet()
-                                                    pendingDatasetMenuAction = PendingDatasetMenuAction.None
-                                                }
-                                            }
-                                        }
-                                        PendingDatasetMenuAction.None -> {}
-                                    }
-                                }
-                                .padding(horizontal = 10.dp, vertical = 4.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                    }
-                    if (isEditMode || isDatasetEditMode || libraryAssetEditMode) {
-                        Text(
-                            text = "취소",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
-                                .border(1.dp, Color.White, RoundedCornerShape(12.dp))
-                                .clickable {
-                                    when {
-                                        libraryTab == LibraryTab.DATASET && isDatasetEditMode -> {
-                                            isDatasetEditMode = false
-                                            selectedDatasetFolders = emptySet()
-                                            pendingDatasetMenuAction = PendingDatasetMenuAction.None
-                                        }
-                                        libraryAssetEditMode -> {
-                                            libraryAssetEditMode = false
-                                            selectedLibraryAssetPaths = emptySet()
-                                        }
-                                        else -> {
-                                            isEditMode = false
-                                            selectedItems = emptySet()
-                                            pendingGalleryMenuAction = PendingGalleryMenuAction.None
-                                        }
-                                    }
-                                }
-                                .padding(horizontal = 10.dp, vertical = 4.dp)
-                        )
-                    } else if (
-                        libraryTab == LibraryTab.MODEL_3D &&
-                        !showLibraryHub &&
-                        libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER &&
-                        currentPlyModel != null
-                    ) {
-                        val plyF = currentPlyModel!!.file
-                        if (!objViewerConverting && objViewerError == null && objViewerObjFile != null &&
-                            plyF.extension.equals("ply", ignoreCase = true)
-                        ) {
-                            Text(
-                                text = if (objViewerSaving) "저장 중…" else "저장",
-                                color = if (objViewerSaving) Color.White.copy(alpha = 0.5f)
-                                else Color(0xFF9CD83B),
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .clickable(enabled = !objViewerSaving) {
-                                        val cached = objViewerObjFile ?: return@clickable
-                                        objViewerSaving = true
-                                        transferScope.launch {
-                                            val err = withContext(Dispatchers.IO) {
-                                                saveConvertedObjToModelsLibrary(context, plyF, cached)
-                                            }
-                                            objViewerSaving = false
-                                            if (err != null) {
-                                                Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
-                                            } else {
-                                                Model3dThumbnail.invalidateForModelFile(context, plyF)
-                                                Model3dThumbnail.invalidateForModelFile(
-                                                    context,
-                                                    File(
-                                                        ModelLibraryPaths.objDir(context),
-                                                        "${plyF.nameWithoutExtension}.obj"
-                                                    )
-                                                )
-                                                libraryModelThumbRefresh++
-                                                Toast.makeText(
-                                                    context,
-                                                    "OBJ가 라이브러리에 저장되었습니다.",
-                                                    Toast.LENGTH_SHORT
-                                                ).show()
-                                                loadModel3dLibrary(context) { lib ->
-                                                    plyLibraryModels = lib.plyModels
-                                                    objLibraryModels = lib.objModels
-                                                }
-                                            }
-                                        }
-                                    }
-                                    .padding(horizontal = 10.dp, vertical = 6.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                        }
-                        IconButton(
-                            onClick = {
-                                val f = currentPlyModel?.file
-                                libraryDetailScreen =
-                                    if (f?.extension?.equals("obj", ignoreCase = true) == true) {
-                                        LibraryDetailScreen.MODEL_3D_OBJ_LIST
-                                    } else {
-                                        LibraryDetailScreen.MODEL_3D_PLY_LIST
-                                    }
-                                currentPlyModel = null
-                            },
-                            modifier = Modifier.size(40.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Close,
-                                contentDescription = "닫기",
-                                tint = Color.White
-                            )
-                        }
-                    } else if (libraryTab == LibraryTab.GALLERY && !showLibraryHub) {
-                        Box {
-                            IconButton(
-                                onClick = { showGalleryOverflowMenu = true },
-                                modifier = Modifier.size(40.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.MoreVert,
-                                    contentDescription = "갤러리 메뉴",
-                                    tint = Color.White
-                                )
-                            }
-                            DropdownMenu(
-                                expanded = showGalleryOverflowMenu,
-                                onDismissRequest = { showGalleryOverflowMenu = false },
-                                modifier = Modifier
-                                    .widthIn(min = 220.dp)
-                                    .background(Color(0xFF2F2F2F), RoundedCornerShape(14.dp))
-                            ) {
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "1차 배경 제거",
-                                            color = Color.White,
-                                            fontSize = 15.sp
-                                        )
-                                    },
-                                    onClick = {
-                                        showGalleryOverflowMenu = false
-                                        isEditMode = true
-                                        selectedItems = emptySet()
-                                        pendingGalleryMenuAction = PendingGalleryMenuAction.BackgroundRemove
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "광택 제거",
-                                            color = Color.White,
-                                            fontSize = 15.sp
-                                        )
-                                    },
-                                    onClick = {
-                                        showGalleryOverflowMenu = false
-                                        isEditMode = true
-                                        selectedItems = emptySet()
-                                        pendingGalleryMenuAction = PendingGalleryMenuAction.GlareRemove
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "폴더 만들기",
-                                            color = Color.White,
-                                            fontSize = 15.sp
-                                        )
-                                    },
-                                    onClick = {
-                                        showGalleryOverflowMenu = false
-                                        if (!isUploading && !isTransferring && !isGlareRemoving) {
-                                            isEditMode = true
-                                            selectedItems = emptySet()
-                                            pendingGalleryMenuAction =
-                                                PendingGalleryMenuAction.CreateDatasetFolder
-                                        } else {
-                                            Toast.makeText(
-                                                context,
-                                                "다른 작업이 진행 중입니다.",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                        }
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "가져오기",
-                                            color = Color.White,
-                                            fontSize = 15.sp
-                                        )
-                                    },
-                                    onClick = {
-                                        showGalleryOverflowMenu = false
-                                        if (!isUploading && !isTransferring) {
-                                            importLauncher.launch("image/*")
-                                        }
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "내보내기",
-                                            color = Color.White,
-                                            fontSize = 15.sp
-                                        )
-                                    },
-                                    onClick = {
-                                        showGalleryOverflowMenu = false
-                                        isEditMode = true
-                                        selectedItems = emptySet()
-                                        pendingGalleryMenuAction = PendingGalleryMenuAction.Export
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "공유하기",
-                                            color = Color.White,
-                                            fontSize = 15.sp
-                                        )
-                                    },
-                                    onClick = {
-                                        showGalleryOverflowMenu = false
-                                        isEditMode = true
-                                        selectedItems = emptySet()
-                                        pendingGalleryMenuAction = PendingGalleryMenuAction.Share
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "전체선택",
-                                            color = Color.White,
-                                            fontSize = 15.sp
-                                        )
-                                    },
-                                    onClick = {
-                                        showGalleryOverflowMenu = false
-                                        if (images.isNotEmpty()) {
-                                            isEditMode = true
-                                            selectedItems = images.toSet()
-                                            pendingGalleryMenuAction = PendingGalleryMenuAction.None
-                                        } else {
-                                            Toast.makeText(
-                                                context,
-                                                "선택할 미디어가 없습니다.",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                        }
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "전체삭제",
-                                            color = Color.White,
-                                            fontSize = 15.sp
-                                        )
-                                    },
-                                    onClick = {
-                                        showGalleryOverflowMenu = false
-                                        if (!isUploading && !isTransferring) {
-                                            showDeleteAllConfirm = true
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                    } else if (
-                        libraryTab == LibraryTab.DATASET &&
-                        !showLibraryHub &&
-                        libraryDetailScreen == LibraryDetailScreen.NONE
-                    ) {
-                        Box {
-                            IconButton(
-                                onClick = { showDatasetOverflowMenu = true },
-                                modifier = Modifier.size(40.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.MoreVert,
-                                    contentDescription = "데이터셋폴더 메뉴",
-                                    tint = Color.White
-                                )
-                            }
-                            DropdownMenu(
-                                expanded = showDatasetOverflowMenu,
-                                onDismissRequest = { showDatasetOverflowMenu = false },
-                                modifier = Modifier
-                                    .widthIn(min = 220.dp)
-                                    .background(Color(0xFF2F2F2F), RoundedCornerShape(14.dp))
-                            ) {
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "1차 배경 제거",
-                                            color = Color.White,
-                                            fontSize = 15.sp
-                                        )
-                                    },
-                                    onClick = {
-                                        showDatasetOverflowMenu = false
-                                        if (!isUploading && !isTransferring && !isGlareRemoving && !isBgRemoving) {
-                                            isDatasetEditMode = true
-                                            selectedDatasetFolders = emptySet()
-                                            pendingDatasetMenuAction =
-                                                PendingDatasetMenuAction.BackgroundRemove
-                                        } else {
-                                            Toast.makeText(
-                                                context,
-                                                "다른 작업이 진행 중입니다.",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                        }
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "광택 제거",
-                                            color = Color.White,
-                                            fontSize = 15.sp
-                                        )
-                                    },
-                                    onClick = {
-                                        showDatasetOverflowMenu = false
-                                        if (!isUploading && !isTransferring && !isGlareRemoving && !isBgRemoving) {
-                                            isDatasetEditMode = true
-                                            selectedDatasetFolders = emptySet()
-                                            pendingDatasetMenuAction =
-                                                PendingDatasetMenuAction.GlareRemove
-                                        } else {
-                                            Toast.makeText(
-                                                context,
-                                                "다른 작업이 진행 중입니다.",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                        }
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "공유하기",
-                                            color = Color.White,
-                                            fontSize = 15.sp
-                                        )
-                                    },
-                                    onClick = {
-                                        showDatasetOverflowMenu = false
-                                        if (!isUploading && !isTransferring) {
-                                            isDatasetEditMode = true
-                                            selectedDatasetFolders = emptySet()
-                                            pendingDatasetMenuAction = PendingDatasetMenuAction.Share
-                                        } else {
-                                            Toast.makeText(
-                                                context,
-                                                "다른 작업이 진행 중입니다.",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                        }
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "전체선택",
-                                            color = Color.White,
-                                            fontSize = 15.sp
-                                        )
-                                    },
-                                    onClick = {
-                                        showDatasetOverflowMenu = false
-                                        if (datasetFolders.isNotEmpty()) {
-                                            isDatasetEditMode = true
-                                            selectedDatasetFolders =
-                                                datasetFolders.map { it.dir.absolutePath }.toSet()
-                                            pendingDatasetMenuAction = PendingDatasetMenuAction.None
-                                        } else {
-                                            Toast.makeText(
-                                                context,
-                                                "선택할 폴더가 없습니다.",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                        }
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "전체삭제",
-                                            color = Color.White,
-                                            fontSize = 15.sp
-                                        )
-                                    },
-                                    onClick = {
-                                        showDatasetOverflowMenu = false
-                                        if (!isUploading && !isTransferring) {
-                                            showDatasetDeleteAllConfirm = true
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            if (showLibraryHub) {
-                LibraryAlbumHubGrid(
-                    images = images,
-                    datasetFolders = datasetFolders,
-                    model3dTotalCount = allModel3dLibrary.size,
-                    model3dCoverUri = libraryHubModel3dCoverUri,
-                    aiCadStlFiles = aiCadStlFiles,
-                    onOpenSection = { tab ->
-                        onLibraryTabChange(tab)
-                        onLibraryHubVisibilityChange(false)
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else if (libraryTab == LibraryTab.MODEL_3D) {
-                if (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER && currentPlyModel != null) {
-                    BackHandler {
-                        val f = currentPlyModel?.file
-                        libraryDetailScreen =
-                            if (f?.extension?.equals("obj", ignoreCase = true) == true) {
-                                LibraryDetailScreen.MODEL_3D_OBJ_LIST
-                            } else {
-                                LibraryDetailScreen.MODEL_3D_PLY_LIST
-                            }
-                        currentPlyModel = null
-                    }
-                    val viewerSourceFile = currentPlyModel!!.file
-
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        when {
-                            objViewerConverting -> {
-                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                    Text(
-                                        text = if (viewerSourceFile.extension.equals("obj", ignoreCase = true)) {
-                                            "모델 불러오는 중..."
-                                        } else {
-                                            "OBJ 변환 중..."
-                                        },
-                                        color = Color.White,
-                                        fontSize = 16.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                            objViewerError != null -> {
-                                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                    Text(
-                                        text = objViewerError ?: "오류",
-                                        color = Color.White,
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        textAlign = TextAlign.Center
-                                    )
-                                }
-                            }
-                            objViewerObjFile != null -> {
-                                key(objViewerObjFile!!.absolutePath) {
-                                    AndroidView(
-                                        factory = { ctx ->
-                                            ObjSurfaceView(ctx).apply {
-                                                val mesh = objViewerPreviewMesh
-                                                if (mesh != null) {
-                                                    applyParsedMesh(mesh)
-                                                } else {
-                                                    loadModel(objViewerObjFile!!)
-                                                }
-                                            }
-                                        },
-                                        modifier = Modifier.fillMaxSize()
-                                    )
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    val listModels = when (libraryDetailScreen) {
-                        LibraryDetailScreen.MODEL_3D_PLY_LIST -> plyLibraryModels
-                        LibraryDetailScreen.MODEL_3D_OBJ_LIST -> objLibraryModels
-                        else -> emptyList()
-                    }
-                    if (libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ||
-                        libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST
-                    ) {
-                        BackHandler {
-                            libraryDetailScreen = LibraryDetailScreen.NONE
-                            libraryAssetEditMode = false
-                            selectedLibraryAssetPaths = emptySet()
-                        }
-                    }
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        if (libraryAssetEditMode &&
-                            (libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ||
-                                libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST)
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.Share,
-                                    contentDescription = "공유하기",
-                                    tint = if (selectedLibraryAssetPaths.isNotEmpty()) Color(0xFF9CD83B)
-                                    else Color(0xFF9CD83B).copy(alpha = 0.4f),
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .clickable(enabled = selectedLibraryAssetPaths.isNotEmpty()) {
-                                            val files = listModels
-                                                .filter { selectedLibraryAssetPaths.contains(it.file.absolutePath) }
-                                                .map { it.file }
-                                            shareLibraryFiles(context, files)
-                                        }
-                                )
-                                Text(
-                                    text = "삭제",
-                                    color = if (selectedLibraryAssetPaths.isNotEmpty()) Color.White
-                                    else Color.White.copy(alpha = 0.4f),
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(
-                                            if (selectedLibraryAssetPaths.isNotEmpty()) Color.Red
-                                            else Color.Red.copy(alpha = 0.4f)
-                                        )
-                                        .clickable(enabled = selectedLibraryAssetPaths.isNotEmpty()) {
-                                            showLibraryAssetDeleteConfirm = true
-                                        }
-                                        .padding(horizontal = 6.dp, vertical = 4.dp)
-                                )
-                                Text(
-                                    text = "전체 선택",
-                                    color = Color.White,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(Color(0xFF3A3A3A))
-                                        .clickable {
-                                            selectedLibraryAssetPaths =
-                                                listModels.map { it.file.absolutePath }.toSet()
-                                        }
-                                        .padding(horizontal = 6.dp, vertical = 4.dp)
-                                )
-                            }
-                        }
-                        when (libraryDetailScreen) {
-                            LibraryDetailScreen.NONE -> {
-                                if (plyLibraryModels.isEmpty() && objLibraryModels.isEmpty()) {
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .fillMaxWidth(),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = "3D 모델이 아직 없습니다",
-                                            color = Color.White.copy(alpha = 0.7f),
-                                            fontSize = 16.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                } else {
-                                    Model3dFormatHubGrid(
-                                        plyCount = plyLibraryModels.size,
-                                        objCount = objLibraryModels.size,
-                                        plyCoverUri = plySubHubCoverUri,
-                                        objCoverUri = objSubHubCoverUri,
-                                        onOpenPly = {
-                                            libraryDetailScreen = LibraryDetailScreen.MODEL_3D_PLY_LIST
-                                        },
-                                        onOpenObj = {
-                                            libraryDetailScreen = LibraryDetailScreen.MODEL_3D_OBJ_LIST
-                                        },
-                                        modifier = Modifier.fillMaxSize()
-                                    )
-                                }
-                            }
-                            LibraryDetailScreen.MODEL_3D_PLY_LIST,
-                            LibraryDetailScreen.MODEL_3D_OBJ_LIST -> {
-                                if (listModels.isEmpty()) {
-                                    val emptyMsg = if (libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST) {
-                                        "PLY 파일이 없습니다"
-                                    } else {
-                                        "OBJ 파일이 없습니다"
-                                    }
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .fillMaxWidth(),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = emptyMsg,
-                                            color = Color.White.copy(alpha = 0.7f),
-                                            fontSize = 16.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                } else {
-                                    val modelDayGroups = remember(listModels) {
-                                        groupByDayConsecutiveDescending(
-                                            listModels.sortedByDescending { it.lastModified }
-                                        ) { it.lastModified }
-                                    }
-                                    LazyVerticalGrid(
-                                        columns = GridCells.Fixed(4),
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .fillMaxWidth(),
-                                        contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        modelDayGroups.forEach { (dayStart, modelsInDay) ->
-                                            item(
-                                                span = { GridItemSpan(this.maxLineSpan) },
-                                                key = "m3d_day_$dayStart"
-                                            ) {
-                                                Text(
-                                                    text = formatKoreanDateHeader(dayStart),
-                                                    color = Color.White,
-                                                    fontSize = 14.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .padding(horizontal = 4.dp, vertical = 8.dp)
-                                                )
-                                            }
-                                            items(
-                                                items = modelsInDay,
-                                                key = { it.file.absolutePath }
-                                            ) { model ->
-                                                val path = model.file.absolutePath
-                                                val isSelected = selectedLibraryAssetPaths.contains(path)
-                                                Model3dLibraryGridItem(
-                                                    model = model,
-                                                    thumbRefresh = libraryModelThumbRefresh,
-                                                    isSelected = isSelected,
-                                                    onClick = {
-                                                        if (libraryAssetEditMode) {
-                                                            selectedLibraryAssetPaths =
-                                                                if (isSelected) selectedLibraryAssetPaths - path
-                                                                else selectedLibraryAssetPaths + path
-                                                        } else {
-                                                            currentPlyModel = model
-                                                            libraryDetailScreen = LibraryDetailScreen.OBJ_VIEWER
-                                                        }
-                                                    },
-                                                    onLongClick = {
-                                                        if (!libraryAssetEditMode) {
-                                                            libraryAssetEditMode = true
-                                                            selectedLibraryAssetPaths = setOf(path)
-                                                        }
-                                                    }
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            else -> {
-                                Spacer(modifier = Modifier.weight(1f))
-                            }
-                        }
-                    }
-                }
-            } else if (libraryTab == LibraryTab.AI_CAD) {
-            if (selectedAiCadStlFile != null) {
-                val stlFile = selectedAiCadStlFile!!
-                var viewerLoading by remember(stlFile.absolutePath) { mutableStateOf(true) }
-                BackHandler { selectedAiCadStlFile = null }
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color(0xFF0D0D1A))
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Color(0xFF111111))
-                            .padding(horizontal = 4.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(onClick = { selectedAiCadStlFile = null }) {
-                            Icon(
-                                imageVector = Icons.Filled.Close,
-                                contentDescription = "목록으로",
-                                tint = Color.White
-                            )
-                        }
-                        Text(
-                            text = stlFile.name,
-                            color = Color.White,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.weight(1f),
-                            maxLines = 1
-                        )
-                    }
-                    val glbPreviewFile = File(stlFile.parent ?: "", "${stlFile.nameWithoutExtension}.glb")
-                    Text(
-                        text = buildString {
-                            append(stlFile.length())
-                            append(" bytes · ")
-                            if (glbPreviewFile.isFile && glbPreviewFile.length() > 0L) {
-                                append("GLB·OBJ 동봉 · STL 미리보기")
-                            } else {
-                                append("STL 3D 미리보기")
-                            }
-                        },
-                        fontSize = 11.sp,
-                        color = Color.White.copy(alpha = 0.45f),
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-                    )
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                    ) {
-                        // GLB(Filament) 우선 시 일부 기기에서 빈 화면이 되는 사례가 있어,
-                        // 저장된 STL과 동일한 OpenGL 경로로만 미리보기(렌더 일치 보장).
-                        key(stlFile.absolutePath) {
-                            AndroidView(
-                                factory = { ctx ->
-                                    ObjSurfaceView(ctx).apply {
-                                        loadMeshFile(stlFile) { viewerLoading = false }
-                                    }
-                                },
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
-                        if (viewerLoading) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(Color(0xFF0D0D1A).copy(alpha = 0.82f)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    CircularProgressIndicator(
-                                        color = Color(0xFF9CD83B),
-                                        modifier = Modifier.size(48.dp),
-                                        strokeWidth = 3.dp
-                                    )
-                                    Spacer(modifier = Modifier.height(16.dp))
-                                    Text(
-                                        text = "3D 모델 로딩 중…",
-                                        color = Color.White,
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.Medium
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            } else if (aiCadStlFiles.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "저장된 AI CAD 모델이 없습니다",
-                            color = Color.White.copy(alpha = 0.7f),
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "AI 탭 → AI CAD 모드에서 OpenSCAD 스크립트가 오면\n자동으로 STL이 저장됩니다. 코드 창 상단 「저장」에서 이름을 정해 다시 저장할 수 있습니다.",
-                            color = Color.White.copy(alpha = 0.45f),
-                            fontSize = 12.sp,
-                            textAlign = TextAlign.Center,
-                            lineHeight = 16.sp
-                        )
-                    }
-                }
-            } else {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    if (libraryAssetEditMode) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Share,
-                                contentDescription = "공유하기",
-                                tint = if (selectedLibraryAssetPaths.isNotEmpty()) Color(0xFF9CD83B)
-                                else Color(0xFF9CD83B).copy(alpha = 0.4f),
-                                modifier = Modifier
-                                    .size(20.dp)
-                                    .clickable(enabled = selectedLibraryAssetPaths.isNotEmpty()) {
-                                        val files = aiCadStlFiles
-                                            .filter { selectedLibraryAssetPaths.contains(it.absolutePath) }
-                                        shareLibraryFiles(context, files)
-                                    }
-                            )
-                            Text(
-                                text = "삭제",
-                                color = if (selectedLibraryAssetPaths.isNotEmpty()) Color.White
-                                else Color.White.copy(alpha = 0.4f),
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(
-                                        if (selectedLibraryAssetPaths.isNotEmpty()) Color.Red
-                                        else Color.Red.copy(alpha = 0.4f)
-                                    )
-                                    .clickable(enabled = selectedLibraryAssetPaths.isNotEmpty()) {
-                                        showLibraryAssetDeleteConfirm = true
-                                    }
-                                    .padding(horizontal = 6.dp, vertical = 4.dp)
-                            )
-                            Text(
-                                text = "전체 선택",
-                                color = Color.White,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFF3A3A3A))
-                                    .clickable {
-                                        selectedLibraryAssetPaths =
-                                            aiCadStlFiles.map { it.absolutePath }.toSet()
-                                    }
-                                    .padding(horizontal = 6.dp, vertical = 4.dp)
-                            )
-                        }
-                    }
-                    val aiCadDayGroups = remember(aiCadStlFiles) {
-                        groupByDayConsecutiveDescending(
-                            aiCadStlFiles.sortedByDescending { it.lastModified() }
-                        ) { it.lastModified() }
-                    }
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(4),
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        aiCadDayGroups.forEach { (dayStart, filesInDay) ->
-                            item(
-                                span = { GridItemSpan(this.maxLineSpan) },
-                                key = "aicad_day_$dayStart"
-                            ) {
-                                Text(
-                                    text = formatKoreanDateHeader(dayStart),
-                                    color = Color.White,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 4.dp, vertical = 8.dp)
-                                )
-                            }
-                            items(
-                                items = filesInDay,
-                                key = { it.absolutePath }
-                            ) { file ->
-                                val path = file.absolutePath
-                                val isSelected = selectedLibraryAssetPaths.contains(path)
-                                Column(
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    modifier = Modifier
-                                        .combinedClickable(
-                                            onClick = {
-                                                if (libraryAssetEditMode) {
-                                                    selectedLibraryAssetPaths =
-                                                        if (isSelected) selectedLibraryAssetPaths - path
-                                                        else selectedLibraryAssetPaths + path
-                                                } else {
-                                                    selectedAiCadStlFile = file
-                                                }
-                                            },
-                                            onLongClick = {
-                                                if (!libraryAssetEditMode) {
-                                                    libraryAssetEditMode = true
-                                                    selectedLibraryAssetPaths = setOf(path)
-                                                }
-                                            }
-                                        )
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .aspectRatio(1f)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(Color(0xFF1A1A1A))
-                                            .border(
-                                                width = if (isSelected) 4.dp else 1.dp,
-                                                color = if (isSelected) Color.Blue
-                                                else Color.White.copy(alpha = 0.2f),
-                                                shape = RoundedCornerShape(8.dp)
-                                            ),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        AiCadStlGridThumbnail(
-                                            stlFile = file,
-                                            libraryVersion = aiCadLibraryVersion,
-                                            thumbEdgePx = gridThumbPx,
-                                            modifier = Modifier.fillMaxSize()
-                                        )
-                                        if (isSelected) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .align(Alignment.TopEnd)
-                                                    .padding(8.dp)
-                                                    .size(28.dp)
-                                                    .background(Color(0xFF7ED321), CircleShape),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Filled.Check,
-                                                    contentDescription = "선택됨",
-                                                    tint = Color.White,
-                                                    modifier = Modifier.size(18.dp)
-                                                )
-                                            }
-                                        }
-                                    }
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(
-                                        text = file.nameWithoutExtension,
-                                        color = Color.White,
-                                        fontSize = 11.sp,
-                                        maxLines = 2,
-                                        textAlign = TextAlign.Center
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else if (libraryTab == LibraryTab.DATASET) {
-            if (libraryDetailScreen == LibraryDetailScreen.DATASET_FOLDER && currentDatasetFolder != null) {
-                BackHandler {
-                    libraryDetailScreen = LibraryDetailScreen.NONE
-                    currentDatasetFolder = null
-                }
-                if (datasetImages.isEmpty()) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "데이터셋폴더에 이미지가 없습니다",
-                            color = Color.White.copy(alpha = 0.7f),
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                } else {
-                    val datasetImageDayGroups = remember(datasetImages) {
-                        groupImagesByDayInOrder(context, datasetImages)
-                    }
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(4),
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        datasetImageDayGroups.forEach { (dayStart, uris) ->
-                            item(
-                                span = { GridItemSpan(this.maxLineSpan) },
-                                key = "ds_img_day_$dayStart"
-                            ) {
-                                Text(
-                                    text = formatKoreanDateHeader(dayStart),
-                                    color = Color.White,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 4.dp, vertical = 8.dp)
-                                )
-                            }
-                            items(
-                                items = uris,
-                                key = { it.toString() }
-                            ) { uri ->
-                                Image(
-                                    painter = rememberGalleryGridPhotoPainter(uri, gridThumbPx),
-                                    contentDescription = "데이터셋폴더 이미지",
-                                    modifier = Modifier
-                                        .aspectRatio(1f)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .clickable { onMediaSelected(uri, datasetImages) },
-                                    contentScale = ContentScale.Crop
-                                )
-                            }
-                        }
-                    }
-                }
-            } else
-            if (datasetFolders.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "데이터셋폴더가 아직 없습니다",
-                        color = Color.White.copy(alpha = 0.7f),
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            } else {
-                // Box 안에서 Row와 LazyVerticalGrid를 형제로 두면 그리드가 fillMaxSize로 메뉴 위에 그려짐 → Column으로 분리
-                Column(modifier = Modifier.fillMaxSize()) {
-                    if (isDatasetEditMode && pendingDatasetMenuAction != PendingDatasetMenuAction.None) {
-                        Text(
-                            text = "폴더를 탭하여 선택한 뒤 상단 「확인」을 누르세요.",
-                            color = Color.White.copy(alpha = 0.72f),
-                            fontSize = 12.sp,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-                        )
-                    }
-                    // 메뉴(배경제거·광택·공유 등)로 진입한 폴더 선택 모드에서는 업로드/삭제 바 숨김 — 길게 눌러 진입한 편집 모드에서만 표시
-                    // 배경 제거 프롬프트 다이얼로그가 뜨는 동안에는 pendingMenu가 None으로 바뀌므로, 대기 URI·다이얼로그 표시로 별도 판별
-                    if (isDatasetEditMode &&
-                        pendingDatasetMenuAction == PendingDatasetMenuAction.None &&
-                        !showBgRemoveDialog &&
-                        pendingBulkImageUrisForBgRemove == null
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "선택 ${selectedDatasetFolders.size}",
-                                color = Color.White.copy(alpha = 0.8f),
-                                fontSize = 12.sp
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Icon(
-                                    imageVector = Icons.Filled.CloudUpload,
-                                    contentDescription = "업로드",
-                                    tint = if (selectedDatasetFolders.isNotEmpty()) Color(0xFF7ED321) else Color(0xFF7ED321).copy(alpha = 0.4f),
-                                    modifier = Modifier
-                                        .size(32.dp)
-                                        .clickable {
-                                            uploadSourceTab = LibraryTab.DATASET
-                                            when {
-                                                isUploading -> {
-                                                    uploadMessage = "이미 업로드 중입니다"
-                                                }
-                                                selectedDatasetFolders.isEmpty() -> {
-                                                    uploadMessage = "선택된 폴더가 없습니다"
-                                                }
-                                                else -> {
-                                                    // 3D 모델링 프롬프트 팝업을 먼저 표시
-                                                    pending3DSourceTab = LibraryTab.DATASET
-                                                    pending3DDatasetFolders = selectedDatasetFolders.toList()
-                                                    modelingPromptText = ""
-                                                    modelingPromptError = false
-                                                    show3DModelingDialog = true
-                                                }
-                                            }
-                                        }
-                                )
-                                Text(
-                                    text = "삭제",
-                                    color = if (selectedDatasetFolders.isNotEmpty()) Color.White else Color.White.copy(alpha = 0.4f),
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(if (selectedDatasetFolders.isNotEmpty()) Color.Red else Color.Red.copy(alpha = 0.4f))
-                                        .clickable(enabled = selectedDatasetFolders.isNotEmpty()) {
-                                            showDatasetDeleteConfirm = true
-                                        }
-                                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                                )
-                            }
-                        }
-                    }
-                    val datasetFolderDayGroups = remember(datasetFolders) {
-                        groupByDayConsecutiveDescending(
-                            datasetFolders.sortedByDescending { it.dir.lastModified() }
-                        ) { it.dir.lastModified() }
-                    }
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(4),
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        datasetFolderDayGroups.forEach { (dayStart, foldersInDay) ->
-                            item(
-                                span = { GridItemSpan(this.maxLineSpan) },
-                                key = "ds_fold_day_$dayStart"
-                            ) {
-                                Text(
-                                    text = formatKoreanDateHeader(dayStart),
-                                    color = Color.White,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 4.dp, vertical = 8.dp)
-                                )
-                            }
-                            items(
-                                items = foldersInDay,
-                                key = { it.dir.absolutePath }
-                            ) { folder ->
-                        val folderPath = folder.dir.absolutePath
-                        val isSelected = selectedDatasetFolders.contains(folderPath)
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .aspectRatio(1f)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFF1A1A1A))
-                                    .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
-                                    .combinedClickable(
-                                        onClick = {
-                                            if (isDatasetEditMode) {
-                                                selectedDatasetFolders = if (isSelected) {
-                                                    selectedDatasetFolders - folderPath
-                                                } else {
-                                                    selectedDatasetFolders + folderPath
-                                                }
-                                            } else {
-                                                currentDatasetFolder = folder
-                                                loadDatasetImages(folder.dir) { images ->
-                                                    datasetImages = images
-                                                    libraryDetailScreen = LibraryDetailScreen.DATASET_FOLDER
-                                                }
-                                            }
-                                        },
-                                        onLongClick = {
-                                            if (!isDatasetEditMode) {
-                                                isDatasetEditMode = true
-                                            }
-                                            selectedDatasetFolders = if (isSelected) {
-                                                selectedDatasetFolders - folderPath
-                                            } else {
-                                                selectedDatasetFolders + folderPath
-                                            }
-                                        }
-                                    ),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                folder.coverUri?.let { uri ->
-                                    Image(
-                                        painter = rememberGalleryGridPhotoPainter(uri, gridThumbPx),
-                                        contentDescription = "데이터셋폴더 표지",
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                }
-                                if (isSelected) {
-                                    Box(
-                                        modifier = Modifier
-                                            .matchParentSize()
-                                            .background(Color.Black.copy(alpha = 0.35f))
-                                    )
-                                    Icon(
-                                        imageVector = Icons.Filled.Check,
-                                        contentDescription = "선택됨",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(28.dp)
-                                    )
-                                }
-                            }
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = folder.name,
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                textAlign = TextAlign.Center,
-                                maxLines = 2
-                            )
-                            Text(
-                                text = "${folder.count}장",
-                                color = Color.White.copy(alpha = 0.7f),
-                                fontSize = 10.sp
-                            )
-                        }
-                    }
-                    }
-                }
-                }
-            }
-        } else {
-            Column(modifier = Modifier.fillMaxSize()) {
-            if (isEditMode && pendingGalleryMenuAction != PendingGalleryMenuAction.None) {
-                Text(
-                    text = if (pendingGalleryMenuAction == PendingGalleryMenuAction.CreateDatasetFolder) {
-                        "폴더에 넣을 이미지를 선택한 뒤 상단 「확인」을 누르세요."
-                    } else {
-                        "이미지를 탭하여 선택한 뒤 상단 「확인」을 누르세요."
-                    },
-                    color = Color.White.copy(alpha = 0.72f),
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-                )
-            }
-            // 길게 눌러 진입한 편집 모드에서만 서버 전송·삭제 툴바 표시 (메뉴로 진입한 선택 화면과 분리)
-            if (isEditMode && pendingGalleryMenuAction == PendingGalleryMenuAction.None) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // 업로드 버튼 (데이터셋 라이브러리 편집 툴바와 동일 터치 영역)
-                    Icon(
-                        imageVector = Icons.Filled.CloudUpload,
-                        contentDescription = "업로드",
-                        tint = if (selectedItems.isNotEmpty()) Color(0xFF9CD83B) else Color(0xFF9CD83B).copy(alpha = 0.4f),
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clickable {
-                                uploadSourceTab = LibraryTab.GALLERY
-                                when {
-                                    isUploading || isTransferring -> {
-                                        uploadMessage = "이미 업로드 중입니다"
-                                    }
-                                    selectedItems.isEmpty() -> {
-                                        uploadMessage = "선택된 미디어가 없습니다"
-                                    }
-                                    else -> {
-                                        // 3D 모델링 프롬프트 팝업을 먼저 표시
-                                        pending3DSourceTab = LibraryTab.GALLERY
-                                        pending3DGalleryUris = selectedItems.toList()
-                                        modelingPromptText = ""
-                                        modelingPromptError = false
-                                        show3DModelingDialog = true
-                                    }
-                                }
-                            }
-                    )
-
-                    // 선택 삭제 버튼
-                    Text(
-                        text = "삭제",
-                        color = if (selectedItems.isNotEmpty()) Color.White else Color.White.copy(alpha = 0.4f),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (selectedItems.isNotEmpty()) Color.Red else Color.Red.copy(alpha = 0.4f))
-                            .clickable(enabled = !isUploading && !isTransferring && selectedItems.isNotEmpty()) {
-                                showDeleteConfirm = true
-                            }
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                    )
-                }
-            }
-
-
-
-            // 미디어 그리드 (편집 메뉴 Row와 세로로 나열 — Box 형제 배치 시 그리드가 메뉴를 덮음)
-            if (images.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "촬영한 미디어가 없습니다",
-                        fontSize = 16.sp,
-                        color = Color.White.copy(alpha = 0.6f)
-                    )
-                }
-            } else {
-                val galleryDayGroups = remember(images) {
-                    groupImagesByDayInOrder(context, images)
-                }
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(4),
-                    state = galleryGridState,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    galleryDayGroups.forEach { (dayStart, uris) ->
-                        item(
-                            span = { GridItemSpan(this.maxLineSpan) },
-                            key = "gal_day_$dayStart"
-                        ) {
-                            Text(
-                                text = formatKoreanDateHeader(dayStart),
-                                color = Color.White,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 6.dp, vertical = 8.dp)
-                            )
-                        }
-                        items(
-                            items = uris,
-                            key = { it.toString() }
-                        ) { mediaUri ->
-                        val isVideo = isVideoUri(context, mediaUri)
-                        val isSelected = selectedItems.contains(mediaUri)
-                        var videoThumbnail by remember(mediaUri) { mutableStateOf<Bitmap?>(null) }
-
-                        // 동영상 썸네일 로드
-                        if (isVideo) {
-                            LaunchedEffect(mediaUri, gridThumbPx) {
-                                videoThumbnail = decodeVideoGridThumbnail(context, mediaUri, gridThumbPx)
-                            }
-                        }
-
-                        Box(
-                            modifier = Modifier
-                                .aspectRatio(1f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .border(
-                                    width = if (isSelected) 4.dp else 0.dp,
-                                    color = Color.Blue,
-                                    shape = RoundedCornerShape(8.dp)
-                                )
-                                .pointerInput(mediaUri, isEditMode, isSelected) {
-                                    detectTapGestures(
-                                        onTap = {
-                                            if (isEditMode) {
-                                                // 편집 모드: 이미지 선택/해제 토글
-                                                // 이미 선택된 이미지를 다시 누르면 선택 해제
-                                                // 선택되지 않은 이미지를 누르면 선택
-                                                selectedItems = if (isSelected) {
-                                                    // 선택 해제: selectedItems에서 해당 mediaUri 제거
-                                                    selectedItems - mediaUri
-                                                } else {
-                                                    // 선택: selectedItems에 해당 mediaUri 추가
-                                                    selectedItems + mediaUri
-                                                }
-                                            } else {
-                                                // 일반 모드: 상세 보기 화면으로 이동
-                                                onMediaSelected(mediaUri, images)
-                                            }
-                                        },
-                                        onLongPress = {
-                                            // 길게 누르면 편집 모드로 전환하고 해당 이미지 선택
-                                            if (!isEditMode) {
-                                                isEditMode = true
-                                                selectedItems = setOf(mediaUri)
-                                            }
-                                        }
-                                    )
-                                }
-                        ) {
-                            if (isVideo) {
-                                // 동영상 썸네일 또는 배경
-                                if (videoThumbnail != null) {
-                                    Image(
-                                        bitmap = videoThumbnail!!.asImageBitmap(),
-                                        contentDescription = "동영상 썸네일",
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                } else {
-                                    // 썸네일 로딩 중 배경
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .background(Color.Black)
-                                    )
-                                    Icon(
-                                        imageVector = Icons.Filled.Videocam,
-                                        contentDescription = "동영상",
-                                        tint = Color.White.copy(alpha = 0.7f),
-                                        modifier = Modifier
-                                            .align(Alignment.Center)
-                                            .size(48.dp)
-                                    )
-                                }
-                                // 동영상 아이콘 오버레이 (우측 하단)
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.BottomEnd)
-                                        .padding(8.dp)
-                                        .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                                        .padding(4.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Filled.Videocam,
-                                        contentDescription = "동영상",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
-                            } else {
-                                // 이미지
-                                Image(
-                                    painter = rememberGalleryGridPhotoPainter(mediaUri, gridThumbPx),
-                                    contentDescription = "촬영한 미디어",
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentScale = ContentScale.Crop
-                                )
-                            }
-
-                            // 선택 표시
-                            if (isSelected) {
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(8.dp)
-                                        .size(28.dp)
-                                        .background(Color(0xFF7ED321), CircleShape),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Filled.Check,
-                                        contentDescription = "선택됨",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    }
-                }
-            }
-            }
-        }
-        }
-
-        // 업로드 팝업(UI) - 탭별로 분리 표시
-        if (uploadSourceTab == libraryTab) {
-            if (isUploading) {
-                val total = uploadProgress.second.takeIf { it > 0 } ?: 100
-                val current = uploadProgress.first.coerceIn(0, total)
-                val percent = ((current.toFloat() / total.toFloat()) * 100f).toInt().coerceIn(0, 100)
-                val progressFraction = current.toFloat() / total.toFloat()
-
-                Dialog(onDismissRequest = { /* 전송 중에는 닫지 않음 */ }) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                            .padding(20.dp)
-                    ) {
-                        Column {
-                            Text(
-                                text = "서버로 전송 중",
-                                color = Color.White,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Text(
-                                text = "${percent}%",
-                                color = Color.White,
-                                fontSize = 28.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(10.dp)
-                                    .background(Color.White.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxHeight()
-                                        .fillMaxWidth(progressFraction.coerceIn(0f, 1f))
-                                        .background(Color(0xFF7ED321), RoundedCornerShape(6.dp))
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Text(
-                                text = uploadMessage ?: "처리 중...",
-                                color = Color.White.copy(alpha = 0.85f),
-                                fontSize = 13.sp
-                            )
-                        }
-                    }
-                }
-            } else {
-                // 업로드 결과 팝업 (완료/무응답/실패)
-                if (showUploadResultPopup && uploadResultPopupMessage != null) {
-                    Dialog(
-                        onDismissRequest = {
-                            showUploadResultPopup = false
-                            uploadResultPopupMessage = null
-                        }
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                                .padding(20.dp)
-                        ) {
-                            Column {
-                                Text(
-                                    text = "알림",
-                                    color = Color.White,
-                                    fontSize = 18.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = uploadResultPopupMessage!!,
-                                    color = Color.White.copy(alpha = 0.9f),
-                                    fontSize = 14.sp
-                                )
-                                Spacer(modifier = Modifier.height(16.dp))
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.End
-                                ) {
-                                    Text(
-                                        text = "확인",
-                                        color = Color.White,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(12.dp))
-                                            .background(Color(0xFF7ED321))
-                                            .clickable {
-                                                showUploadResultPopup = false
-                                                uploadResultPopupMessage = null
-                                            }
-                                            .padding(horizontal = 16.dp, vertical = 8.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 업로드 메시지(완료/실패)는 기존처럼 배너로 잠깐 표시
-                uploadMessage?.let { message ->
-                    LaunchedEffect(message) {
-                        delay(3000)
-                        uploadMessage = null
-                    }
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(
-                                if (message.contains("실패") || message.contains("20장 이상")) Color.Red.copy(alpha = 0.8f)
-                                else Color.Green.copy(alpha = 0.8f)
-                            )
-                            .padding(16.dp)
-                    ) {
-                        Text(
-                            text = message,
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-        }
-
-        // --- 다이얼로그 구역 (어떤 탭에서도 보일 수 있도록 탭 분기 바깥에 배치) ---
-
-        // [추가] 1차 배경제거 진행률 팝업 (온디바이스)
-        if (isBgRemoving) {
-            val fraction = (sam3ProgressPercent.coerceIn(0, 100) / 100f)
-            Dialog(onDismissRequest = { /* 처리 중 닫기 불가 */ }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                        .padding(24.dp)
-                ) {
-                    Column {
-                        Text(
-                            text = "1차 배경 제거 중",
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "MediaPipe Image Segmentation",
-                            color = Color(0xFF9CD83B),
-                            fontSize = 11.sp
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        // 퍼센트 숫자
-                        Text(
-                            text = "${sam3ProgressPercent.coerceIn(0, 100)}%",
-                            color = Color(0xFF9CD83B),
-                            fontSize = 32.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        // 진행 바
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(10.dp)
-                                .background(Color.White.copy(alpha = 0.15f), RoundedCornerShape(6.dp))
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxHeight()
-                                    .fillMaxWidth(fraction)
-                                    .background(Color(0xFF9CD83B), RoundedCornerShape(6.dp))
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(12.dp))
-                        // 단계 메시지
-                        Text(
-                            text = sam3ProgressMessage,
-                            color = Color.White.copy(alpha = 0.8f),
-                            fontSize = 13.sp
-                        )
-                    }
-                }
-            }
-        }
-
-        // [추가] SAM3 완료 결과 팝업
-        sam3ResultMessage?.let { resultMsg ->
-            Dialog(onDismissRequest = { sam3ResultMessage = null }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                        .padding(24.dp)
-                ) {
-                    Column {
-                        Text(
-                            text = if (resultMsg.contains("실패")) "처리 결과" else "완료",
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Text(
-                            text = resultMsg,
-                            color = Color.White.copy(alpha = 0.9f),
-                            fontSize = 14.sp,
-                            lineHeight = 20.sp
-                        )
-                        Spacer(modifier = Modifier.height(20.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            Text(
-                                text = "확인",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(
-                                        if (resultMsg.contains("실패")) Color.Red
-                                        else Color(0xFF1A6B2F)
-                                    )
-                                    .clickable { sam3ResultMessage = null }
-                                    .padding(horizontal = 20.dp, vertical = 10.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // [추가] 광택 제거 진행 다이얼로그
-        if (isGlareRemoving) {
-            val fraction = glareProgressPercent.coerceIn(0, 100) / 100f
-            Dialog(onDismissRequest = { /* 처리 중 닫기 불가 */ }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                        .padding(24.dp)
-                ) {
-                    Column {
-                        Text(
-                            text = "광택 제거 중",
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "온디바이스 탐지·맥락 채움·질감 보정 (AI 지우개 유사)",
-                            color = Color(0xFFD4820A),
-                            fontSize = 11.sp
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "${glareProgressPercent.coerceIn(0, 100)}%",
-                            color = Color(0xFFD4820A),
-                            fontSize = 32.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(10.dp)
-                                .background(Color.White.copy(alpha = 0.15f), RoundedCornerShape(6.dp))
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxHeight()
-                                    .fillMaxWidth(fraction)
-                                    .background(Color(0xFFD4820A), RoundedCornerShape(6.dp))
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = glareProgressMessage,
-                            color = Color.White.copy(alpha = 0.8f),
-                            fontSize = 13.sp
-                        )
-                    }
-                }
-            }
-        }
-
-        // [추가] 광택 제거 결과 다이얼로그
-        glareResultMessage?.let { resultMsg ->
-            Dialog(onDismissRequest = { glareResultMessage = null }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                        .padding(24.dp)
-                ) {
-                    Column {
-                        Text(
-                            text = if (resultMsg.contains("실패")) "처리 결과" else "완료",
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Text(
-                            text = resultMsg,
-                            color = Color.White.copy(alpha = 0.9f),
-                            fontSize = 14.sp,
-                            lineHeight = 20.sp
-                        )
-                        Spacer(modifier = Modifier.height(20.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            Text(
-                                text = "확인",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(
-                                        if (resultMsg.contains("실패")) Color.Red
-                                        else Color(0xFF7B4F1E)
-                                    )
-                                    .clickable { glareResultMessage = null }
-                                    .padding(horizontal = 20.dp, vertical = 10.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // 새 데이터셋폴더: 이름 입력 후 복사 (앱 갤러리 원본은 유지)
-        if (showNewDatasetFolderNameDialog) {
-            Dialog(onDismissRequest = {
-                if (!isTransferring) showNewDatasetFolderNameDialog = false
-            }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                        .padding(20.dp)
-                ) {
-                    Column {
-                        Text(
-                            text = "데이터셋폴더 이름",
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        OutlinedTextField(
-                            value = newDatasetFolderNameInput,
-                            onValueChange = { newDatasetFolderNameInput = it },
-                            placeholder = {
-                                Text(
-                                    text = "비워 두면 자동으로 이름이 붙습니다.",
-                                    color = Color.White.copy(alpha = 0.35f),
-                                    fontSize = 13.sp
-                                )
-                            },
-                            singleLine = true,
-                            enabled = !isTransferring,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                focusedBorderColor = Color(0xFF9CD83B),
-                                unfocusedBorderColor = Color.White.copy(alpha = 0.4f),
-                                cursorColor = Color(0xFF9CD83B),
-                                focusedContainerColor = Color(0xFF1E1E1E),
-                                unfocusedContainerColor = Color(0xFF1E1E1E),
-                                disabledTextColor = Color.White.copy(alpha = 0.5f),
-                                disabledBorderColor = Color.White.copy(alpha = 0.2f),
-                                disabledContainerColor = Color(0xFF1E1E1E)
-                            ),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            Text(
-                                text = "취소",
-                                color = Color.White,
-                                fontSize = 14.sp,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                                    .clickable(enabled = !isTransferring) {
-                                        showNewDatasetFolderNameDialog = false
-                                    }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = if (isTransferring) "저장 중…" else "확인",
-                                color = if (!isTransferring && pendingDatasetFolderImageUris.isNotEmpty()) {
-                                    Color.White
-                                } else {
-                                    Color.White.copy(alpha = 0.35f)
-                                },
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(
-                                        if (!isTransferring && pendingDatasetFolderImageUris.isNotEmpty()) {
-                                            Color(0xFF1A6B2F)
-                                        } else {
-                                            Color(0xFF1A6B2F).copy(alpha = 0.3f)
-                                        }
-                                    )
-                                    .clickable(
-                                        enabled = !isTransferring && pendingDatasetFolderImageUris.isNotEmpty()
-                                    ) {
-                                        val urisCopy = pendingDatasetFolderImageUris.toList()
-                                        val nameInput = newDatasetFolderNameInput
-                                        showNewDatasetFolderNameDialog = false
-                                        isTransferring = true
-                                        uploadSourceTab = LibraryTab.GALLERY
-                                        uploadMessage = "데이터셋폴더에 복사 중..."
-                                        transferScope.launch {
-                                            val result = withContext(Dispatchers.IO) {
-                                                copyImagesToDatasetFolder(context, urisCopy, nameInput)
-                                            }
-                                            isTransferring = false
-                                            uploadMessage = result.message
-                                            Toast.makeText(
-                                                context,
-                                                result.message,
-                                                Toast.LENGTH_LONG
-                                            ).show()
-                                            if (result.successCount > 0) {
-                                                selectedItems = emptySet()
-                                                isEditMode = false
-                                                pendingGalleryMenuAction = PendingGalleryMenuAction.None
-                                                pendingDatasetFolderImageUris = emptyList()
-                                                newDatasetFolderNameInput = ""
-                                                loadDatasetFolders(context) { folders ->
-                                                    datasetFolders = folders
-                                                }
-                                            }
-                                        }
-                                    }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // [추가] 1차 배경제거 프롬프트 입력 다이얼로그
-        if (showBgRemoveDialog) {
-            val isPromptValid = !bgRemovePromptError
-            val canApply = isPromptValid
-            /** 갤러리: bulk URI 없음 / 데이터셋: 확인 직후 bulk URI 설정 — 후자일 때 닫기면 폴더 선택·편집 모드까지 종료 */
-            val dismissBgRemoveDialogWithoutApply = {
-                val wasDatasetBulk = pendingBulkImageUrisForBgRemove != null
-                showBgRemoveDialog = false
-                pendingBulkImageUrisForBgRemove = null
-                pendingDatasetFolderPathsForBulkBgRemove = null
-                bgRemovePrompt = ""
-                bgRemovePromptError = false
-                if (wasDatasetBulk) {
-                    isDatasetEditMode = false
-                    selectedDatasetFolders = emptySet()
-                    pendingDatasetMenuAction = PendingDatasetMenuAction.None
-                }
-            }
-
-            Dialog(onDismissRequest = dismissBgRemoveDialogWithoutApply) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                        .padding(20.dp)
-                ) {
-                    Column {
-                        Text(
-                            text = "어떤 사물을 추출하시겠습니까?",
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        androidx.compose.material3.OutlinedTextField(
-                            value = bgRemovePrompt,
-                            onValueChange = { input ->
-                                bgRemovePrompt = input
-                                bgRemovePromptError = input.isNotEmpty() && !input.all { it.isLetter() && it.code < 128 || it == ' ' }
-                            },
-                            placeholder = {
-                                Text(
-                                    text = "예: cup, mouse, bottle",
-                                    color = Color.White.copy(alpha = 0.35f),
-                                    fontSize = 13.sp
-                                )
-                            },
-                            singleLine = true,
-                            isError = bgRemovePromptError,
-                            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                focusedBorderColor = if (bgRemovePromptError) Color(0xFFFF5252) else Color(0xFF9CD83B),
-                                unfocusedBorderColor = if (bgRemovePromptError) Color(0xFFFF5252) else Color.White.copy(alpha = 0.4f),
-                                cursorColor = Color(0xFF9CD83B),
-                                focusedContainerColor = Color(0xFF1E1E1E),
-                                unfocusedContainerColor = Color(0xFF1E1E1E),
-                                errorBorderColor = Color(0xFFFF5252),
-                                errorContainerColor = Color(0xFF1E1E1E),
-                                errorTextColor = Color.White,
-                                errorCursorColor = Color(0xFFFF5252)
-                            ),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        if (bgRemovePromptError) {
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "영어로 입력해 주세요",
-                                color = Color(0xFFFF5252),
-                                fontSize = 12.sp
-                            )
-                        } else {
-                            Spacer(modifier = Modifier.height(6.dp + 18.sp.value.dp))
-                        }
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            Text(
-                                text = "취소",
-                                color = Color.White,
-                                fontSize = 14.sp,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                                    .clickable(onClick = dismissBgRemoveDialogWithoutApply)
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "적용",
-                                color = if (canApply) Color.White else Color.White.copy(alpha = 0.35f),
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(
-                                        if (canApply) Color(0xFF1A6B2F)
-                                        else Color(0xFF1A6B2F).copy(alpha = 0.3f)
-                                    )
-                                    .clickable(enabled = canApply) {
-                                        val bulkSnapshot = pendingBulkImageUrisForBgRemove
-                                        val fromDatasetFolders = bulkSnapshot != null
-                                        val datasetPathsSnapshot = pendingDatasetFolderPathsForBulkBgRemove
-                                        showBgRemoveDialog = false
-                                        pendingBulkImageUrisForBgRemove = null
-                                        pendingDatasetFolderPathsForBulkBgRemove = null
-                                        isBgRemoving = true
-                                        sam3ProgressPercent = 0
-                                        sam3ProgressMessage = "준비 중..."
-                                        val prompt = bgRemovePrompt.trim()
-                                        val items = bulkSnapshot ?: selectedItems.toList()
-                                        val total = items.size
-                                        val outputDir: File = if (
-                                            fromDatasetFolders &&
-                                            !datasetPathsSnapshot.isNullOrEmpty()
-                                        ) {
-                                            createDatasetBatchResultFolder(
-                                                context,
-                                                datasetPathsSnapshot,
-                                                "배경제거"
-                                            )
-                                        } else {
-                                            context.getExternalFilesDir(null) ?: context.filesDir
-                                        }
-                                        transferScope.launch {
-                                            val bgStartMs = System.currentTimeMillis()
-                                            // 포그라운드 서비스 시작
-                                            startOrUpdateForegroundService(
-                                                context, "배경 제거 중 (${total}장)", 0, "준비 중...", bgStartMs
-                                            )
-                                            var successCount = 0
-                                            var failCount = 0
-                                            val savedUris = mutableListOf<Uri>()
-                                            items.forEachIndexed { index, uri ->
-                                                val itemLabel = if (total > 1) " (${index + 1}/$total)" else ""
-                                                val basePercent = index * 95 / total
-                                                val nextPercent  = (index + 1) * 95 / total
-                                                val itemRange = (nextPercent - basePercent).coerceAtLeast(1)
-
-                                                sam3ProgressPercent = basePercent
-                                                sam3ProgressMessage = "이미지 로드 중...$itemLabel"
-                                                startOrUpdateForegroundService(
-                                                    context, "배경 제거 중 (${total}장)",
-                                                    basePercent, "이미지 로드 중...$itemLabel", bgStartMs
-                                                )
-
-                                                // 비트맵 디코딩
-                                                val bitmap = withContext(Dispatchers.IO) {
-                                                    decodeBitmapWithMaxDimension(context, uri, 1024)
-                                                }
-                                                if (bitmap == null) {
-                                                    failCount++
-                                                    return@forEachIndexed
-                                                }
-
-                                                sam3ProgressPercent = basePercent + itemRange / 8
-                                                sam3ProgressMessage = "MediaPipe 세그멘테이션 준비 중...$itemLabel"
-
-                                                // MediaPipe Image Segmentation 기반 온디바이스 배경 제거
-                                                val result = withContext(Dispatchers.IO) {
-                                                    BackgroundRemovalProcessor.removeBackground(
-                                                        context    = context,
-                                                        sourceBitmap = bitmap,
-                                                        userPrompt = prompt,
-                                                        outputDir  = outputDir,
-                                                        onProgress = { iter, totalIter ->
-                                                            if (totalIter > 0) {
-                                                                val frac = iter.toFloat() / totalIter
-                                                                val mapped = basePercent +
-                                                                    (itemRange * 0.15f + frac * itemRange * 0.75f).toInt()
-                                                                sam3ProgressPercent = mapped.coerceIn(basePercent, nextPercent - 1)
-                                                                val stepMsg = "세그멘테이션 ${"%.0f".format(frac * 100)}%$itemLabel"
-                                                                sam3ProgressMessage = stepMsg
-                                                                startOrUpdateForegroundService(
-                                                                    context, "배경 제거 중 (${total}장)",
-                                                                    sam3ProgressPercent, stepMsg, bgStartMs
-                                                                )
-                                                            }
-                                                        }
-                                                    )
-                                                }
-                                                bitmap.recycle()
-
-                                                when (result) {
-                                                    is BackgroundRemovalProcessor.Result.Success -> {
-                                                        result.savedUri?.let { savedUris.add(it) }
-                                                        successCount++
-                                                        sam3ProgressPercent = nextPercent
-                                                        sam3ProgressMessage = "완료$itemLabel"
-                                                    }
-                                                    is BackgroundRemovalProcessor.Result.Error -> {
-                                                        failCount++
-                                                        sam3ProgressMessage = "오류: ${result.message}"
-                                                    }
-                                                }
-                                            }
-                                            sam3ProgressPercent = 100
-                                            isBgRemoving = false
-                                            sam3ResultMessage = when {
-                                                successCount > 0 && failCount == 0 && fromDatasetFolders ->
-                                                    "배경 제거 완료\n${successCount}장이 새 데이터셋 폴더 「${outputDir.name}」에 저장되었습니다."
-                                                successCount > 0 && failCount == 0 ->
-                                                    "배경 제거 완료\n${successCount}장이 앱 갤러리에 저장되었습니다."
-                                                successCount > 0 && fromDatasetFolders ->
-                                                    "배경 제거 완료\n${successCount}장 성공, ${failCount}장 실패\n성공분은 「${outputDir.name}」에 저장되었습니다."
-                                                successCount > 0 ->
-                                                    "배경 제거 완료\n${successCount}장 성공, ${failCount}장 실패"
-                                                else ->
-                                                    "배경 제거 실패\n객체를 찾지 못했거나 모델이 없습니다.\n(assets/models/ 폴더를 확인하세요)"
-                                            }
-                                            // 포그라운드 서비스 완료 처리
-                                            val doneMsg = if (successCount > 0) "${successCount}장 완료" else "처리 실패"
-                                            stopForegroundService(context, "배경 제거 완료", doneMsg)
-                                            if (successCount > 0) {
-                                                selectedItems = emptySet()
-                                                isEditMode = false
-                                                pendingGalleryMenuAction = PendingGalleryMenuAction.None
-                                                if (fromDatasetFolders) {
-                                                    isDatasetEditMode = false
-                                                    selectedDatasetFolders = emptySet()
-                                                    pendingDatasetMenuAction = PendingDatasetMenuAction.None
-                                                    loadDatasetFolders(context) { datasetFolders = it }
-                                                }
-                                                onImageDeleted()
-                                            }
-                                        }
-                                    }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3D 모델링 프롬프트 입력 다이얼로그
-        if (show3DModelingDialog) {
-            val isValid3DPrompt = modelingPromptText.isNotEmpty() && !modelingPromptError
-            val noServerResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
-
-            Dialog(onDismissRequest = { show3DModelingDialog = false }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                        .padding(20.dp)
-                ) {
-                    Column {
-                        Text(
-                            text = "3D 모델링",
-                            color = Color(0xFF9CD83B),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "어떤 사물을 3D 모델링하시겠습니까?",
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        androidx.compose.material3.OutlinedTextField(
-                            value = modelingPromptText,
-                            onValueChange = { input ->
-                                modelingPromptText = input
-                                // 영문자, 숫자, 스페이스, 특수기호(ASCII 0x20~0x7E)만 허용
-                                modelingPromptError = input.isNotEmpty() && !input.all { it.code in 0x20..0x7E }
-                            },
-                            placeholder = {
-                                Text(
-                                    text = "예: gundam figure, white cup",
-                                    color = Color.White.copy(alpha = 0.35f),
-                                    fontSize = 13.sp
-                                )
-                            },
-                            singleLine = true,
-                            isError = modelingPromptError,
-                            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                focusedBorderColor = if (modelingPromptError) Color(0xFFFF5252) else Color(0xFF9CD83B),
-                                unfocusedBorderColor = if (modelingPromptError) Color(0xFFFF5252) else Color.White.copy(alpha = 0.4f),
-                                cursorColor = Color(0xFF9CD83B),
-                                focusedContainerColor = Color(0xFF1E1E1E),
-                                unfocusedContainerColor = Color(0xFF1E1E1E),
-                                errorBorderColor = Color(0xFFFF5252),
-                                errorContainerColor = Color(0xFF1E1E1E),
-                                errorTextColor = Color.White,
-                                errorCursorColor = Color(0xFFFF5252)
-                            ),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        if (modelingPromptError) {
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "영어, 숫자, 특수기호만 입력 가능합니다 (한국어 불가)",
-                                color = Color(0xFFFF5252),
-                                fontSize = 12.sp
-                            )
-                        } else {
-                            Spacer(modifier = Modifier.height(6.dp + 18.sp.value.dp))
-                        }
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            Text(
-                                text = "취소",
-                                color = Color.White,
-                                fontSize = 14.sp,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                                    .clickable { show3DModelingDialog = false }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "전송",
-                                color = if (isValid3DPrompt) Color.White else Color.White.copy(alpha = 0.35f),
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(
-                                        if (isValid3DPrompt) Color(0xFF1B4F8A)
-                                        else Color(0xFF1B4F8A).copy(alpha = 0.3f)
-                                    )
-                                    .clickable(enabled = isValid3DPrompt) {
-                                        val promptSnapshot = modelingPromptText.trim()
-                                        show3DModelingDialog = false
-                                        uploadSourceTab = pending3DSourceTab
-
-                                        when (pending3DSourceTab) {
-                                            LibraryTab.GALLERY -> {
-                                                val urisSnapshot = pending3DGalleryUris
-                                                isUploading = true
-                                                uploadProgress = 0 to 100
-                                                uploadMessage = "업로드 준비 중..."
-                                                CoroutineScope(Dispatchers.IO).launch {
-                                                    try {
-                                                        val zipFile = createZipFromUris(
-                                                            context = context,
-                                                            uris = urisSnapshot,
-                                                            zipPrefix = "media"
-                                                        )
-                                                        val success = zipFile != null && uploadZipAndRunPipeline(
-                                                            context = context,
-                                                            zipFile = zipFile,
-                                                            prompt = promptSnapshot,
-                                                            onProgress = { p, msg ->
-                                                                // suspend 람다: withContext로 Main 전환 → Compose 상태 안전 업데이트
-                                                                withContext(Dispatchers.Main) {
-                                                                    uploadProgress = p to 100
-                                                                    uploadMessage = msg
-                                                                }
-                                                            }
-                                                        )
-                                                        withContext(Dispatchers.Main) {
-                                                            isUploading = false
-                                                            if (success) {
-                                                                uploadResultPopupMessage = "서버에 업로드가 완료되었습니다."
-                                                                showUploadResultPopup = true
-                                                                selectedItems = emptySet()
-                                                                isEditMode = false
-                                                            } else {
-                                                                uploadResultPopupMessage =
-                                                                    if (uploadMessage == noServerResponseMsg) noServerResponseMsg else "업로드 실패"
-                                                                showUploadResultPopup = true
-                                                                if (uploadMessage != noServerResponseMsg) uploadMessage = "업로드 실패"
-                                                            }
-                                                        }
-                                                    } catch (e: Exception) {
-                                                        e.printStackTrace()
-                                                        withContext(Dispatchers.Main) {
-                                                            isUploading = false
-                                                            uploadMessage = "업로드 실패"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            LibraryTab.DATASET -> {
-                                                val foldersSnapshot = pending3DDatasetFolders
-                                                isUploading = true
-                                                uploadProgress = 0 to 100
-                                                uploadMessage = "업로드 준비 중..."
-                                                CoroutineScope(Dispatchers.IO).launch {
-                                                    try {
-                                                        val folderFiles = foldersSnapshot
-                                                            .map { File(it) }
-                                                            .filter { it.exists() && it.isDirectory }
-                                                        val zipFile = createZipFromFolders(
-                                                            context = context,
-                                                            folders = folderFiles,
-                                                            zipPrefix = "dataset"
-                                                        )
-                                                        val success = zipFile != null && uploadZipAndRunPipeline(
-                                                            context = context,
-                                                            zipFile = zipFile,
-                                                            prompt = promptSnapshot,
-                                                            onProgress = { p, msg ->
-                                                                // suspend 람다: withContext로 Main 전환 → Compose 상태 안전 업데이트
-                                                                withContext(Dispatchers.Main) {
-                                                                    uploadProgress = p to 100
-                                                                    uploadMessage = msg
-                                                                }
-                                                            }
-                                                        )
-                                                        withContext(Dispatchers.Main) {
-                                                            isUploading = false
-                                                            if (success) {
-                                                                uploadResultPopupMessage = "서버에 업로드가 완료되었습니다."
-                                                                showUploadResultPopup = true
-                                                                selectedDatasetFolders = emptySet()
-                                                                isDatasetEditMode = false
-                                                            } else {
-                                                                uploadResultPopupMessage =
-                                                                    if (uploadMessage == noServerResponseMsg) noServerResponseMsg else "업로드 실패"
-                                                                showUploadResultPopup = true
-                                                                if (uploadMessage != noServerResponseMsg) uploadMessage = "업로드 실패"
-                                                            }
-                                                        }
-                                                    } catch (e: Exception) {
-                                                        e.printStackTrace()
-                                                        withContext(Dispatchers.Main) {
-                                                            isUploading = false
-                                                            uploadMessage = "업로드 실패"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            else -> {}
-                                        }
-                                    }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        if (showDeleteConfirm) {
-            Dialog(onDismissRequest = { showDeleteConfirm = false }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                        .padding(20.dp)
-                ) {
-                    Column {
-                        Text(
-                            text = "삭제 확인",
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "삭제하시겠습니까?",
-                            color = Color.White.copy(alpha = 0.8f),
-                            fontSize = 14.sp
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            Text(
-                                text = "취소",
-                                color = Color.White,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                                    .clickable { showDeleteConfirm = false }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "삭제",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(Color.Red)
-                                    .clickable {
-                                        val itemsToDelete = selectedItems.toList()
-                                        itemsToDelete.forEach { uri ->
-                                            deleteMediaByUri(context, uri)
-                                        }
-                                        selectedItems = emptySet()
-                                        isEditMode = false
-                                        showDeleteConfirm = false
-                                        onImageDeleted()
-                                    }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        if (showDeleteAllConfirm) {
-            Dialog(onDismissRequest = { showDeleteAllConfirm = false }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                        .padding(20.dp)
-                ) {
-                    Column {
-                        Text(
-                            text = "전체 삭제",
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "정말로 모든 미디어를 삭제하겠습니까?",
-                            color = Color.White.copy(alpha = 0.8f),
-                            fontSize = 14.sp
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            Text(
-                                text = "취소",
-                                color = Color.White,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                                    .clickable { showDeleteAllConfirm = false }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "삭제",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(Color.Red)
-                                    .clickable {
-                                        deleteAllMedia(context)
-                                        selectedItems = emptySet()
-                                        isEditMode = false
-                                        showDeleteAllConfirm = false
-                                        onImageDeleted()
-                                    }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        if (showDatasetDeleteAllConfirm) {
-            Dialog(onDismissRequest = { showDatasetDeleteAllConfirm = false }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                        .padding(20.dp)
-                ) {
-                    Column {
-                        Text(
-                            text = "데이터셋폴더 전체 삭제",
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "모든 데이터셋 폴더와 그 안의 이미지를 삭제하겠습니까?",
-                            color = Color.White.copy(alpha = 0.8f),
-                            fontSize = 14.sp
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            Text(
-                                text = "취소",
-                                color = Color.White,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                                    .clickable { showDatasetDeleteAllConfirm = false }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "삭제",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(Color.Red)
-                                    .clickable {
-                                        deleteAllDatasetFolders(context)
-                                        showDatasetDeleteAllConfirm = false
-                                        isDatasetEditMode = false
-                                        selectedDatasetFolders = emptySet()
-                                        pendingDatasetMenuAction = PendingDatasetMenuAction.None
-                                        loadDatasetFolders(context) { datasetFolders = it }
-                                    }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        if (showDatasetDeleteConfirm) {
-            Dialog(onDismissRequest = { showDatasetDeleteConfirm = false }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                        .padding(20.dp)
-                ) {
-                    Column {
-                        Text(
-                            text = "폴더 삭제",
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "정말로 삭제하시겠습니까?",
-                            color = Color.White.copy(alpha = 0.8f),
-                            fontSize = 14.sp
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            Text(
-                                text = "취소",
-                                color = Color.White,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                                    .clickable { showDatasetDeleteConfirm = false }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "삭제",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(Color.Red)
-                                    .clickable {
-                                        val pathsToDelete = selectedDatasetFolders.toList()
-                                        pathsToDelete.forEach { path ->
-                                            try {
-                                                File(path).deleteRecursively()
-                                            } catch (e: Exception) {
-                                                e.printStackTrace()
-                                            }
-                                        }
-                                        selectedDatasetFolders = emptySet()
-                                        isDatasetEditMode = false
-                                        showDatasetDeleteConfirm = false
-                                        if (currentDatasetFolder != null &&
-                                            pathsToDelete.contains(currentDatasetFolder!!.dir.absolutePath)
-                                        ) {
-                                            currentDatasetFolder = null
-                                            datasetImages = emptyList()
-                                            libraryDetailScreen = LibraryDetailScreen.NONE
-                                        }
-                                        loadDatasetFolders(context) { folders ->
-                                            datasetFolders = folders
-                                        }
-                                    }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        if (showLibraryAssetDeleteConfirm) {
-            Dialog(onDismissRequest = { showLibraryAssetDeleteConfirm = false }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF2F2F2F), RoundedCornerShape(16.dp))
-                        .padding(20.dp)
-                ) {
-                    Column {
-                        Text(
-                            text = "삭제 확인",
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "삭제하시겠습니까?",
-                            color = Color.White.copy(alpha = 0.85f),
-                            fontSize = 14.sp
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            Text(
-                                text = "취소",
-                                color = Color.White,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                                    .clickable { showLibraryAssetDeleteConfirm = false }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "삭제",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(Color.Red)
-                                    .clickable {
-                                        val paths = selectedLibraryAssetPaths.toList()
-                                        var anyFail = false
-                                        when (libraryTab) {
-                                            LibraryTab.MODEL_3D -> {
-                                                paths.forEach { p ->
-                                                    val f = File(p)
-                                                    if (!deleteLibraryModelFile(f)) anyFail = true
-                                                    if (currentPlyModel?.file?.absolutePath == p) {
-                                                        libraryDetailScreen =
-                                                            if (f.extension.equals("obj", ignoreCase = true)) {
-                                                                LibraryDetailScreen.MODEL_3D_OBJ_LIST
-                                                            } else {
-                                                                LibraryDetailScreen.MODEL_3D_PLY_LIST
-                                                            }
-                                                        currentPlyModel = null
-                                                    }
-                                                }
-                                                loadModel3dLibrary(context) { lib ->
-                                                    plyLibraryModels = lib.plyModels
-                                                    objLibraryModels = lib.objModels
-                                                }
-                                            }
-                                            LibraryTab.AI_CAD -> {
-                                                paths.forEach { p ->
-                                                    val f = File(p)
-                                                    Model3dThumbnail.invalidateForModelFile(context, f)
-                                                    if (!deleteAiCadArtifactsForStl(f)) anyFail = true
-                                                    if (selectedAiCadStlFile?.absolutePath == p) {
-                                                        selectedAiCadStlFile = null
-                                                    }
-                                                }
-                                                onAiCadLibraryInvalidate()
-                                            }
-                                            else -> {}
-                                        }
-                                        if (anyFail) {
-                                            Toast.makeText(
-                                                context,
-                                                "일부 항목 삭제에 실패했습니다.",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                        }
-                                        libraryAssetEditMode = false
-                                        selectedLibraryAssetPaths = emptySet()
-                                        showLibraryAssetDeleteConfirm = false
-                                    }
-                                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 @Composable
 fun MediaDetailScreen(
     mediaList: List<Uri>,
@@ -8485,7 +1296,7 @@ fun MediaDetailScreen(
 // ──────────────────────────────────────────────────────────────────────────────
 private enum class CropHandle { NONE, MOVE, NW, NE, SW, SE, N, E, S, W }
 
-private data class PendingCropData(
+internal data class PendingCropData(
     val left: Float,
     val top: Float,
     val width: Float,
@@ -8787,7 +1598,7 @@ fun ImageEditScreen(
 // 누끼 따기 — 영역 직접 드로잉 + U²-Net 사물 분리
 // ─────────────────────────────────────────────────────────────────────────────
 @Composable
-private fun SubjectSegmentOverlay(
+internal fun SubjectSegmentOverlay(
     sourceUri: Uri,
     totalRotation: Float,
     isFlipped: Boolean,
@@ -9049,7 +1860,7 @@ private fun SubjectSegmentOverlay(
 // 자르기 오버레이 (이미지 위에 전체 화면으로 덮음)
 // ─────────────────────────────────────────────────────────────────────────────
 @Composable
-private fun CropModeOverlay(
+internal fun CropModeOverlay(
     imageUri: Uri,
     topBarDp: androidx.compose.ui.unit.Dp,
     bottomBarDp: androidx.compose.ui.unit.Dp,
@@ -9465,7 +2276,7 @@ private fun CropModeOverlay(
 
 // ──────────────────────────────────────────────────────────────────────────────
 @Composable
-private fun EditDialBar(
+internal fun EditDialBar(
     degrees: Float,
     onDegreesChanged: (Float) -> Unit
 ) {
@@ -9552,7 +2363,7 @@ private fun EditDialBar(
 
 // ── 편집 기능 버튼 아이템 ──────────────────────────────────────────────────────
 @Composable
-private fun EditActionButton(
+internal fun EditActionButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     onClick: () -> Unit
@@ -9579,7 +2390,7 @@ private fun EditActionButton(
 // ─────────────────────────────────────────────────────────────────────────────
 // 현재 편집 상태(회전·반전·크롭)를 적용한 비트맵 생성
 // ─────────────────────────────────────────────────────────────────────────────
-private suspend fun buildWorkingBitmap(
+internal suspend fun buildWorkingBitmap(
     context: Context,
     sourceUri: Uri,
     totalRotation: Float,
@@ -9626,7 +2437,7 @@ private suspend fun buildWorkingBitmap(
 // ─────────────────────────────────────────────────────────────────────────────
 // ML Kit Subject Segmentation + 드로잉 경로 마스크 합성
 // ─────────────────────────────────────────────────────────────────────────────
-private suspend fun performSubjectSegmentation(
+internal suspend fun performSubjectSegmentation(
     context: Context,
     bitmap: android.graphics.Bitmap,
     pathPoints: List<Offset>,
@@ -9719,7 +2530,7 @@ private suspend fun performSubjectSegmentation(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-private suspend fun saveEditedImage(
+internal suspend fun saveEditedImage(
     context: Context,
     originalUri: Uri,
     rotationDegrees: Float,
@@ -9802,7 +2613,7 @@ private suspend fun saveEditedImage(
     }
 }
 
-private fun takePhoto(
+internal fun takePhoto(
     context: Context,
     imageCapture: ImageCapture,
     onPhotoTaken: (Uri) -> Unit
@@ -9830,7 +2641,7 @@ private fun takePhoto(
     )
 }
 
-private fun startVideoRecording(
+internal fun startVideoRecording(
     context: Context,
     videoCapture: VideoCapture<androidx.camera.video.Recorder>,
     onRecordingStarted: (Recording) -> Unit,
@@ -9890,7 +2701,7 @@ private fun startVideoRecording(
 // - 변경: 3x3 배열(9개)의 "가상 점(샘플 포인트)"을 중앙 주변에 배치하고,
 //        9개 중 7개 이상이 동일한 공간(=주변 RGB/밝기 특성이 동일한 영역)으로 판정되면 경고(false)
 // true: 적합, false: 부적합(경고 필요)
-private fun checkModelingSuitability(bitmap: android.graphics.Bitmap): Boolean {
+internal fun checkModelingSuitability(bitmap: android.graphics.Bitmap): Boolean {
     val width = bitmap.width
     val height = bitmap.height
     if (width <= 2 || height <= 2) return true
@@ -9979,7 +2790,7 @@ private fun checkModelingSuitability(bitmap: android.graphics.Bitmap): Boolean {
 // (삭제) IID/MSA 기반 광택 제거 기능: 요청에 따라 Inpainting 기반으로 전면 교체됨
 
 // [추가] 이미지 파일 로드 시 EXIF 회전 정보 반영
-private fun loadBitmapWithRotation(path: String): android.graphics.Bitmap? {
+internal fun loadBitmapWithRotation(path: String): android.graphics.Bitmap? {
     return try {
         val bitmap = BitmapFactory.decodeFile(path) ?: return null
         val exif = ExifInterface(path)
@@ -10008,7 +2819,7 @@ private fun loadBitmapWithRotation(path: String): android.graphics.Bitmap? {
 // (삭제) 픽셀 억제/금속/반광/통합 파이프라인: 요청에 따라 Inpainting 기반으로 전면 교체됨
 
 
-private fun saveBitmapToFile(bitmap: android.graphics.Bitmap, file: File) {
+internal fun saveBitmapToFile(bitmap: android.graphics.Bitmap, file: File) {
     try {
         java.io.FileOutputStream(file).use { out ->
             bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 100, out)
@@ -10018,7 +2829,7 @@ private fun saveBitmapToFile(bitmap: android.graphics.Bitmap, file: File) {
     }
 }
 
-private fun captureDatasetImage(
+internal fun captureDatasetImage(
     context: Context,
     sectorIndex: Int,
     pitchAngle: Int,
@@ -10108,13 +2919,13 @@ private fun captureDatasetImage(
     }
 }
 
-private fun formatTime(millis: Long): String {
+internal fun formatTime(millis: Long): String {
     val seconds = TimeUnit.MILLISECONDS.toSeconds(millis) % 60
     val minutes = TimeUnit.MILLISECONDS.toMinutes(millis) % 60
     return String.format(Locale.US, "%02d:%02d", minutes, seconds)
 }
 
-private fun deleteMediaByUri(context: Context, uri: Uri) {
+internal fun deleteMediaByUri(context: Context, uri: Uri) {
     try {
         if (uri.scheme == "content") {
             context.contentResolver.delete(uri, null, null)
@@ -10129,7 +2940,7 @@ private fun deleteMediaByUri(context: Context, uri: Uri) {
     }
 }
 
-private fun deleteAllMedia(context: Context) {
+internal fun deleteAllMedia(context: Context) {
     try {
         val mediaDir = context.getExternalFilesDir(null)
         if (mediaDir != null && mediaDir.exists()) {
@@ -10146,7 +2957,7 @@ private fun deleteAllMedia(context: Context) {
     }
 }
 
-private fun deleteDatasetFolder(folder: DatasetFolder) {
+internal fun deleteDatasetFolder(folder: DatasetFolder) {
     try {
         if (folder.dir.exists()) {
             folder.dir.deleteRecursively()
@@ -10157,7 +2968,7 @@ private fun deleteDatasetFolder(folder: DatasetFolder) {
 }
 
 /** 데이터셋폴더 라이브러리 전체 비우기 (`datasets/` 하위만) */
-private fun deleteAllDatasetFolders(context: Context) {
+internal fun deleteAllDatasetFolders(context: Context) {
     try {
         val root = File(context.getExternalFilesDir(null), "datasets")
         if (root.exists()) {
@@ -10174,7 +2985,7 @@ private fun deleteAllDatasetFolders(context: Context) {
  * 데이터셋 라이브러리에서 배경/광택 제거 등 배치 처리 시, [datasets] 아래 원본과 분리된 새 폴더를 만든다.
  * 단일 원본 폴더: `원본폴더명_작업라벨_시각`, 복수: `작업라벨_N개폴더_시각`
  */
-private fun createDatasetBatchResultFolder(
+internal fun createDatasetBatchResultFolder(
     context: Context,
     sourceFolderPaths: Set<String>,
     operationLabel: String
@@ -10196,7 +3007,7 @@ private fun createDatasetBatchResultFolder(
 }
 
 /** 선택한 데이터셋 폴더 경로들에서 이미지 파일 URI 수집 (동영상 제외는 호출부에서) */
-private fun collectImageUrisFromDatasetFolderPaths(
+internal fun collectImageUrisFromDatasetFolderPaths(
     folderPaths: Set<String>
 ): List<Uri> {
     val imageExts = setOf("jpg", "jpeg", "png", "webp", "heic", "heif")
@@ -10213,7 +3024,7 @@ private fun collectImageUrisFromDatasetFolderPaths(
     return uris
 }
 
-private fun isVideoUri(context: Context, uri: Uri): Boolean {
+internal fun isVideoUri(context: Context, uri: Uri): Boolean {
     return try {
         if (uri.scheme == "content") {
             val type = context.contentResolver.getType(uri)
@@ -10227,7 +3038,7 @@ private fun isVideoUri(context: Context, uri: Uri): Boolean {
 }
 
 /** EXIF 촬영/생성 시각(없으면 null) — 정렬용 */
-private fun exifSortTimeMillis(path: String): Long? {
+internal fun exifSortTimeMillis(path: String): Long? {
     return try {
         val exif = ExifInterface(path)
         val raw = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
@@ -10241,7 +3052,7 @@ private fun exifSortTimeMillis(path: String): Long? {
     }
 }
 
-private fun parseVideoMetadataDateMillis(raw: String?): Long? {
+internal fun parseVideoMetadataDateMillis(raw: String?): Long? {
     if (raw.isNullOrBlank()) return null
     val s = raw.trim()
     if (s.all { it.isDigit() }) {
@@ -10275,7 +3086,7 @@ private fun parseVideoMetadataDateMillis(raw: String?): Long? {
     return null
 }
 
-private fun videoSortTimeMillis(file: File): Long {
+internal fun videoSortTimeMillis(file: File): Long {
     var r: MediaMetadataRetriever? = null
     return try {
         r = MediaMetadataRetriever()
@@ -10295,7 +3106,7 @@ private fun videoSortTimeMillis(file: File): Long {
 /**
  * 갤러리 정렬용: 사진·이미지는 EXIF 촬영 시각, 동영상은 메타데이터 촬영 시각, 없으면 [File.lastModified].
  */
-private fun mediaSortTimeMillis(file: File): Long {
+internal fun mediaSortTimeMillis(file: File): Long {
     if (!file.isFile) return 0L
     return when (file.extension.lowercase(Locale.ROOT)) {
         "mp4" -> videoSortTimeMillis(file)
@@ -10306,7 +3117,7 @@ private fun mediaSortTimeMillis(file: File): Long {
 }
 
 /** 로컬 자정 기준 일 단위 키 (날짜 헤더·그룹용) */
-private fun startOfDayLocalMillis(millis: Long): Long {
+internal fun startOfDayLocalMillis(millis: Long): Long {
     val cal = Calendar.getInstance(Locale.getDefault())
     cal.timeInMillis = millis
     cal.set(Calendar.HOUR_OF_DAY, 0)
@@ -10317,7 +3128,7 @@ private fun startOfDayLocalMillis(millis: Long): Long {
 }
 
 /** 갤러리 날짜 헤더: `2024년 12월 15일` */
-private fun formatKoreanDateHeader(dayStartMillis: Long): String {
+internal fun formatKoreanDateHeader(dayStartMillis: Long): String {
     val cal = Calendar.getInstance(Locale.getDefault())
     cal.timeInMillis = dayStartMillis
     val y = cal.get(Calendar.YEAR)
@@ -10329,7 +3140,7 @@ private fun formatKoreanDateHeader(dayStartMillis: Long): String {
 /**
  * [sortedItemsNewestFirst]는 시각 내림차순(최신 먼저)이어야 같은 날짜끼리 연속으로 묶입니다.
  */
-private fun <T> groupByDayConsecutiveDescending(
+internal fun <T> groupByDayConsecutiveDescending(
     sortedItemsNewestFirst: List<T>,
     millisOf: (T) -> Long
 ): List<Pair<Long, List<T>>> {
@@ -10358,7 +3169,7 @@ private fun <T> groupByDayConsecutiveDescending(
     return out
 }
 
-private fun gallerySortMillisForUri(context: Context, uri: Uri): Long {
+internal fun gallerySortMillisForUri(context: Context, uri: Uri): Long {
     return try {
         when (uri.scheme?.lowercase(Locale.ROOT)) {
             "file" -> {
@@ -10396,12 +3207,12 @@ private fun gallerySortMillisForUri(context: Context, uri: Uri): Long {
     }
 }
 
-private fun groupImagesByDayInOrder(context: Context, images: List<Uri>): List<Pair<Long, List<Uri>>> {
+internal fun groupImagesByDayInOrder(context: Context, images: List<Uri>): List<Pair<Long, List<Uri>>> {
     return groupByDayConsecutiveDescending(images) { gallerySortMillisForUri(context, it) }
 }
 
 /** 날짜 헤더 포함 시 [images]에서 미디어 인덱스에 해당하는 그리드 행 인덱스 */
-private fun gridItemIndexForMediaIndex(
+internal fun gridItemIndexForMediaIndex(
     mediaIndex: Int,
     images: List<Uri>,
     context: Context
@@ -10421,7 +3232,7 @@ private fun gridItemIndexForMediaIndex(
     return 0
 }
 
-private fun loadDatasetFolders(
+internal fun loadDatasetFolders(
     context: Context,
     onLoaded: (List<DatasetFolder>) -> Unit
 ) {
@@ -10429,7 +3240,7 @@ private fun loadDatasetFolders(
 }
 
 // [추가] 데이터셋 폴더 로드(동기) + 빈 폴더 자동 정리
-private fun loadDatasetFoldersSync(context: Context): List<DatasetFolder> {
+internal fun loadDatasetFoldersSync(context: Context): List<DatasetFolder> {
     val root = File(context.getExternalFilesDir(null), "datasets")
     if (!root.exists()) {
         return emptyList()
@@ -10471,7 +3282,7 @@ private fun loadDatasetFoldersSync(context: Context): List<DatasetFolder> {
 }
 
 /** Gemini 전송용: 모든 데이터셋 폴더의 이미지 URI 목록 로드 */
-private fun loadAllDatasetImages(context: Context, onLoaded: (List<Uri>) -> Unit) {
+internal fun loadAllDatasetImages(context: Context, onLoaded: (List<Uri>) -> Unit) {
     val folders = loadDatasetFoldersSync(context)
     val imageExts = setOf("jpg", "jpeg", "png", "webp")
     val uris = folders.flatMap { folder ->
@@ -10482,7 +3293,7 @@ private fun loadAllDatasetImages(context: Context, onLoaded: (List<Uri>) -> Unit
     onLoaded(uris)
 }
 
-private fun loadDatasetImages(
+internal fun loadDatasetImages(
     dir: File,
     onLoaded: (List<Uri>) -> Unit
 ) {
@@ -10498,7 +3309,7 @@ private fun loadDatasetImages(
     onLoaded(images.map { Uri.fromFile(it) })
 }
 
-private fun shareLibraryFile(context: Context, file: File) {
+internal fun shareLibraryFile(context: Context, file: File) {
     if (!file.exists() || !file.isFile) {
         Toast.makeText(context, "파일을 찾을 수 없습니다.", Toast.LENGTH_SHORT).show()
         return
@@ -10533,7 +3344,7 @@ private fun shareLibraryFile(context: Context, file: File) {
  * [loadCapturedMediaSync] 등은 [Uri.fromFile]을 쓰므로 `file://`인데, 다른 앱으로 넘기려면
  * FileProvider `content://`가 필요합니다(API 24+).
  */
-private fun uriToShareableContentUri(context: Context, uri: Uri): Uri? {
+internal fun uriToShareableContentUri(context: Context, uri: Uri): Uri? {
     if (uri.scheme.equals("content", ignoreCase = true)) {
         return uri
     }
@@ -10558,7 +3369,7 @@ private fun uriToShareableContentUri(context: Context, uri: Uri): Uri? {
 }
 
 /** 앱 갤러리 미디어(Uri) 공유 — 단일/다중 스트림 */
-private fun shareGalleryMediaUris(context: Context, uris: List<Uri>) {
+internal fun shareGalleryMediaUris(context: Context, uris: List<Uri>) {
     val list = uris.filter { it != Uri.EMPTY }
     if (list.isEmpty()) {
         Toast.makeText(context, "공유할 항목이 없습니다.", Toast.LENGTH_SHORT).show()
@@ -10604,7 +3415,7 @@ private fun shareGalleryMediaUris(context: Context, uris: List<Uri>) {
     }
 }
 
-private fun shareLibraryFiles(context: Context, files: List<File>) {
+internal fun shareLibraryFiles(context: Context, files: List<File>) {
     val existing = files.filter { it.exists() && it.isFile }
     if (existing.isEmpty()) {
         Toast.makeText(context, "파일을 찾을 수 없습니다.", Toast.LENGTH_SHORT).show()
@@ -10641,7 +3452,7 @@ private fun shareLibraryFiles(context: Context, files: List<File>) {
     context.startActivity(Intent.createChooser(intent, "공유"))
 }
 
-private fun deleteLibraryModelFile(file: File): Boolean {
+internal fun deleteLibraryModelFile(file: File): Boolean {
     return try {
         if (!file.exists() || !file.isFile) return false
         val ok = file.delete()
@@ -10661,7 +3472,7 @@ private fun deleteLibraryModelFile(file: File): Boolean {
 }
 
 /** STL과 동일 베이스명의 GLB·OBJ를 함께 제거합니다. */
-private fun deleteAiCadArtifactsForStl(stlFile: File): Boolean {
+internal fun deleteAiCadArtifactsForStl(stlFile: File): Boolean {
     return try {
         val dir = stlFile.parentFile ?: return false
         val base = stlFile.nameWithoutExtension
@@ -10680,23 +3491,52 @@ private fun deleteAiCadArtifactsForStl(stlFile: File): Boolean {
     }
 }
 
-private fun loadModel3dLibrary(
+/**
+ * 서버 파이프라인 결과는 [plyRoot]/server_task_{taskId}/아래에 PLY가 저장된다.
+ * 기존 로직은 ply 루트의 파일만 나열해 서버 작업 PLY가 라이브러리에 안 보였음 → 1단계 하위 폴더까지 포함.
+ */
+private fun collectPlyFilesForLibrary(plyRoot: File): List<File> {
+    val out = ArrayList<File>()
+    val top = plyRoot.listFiles() ?: return out
+    for (entry in top) {
+        when {
+            entry.isFile && entry.name.endsWith(".ply", ignoreCase = true) -> out.add(entry)
+            entry.isDirectory -> {
+                val sub = entry.listFiles() ?: continue
+                for (f in sub) {
+                    if (f.isFile && f.name.endsWith(".ply", ignoreCase = true)) out.add(f)
+                }
+            }
+        }
+    }
+    return out.distinctBy { it.absolutePath }.sortedByDescending { it.lastModified() }
+}
+
+private fun displayNameForPlyLibraryEntry(plyFile: File, plyRoot: File): String {
+    val base = plyFile.nameWithoutExtension
+    val parent = plyFile.parentFile ?: return base
+    return try {
+        if (parent.canonicalPath == plyRoot.canonicalPath) base
+        else "${parent.name}_$base"
+    } catch (_: Exception) {
+        "${parent.name}_$base"
+    }
+}
+
+internal fun loadModel3dLibrary(
     context: Context,
     onLoaded: (Model3dSplitLibrary) -> Unit
 ) {
     ModelLibraryPaths.migrateFlatModelsIfNeeded(context)
     val plyD = ModelLibraryPaths.plyDir(context)
     val objD = ModelLibraryPaths.objDir(context)
-    val plyList = (plyD.listFiles { f -> f.isFile && f.name.endsWith(".ply", ignoreCase = true) }
-        ?: emptyArray())
-        .map { f ->
-            PlyModel(
-                name = f.nameWithoutExtension,
-                file = f,
-                lastModified = f.lastModified()
-            )
-        }
-        .sortedByDescending { it.lastModified }
+    val plyList = collectPlyFilesForLibrary(plyD).map { f ->
+        PlyModel(
+            name = displayNameForPlyLibraryEntry(f, plyD),
+            file = f,
+            lastModified = f.lastModified()
+        )
+    }
     val objList = (objD.listFiles { f -> f.isFile && f.name.endsWith(".obj", ignoreCase = true) }
         ?: emptyArray())
         .map { f ->
@@ -10715,7 +3555,7 @@ private fun loadModel3dLibrary(
  * PLY 원본과 models_obj 캐시는 삭제하지 않습니다. `mtllib` 경로는 저장 위치에 맞게 조정합니다.
  * @return null 이면 성공, 아니면 오류 메시지
  */
-private fun saveConvertedObjToModelsLibrary(
+internal fun saveConvertedObjToModelsLibrary(
     context: Context,
     plySource: File,
     cachedObj: File
@@ -10805,12 +3645,12 @@ private fun saveConvertedObjToModelsLibrary(
 }
 
 /** 갤러리 스캔 시 재귀를 막을 앱 전용 폴더 (gemma4 extracted·models 등은 파일 수가 매우 많음) */
-private fun skipGallerySubtreeDirName(name: String): Boolean = when (name.lowercase(Locale.ROOT)) {
+internal fun skipGallerySubtreeDirName(name: String): Boolean = when (name.lowercase(Locale.ROOT)) {
     "datasets", "gemma4", "models", "aicad_library" -> true
     else -> false
 }
 
-private fun loadCapturedMediaSync(context: Context): List<Uri> {
+internal fun loadCapturedMediaSync(context: Context): List<Uri> {
     val mediaDir = context.getExternalFilesDir(null)
     if (mediaDir == null || !mediaDir.exists()) {
         return emptyList()
@@ -10838,6 +3678,15 @@ private fun loadCapturedMediaSync(context: Context): List<Uri> {
     return entries.sortedByDescending { it.second }.map { it.first }
 }
 
+/** 앱 내 갤러리 스캔 결과 중 이미지 파일만 (동영상 제외). Mobile 3DGS 이미지 선택 등에 사용 */
+internal fun loadCapturedImageUrisOnlySync(context: Context): List<Uri> {
+    return loadCapturedMediaSync(context).filter { uri ->
+        val path = uri.path?.lowercase(Locale.ROOT) ?: return@filter false
+        path.endsWith(".jpg") || path.endsWith(".jpeg") || path.endsWith(".png") ||
+            path.endsWith(".webp") || path.endsWith(".heic") || path.endsWith(".heif")
+    }
+}
+
 /**
  * HTTPS를 지원하는 OkHttpClient 베이스 인스턴스.
  * 호출부에서 [OkHttpClient.newBuilder]로 타임아웃만 조정하므로, SSL 초기화 비용은 모드별 1회로 캐시합니다.
@@ -10851,7 +3700,7 @@ private var okHttpBaseTrustAll: OkHttpClient? = null
 /**
  * HTTPS를 지원하는 OkHttpClient 생성
  */
-private fun createOkHttpClient(useHttps: Boolean = DEFAULT_USE_HTTPS): OkHttpClient {
+internal fun createOkHttpClient(useHttps: Boolean = DEFAULT_USE_HTTPS): OkHttpClient {
     if (useHttps) {
         okHttpBaseTrustAll?.let { return it }
         synchronized(okHttpBaseLock) {
@@ -10866,7 +3715,7 @@ private fun createOkHttpClient(useHttps: Boolean = DEFAULT_USE_HTTPS): OkHttpCli
     }
 }
 
-private fun buildOkHttpClientBase(useHttps: Boolean): OkHttpClient {
+internal fun buildOkHttpClientBase(useHttps: Boolean): OkHttpClient {
     val builder = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
@@ -10891,7 +3740,20 @@ private fun buildOkHttpClientBase(useHttps: Boolean): OkHttpClient {
     return builder.build()
 }
 
-private fun resolveDisplayName(context: Context, uri: Uri): String? {
+/**
+ * 서버 결과 파일 다운로드 전용 클라이언트.
+ * read/write/call 타임아웃 0 = 무제한(OkHttp 규약) — 수 GB·저속 회선에서 조기 종료 방지.
+ */
+internal fun buildServerDownloadOkHttpClient(useHttps: Boolean): OkHttpClient {
+    return createOkHttpClient(useHttps).newBuilder()
+        .connectTimeout(120, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.SECONDS)
+        .writeTimeout(0, TimeUnit.SECONDS)
+        .callTimeout(0, TimeUnit.SECONDS)
+        .build()
+}
+
+internal fun resolveDisplayName(context: Context, uri: Uri): String? {
     return try {
         if (uri.scheme == "content") {
             context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
@@ -10907,7 +3769,7 @@ private fun resolveDisplayName(context: Context, uri: Uri): String? {
     }
 }
 
-private suspend fun createZipFromUris(
+internal suspend fun createZipFromUris(
     context: Context,
     uris: List<Uri>,
     zipPrefix: String
@@ -10949,7 +3811,7 @@ private suspend fun createZipFromUris(
     }
 }
 
-private suspend fun createZipFromFolders(
+internal suspend fun createZipFromFolders(
     context: Context,
     folders: List<File>,
     zipPrefix: String
@@ -10997,7 +3859,7 @@ private suspend fun createZipFromFolders(
  * @param file 업로드할 파일
  * @return 업로드 성공 여부
  */
-private suspend fun startServerTaskWithZip(
+internal suspend fun startServerTaskWithZip(
     context: Context,
     zipFile: File,
     prompt: String = ""
@@ -11025,6 +3887,7 @@ private suspend fun startServerTaskWithZip(
                     zipFile.asRequestBody("application/zip".toMediaType())
                 )
             if (prompt.isNotBlank()) {
+                multipartBuilder.addFormDataPart("text_prompt", prompt)
                 multipartBuilder.addFormDataPart("prompt", prompt)
             }
             val requestBody = multipartBuilder.build()
@@ -11056,14 +3919,14 @@ private suspend fun startServerTaskWithZip(
 
 // (삭제) 서버 기반 광택/반사 제거 파이프라인: 요청에 따라 로컬 Inpainting 기반으로 교체됨
 
-private data class ServerTaskStatus(
+internal data class ServerTaskStatus(
     val status: String,
     val progressPercent: Int,
     val message: String,
     val downloadUrl: String?
 )
 
-private suspend fun fetchServerTaskStatus(context: Context, taskId: String): ServerTaskStatus? {
+internal suspend fun fetchServerTaskStatus(context: Context, taskId: String): ServerTaskStatus? {
     return withContext(Dispatchers.IO) {
         try {
             val serverAddress = getServerAddress(context)
@@ -11105,6 +3968,230 @@ private suspend fun fetchServerTaskStatus(context: Context, taskId: String): Ser
     }
 }
 
+internal suspend fun fetchServerResultsJson(context: Context, taskId: String): JSONObject? {
+    return withContext(Dispatchers.IO) {
+        try {
+            val serverAddress = getServerAddress(context)
+            val serverPort = getServerPort(context)
+            val useHttps = getUseHttps(context)
+            val client = createOkHttpClient(useHttps).newBuilder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(120, TimeUnit.SECONDS)
+                .callTimeout(150, TimeUnit.SECONDS)
+                .build()
+            val protocol = if (useHttps) "https" else "http"
+            val url = "$protocol://$serverAddress:$serverPort$RESULTS_ENDPOINT/$taskId"
+            val request = Request.Builder().url(url).get().build()
+            val response = client.newCall(request).execute()
+            val body = response.body?.string()
+            val ok = response.isSuccessful && body != null
+            response.close()
+            if (!ok) return@withContext null
+            JSONObject(body)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+}
+
+internal suspend fun downloadHttpUrlToFile(context: Context, absoluteUrl: String, outFile: File): Boolean {
+    return withContext(Dispatchers.IO) {
+        try {
+            val useHttps = getUseHttps(context)
+            val client = buildServerDownloadOkHttpClient(useHttps)
+            val request = Request.Builder().url(absoluteUrl).get().build()
+            client.newCall(request).execute().use { response ->
+                val body = response.body
+                if (!response.isSuccessful || body == null) {
+                    return@withContext false
+                }
+                outFile.parentFile?.mkdirs()
+                body.byteStream().use { input ->
+                    BufferedOutputStream(FileOutputStream(outFile), SERVER_DOWNLOAD_BUFFER_BYTES).use { output ->
+                        input.copyTo(output, SERVER_DOWNLOAD_BUFFER_BYTES)
+                    }
+                }
+                outFile.exists() && outFile.length() > 0L
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("downloadHttpUrlToFile", absoluteUrl, e)
+            false
+        }
+    }
+}
+
+/**
+ * `GET /results/{task_id}`로 목록을 받아 각 파일을 내려받습니다.
+ * 엔드포인트가 없거나 실패하면 PLY 단일 다운로드로 폴백합니다.
+ */
+internal suspend fun downloadServerPipelineArtifacts(
+    context: Context,
+    taskId: String,
+    onProgress: suspend (Int, String) -> Unit,
+): ServerPipelineResultBundle? {
+    val plyDir = ModelLibraryPaths.plyDir(context)
+    val outDir = File(plyDir, "server_task_$taskId").apply { mkdirs() }
+    val json = fetchServerResultsJson(context, taskId)
+    val filesArr: JSONArray? = json?.optJSONArray("files")
+    val map = mutableMapOf<String, File>()
+    if (filesArr != null && filesArr.length() > 0) {
+        val total = filesArr.length()
+        for (i in 0 until total) {
+            val o = filesArr.optJSONObject(i) ?: continue
+            val key = o.optString("key")
+            val url = o.optString("url")
+            val filename = o.optString("filename").ifBlank { "file_$i" }
+            if (key.isBlank() || url.isBlank()) continue
+            val pct = 95 + ((i + 1) * 4 / maxOf(total, 1)).coerceIn(0, 4)
+            onProgress(pct.coerceAtMost(99), "결과 파일 다운로드 (${i + 1}/$total)...")
+            val dest = File(outDir, filename)
+            if (downloadHttpUrlToFile(context, url, dest)) {
+                map[key] = dest
+            }
+        }
+    }
+    if (map["ply"] == null) {
+        onProgress(99, "PLY 다운로드 중...")
+        val ply = downloadPlyResult(context, taskId)
+        if (ply != null && ply.exists()) map["ply"] = ply
+    }
+    val plyFile = map["ply"] ?: return null
+    writeServerTaskArtifactManifest(outDir, taskId, map.toMap())
+    JsonLibrary.ingestFromPipelineOutputDir(context, outDir, taskId)
+    return ServerPipelineResultBundle(
+        taskId = taskId,
+        plyFile = plyFile,
+        directory = outDir,
+        filesByKey = map.toMap(),
+    )
+}
+
+/**
+ * AI 탭 밖에서 호출: 서버 3DGS 분석을 새 MOBILE_3DGS 스레드로 저장한다.
+ */
+internal suspend fun runServer3dgsAnalysisInBackground(
+    context: Context,
+    pending: Pending3dgsServerAutoSend
+): Boolean {
+    val imageBase64List = withContext(Dispatchers.IO) {
+        pending.imageUris.mapNotNull { uri ->
+            try {
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    val bitmap = BitmapFactory.decodeStream(stream)
+                    bitmap?.let { ClaudeChatClient.bitmapToBase64(it) }
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+    val result = ClaudeChatClient.streamMobile3dGsAnalysisMessage(
+        userText = pending.promptText,
+        imageBase64List = imageBase64List,
+        onDelta = { }
+    )
+    return when (result) {
+        is ClaudeChatClient.ChatResult.Success -> {
+            val threadId = UUID.randomUUID().toString()
+            val title = "서버 3DGS 분석 " + SimpleDateFormat(
+                "MM/dd HH:mm",
+                Locale.getDefault()
+            ).format(Date())
+            ChatThreadStorage.save(
+                context,
+                ConversationThread(
+                    id = threadId,
+                    title = title,
+                    modeName = "MOBILE_3DGS",
+                    messages = listOf(
+                        PersistedMessage(
+                            pending.promptText.take(8000),
+                            true,
+                            pending.imageUris.map { it.toString() },
+                            null
+                        ),
+                        PersistedMessage(result.text, false, emptyList(), null)
+                    ),
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            true
+        }
+        is ClaudeChatClient.ChatResult.Error -> false
+    }
+}
+
+/** 경찰·보험 조사용 3DGS 분석 탭: 프롬프트 + 서버에서 내려받은 텍스트/JSON/CSV 본문 + 이미지(가능한 모든 PNG·JPG) URI */
+internal fun buildPoliceInsurance3dgsPayload(context: Context, bundle: ServerPipelineResultBundle): Pair<String, List<Uri>> {
+    val base =
+        "해당 파일을 바탕으로 PLY, 3DGS 파일을 분석해 경찰, 보험사에서 사용가능한 텍스트 형식으로 분석 출력해줘"
+    val sb = StringBuilder(base)
+    sb.append("\n\n--- 서버 결과 메타 ---\n")
+    sb.append("task_id: ").append(bundle.taskId).append('\n')
+    sb.append("다운로드된 파일 키: ").append(bundle.filesByKey.keys.sorted().joinToString(", ")).append('\n')
+
+    val ply = bundle.plyFile
+    if (ply.exists()) {
+        sb.append("\n[PLY] ").append(ply.name).append(" (")
+            .append(ply.length() / 1024).append(" KB)\n")
+            .append(ply.absolutePath).append('\n')
+    }
+    bundle.filesByKey["glb"]?.takeIf { it.exists() }?.let { glb ->
+        sb.append("\n[GLB] ").append(glb.name).append(" (").append(glb.length() / 1024)
+            .append(" KB)\n").append(glb.absolutePath).append('\n')
+    }
+
+    val textKeys = listOf(
+        "analysis_json" to "analysis_result.json",
+        "quality_txt" to "quality_report.txt",
+        "vehicle_csv" to "vehicle_analysis.csv",
+        "contact_csv" to "contact_analysis.csv",
+        "contact_points_csv" to "contact_candidate_points.csv",
+    )
+    val maxPerFile = 24_000
+    val maxTotal = 120_000
+    for ((key, label) in textKeys) {
+        val f = bundle.filesByKey[key] ?: continue
+        if (sb.length >= maxTotal) break
+        val raw = try {
+            f.readText(Charsets.UTF_8)
+        } catch (_: Exception) {
+            continue
+        }
+        val chunk = if (raw.length > maxPerFile) {
+            raw.take(maxPerFile) + "\n...(이하 생략, 원문 ${raw.length}자)..."
+        } else raw
+        sb.append("\n--- ").append(label).append(" (").append(f.name).append(") ---\n")
+            .append(chunk).append('\n')
+    }
+    var text = sb.toString()
+    if (text.length > maxTotal) {
+        text = text.take(maxTotal) + "\n...(전체 본문 길이 제한으로 잘림)"
+    }
+
+    val imageExts = setOf("png", "jpg", "jpeg", "webp")
+    val preferredOrder = listOf("topview", "sideview", "quality_png")
+    val seen = HashSet<String>()
+    val uris = ArrayList<Uri>()
+    fun addFile(f: File) {
+        val path = f.absolutePath
+        if (path in seen || !f.exists() || !f.isFile) return
+        if (f.extension.lowercase() !in imageExts) return
+        uriToShareableContentUri(context, Uri.fromFile(f))?.let {
+            seen.add(path)
+            uris.add(it)
+        }
+    }
+    for (k in preferredOrder) {
+        bundle.filesByKey[k]?.let(::addFile)
+    }
+    for (f in bundle.filesByKey.values) {
+        addFile(f)
+    }
+    return text to uris
+}
+
 /**
  * SAM2 서버(/bg-remove)에 이미지와 텍스트 프롬프트를 전송하여
  * 배경이 제거된 투명 PNG를 받아 앱 라이브러리에 저장합니다.
@@ -11119,7 +4206,7 @@ private suspend fun fetchServerTaskStatus(context: Context, taskId: String): Ser
  * @param onProgress 진행률 콜백 (percent 0~100, message)
  * @return 앱 라이브러리에 저장된 PNG Uri, 실패 시 null
  */
-private suspend fun sam2RemoveBackground(
+internal suspend fun sam2RemoveBackground(
     context: Context,
     imageUri: Uri,
     prompt: String,
@@ -11205,7 +4292,7 @@ private suspend fun sam2RemoveBackground(
     }
 }
 
-private suspend fun downloadPlyResult(context: Context, taskId: String): File? {
+internal suspend fun downloadPlyResult(context: Context, taskId: String): File? {
     // 큰 PLY 파일 다운로드 — 타임아웃을 길게 설정하고 최대 3회 재시도
     val maxAttempts = 3
     repeat(maxAttempts) { attempt ->
@@ -11214,36 +4301,30 @@ private suspend fun downloadPlyResult(context: Context, taskId: String): File? {
                 val serverAddress = getServerAddress(context)
                 val serverPort = getServerPort(context)
                 val useHttps = getUseHttps(context)
-                // PLY 파일은 수백 MB에 달할 수 있으므로 readTimeout을 10분으로 확장
-                val client = createOkHttpClient(useHttps).newBuilder()
-                    .connectTimeout(30, TimeUnit.SECONDS)
-                    .readTimeout(600, TimeUnit.SECONDS)
-                    .callTimeout(620, TimeUnit.SECONDS)
-                    .build()
+                val client = buildServerDownloadOkHttpClient(useHttps)
 
                 val protocol = if (useHttps) "https" else "http"
-                val url = "$protocol://$serverAddress:$serverPort$DOWNLOAD_ENDPOINT/$taskId"
+                val url = "$protocol://$serverAddress:$serverPort$DOWNLOAD_ENDPOINT/$taskId?format=ply"
                 val request = Request.Builder()
                     .url(url)
                     .get()
                     .header("Connection", "keep-alive")
                     .build()
-                val response = client.newCall(request).execute()
-                val body = response.body
-                if (!response.isSuccessful || body == null) {
-                    response.close()
-                    return@withContext null
-                }
-
-                val modelsDir = ModelLibraryPaths.plyDir(context)
-                val outFile = File(modelsDir, "3d_model_$taskId.ply")
-                body.byteStream().use { input ->
-                    FileOutputStream(outFile).use { output ->
-                        input.copyTo(output)
+                client.newCall(request).execute().use { response ->
+                    val body = response.body
+                    if (!response.isSuccessful || body == null) {
+                        return@withContext null
                     }
+
+                    val modelsDir = ModelLibraryPaths.plyDir(context)
+                    val outFile = File(modelsDir, "3d_model_$taskId.ply")
+                    body.byteStream().use { input ->
+                        BufferedOutputStream(FileOutputStream(outFile), SERVER_DOWNLOAD_BUFFER_BYTES).use { output ->
+                            input.copyTo(output, SERVER_DOWNLOAD_BUFFER_BYTES)
+                        }
+                    }
+                    outFile
                 }
-                response.close()
-                outFile
             } catch (e: Exception) {
                 android.util.Log.w("downloadPlyResult", "다운로드 시도 ${attempt + 1}/$maxAttempts 실패", e)
                 null
@@ -11256,12 +4337,12 @@ private suspend fun downloadPlyResult(context: Context, taskId: String): File? {
     return null
 }
 
-private suspend fun uploadZipAndRunPipeline(
+internal suspend fun uploadZipAndRunPipeline(
     context: Context,
     zipFile: File,
     prompt: String = "",
     onProgress: suspend (progress: Int, message: String) -> Unit
-): Boolean {
+): ServerPipelineResultBundle? {
     val taskTitle = "3D 모델 생성 중"
     val uploadStartMs = System.currentTimeMillis()
     // 마지막으로 표시한 퍼센트 — 표시 값이 역행하지 않도록 추적
@@ -11287,7 +4368,7 @@ private suspend fun uploadZipAndRunPipeline(
         if (taskId.isNullOrBlank()) {
             onProgress(0, noResponseMsg)
             context.stopService(Intent(context, AppForegroundService::class.java))
-            return false
+            return null
         }
 
         // 로컬 ZIP은 서버에 올라갔으면 삭제(저장공간 확보)
@@ -11309,7 +4390,7 @@ private suspend fun uploadZipAndRunPipeline(
                     "COMPLETED" -> break
                     "FAILED" -> {
                         context.stopService(Intent(context, AppForegroundService::class.java))
-                        return false
+                        return null
                     }
                 }
             } else {
@@ -11317,7 +4398,7 @@ private suspend fun uploadZipAndRunPipeline(
                 if (System.currentTimeMillis() - lastServerResponseAt >= 90_000L) {
                     onProgress(lastShownProgress, noResponseMsg)
                     context.stopService(Intent(context, AppForegroundService::class.java))
-                    return false
+                    return null
                 }
             }
             pollCount++
@@ -11325,25 +4406,32 @@ private suspend fun uploadZipAndRunPipeline(
             delay(if (pollCount <= 60) 2_000L else 5_000L)
         }
 
+        val finalStatus = fetchServerTaskStatus(context, taskId)
+        if (finalStatus?.status != "COMPLETED") {
+            onProgress(lastShownProgress, "처리 시간이 초과되었거나 완료되지 않았습니다.")
+            context.stopService(Intent(context, AppForegroundService::class.java))
+            return null
+        }
+
         // 3) 결과 다운로드 (.ply)
         // lastShownProgress 이상 값으로 고정(역행 방지): 서버가 99%를 줬다면 다운로드도 99%에서 시작
         updateNotification(lastShownProgress.coerceAtLeast(95), "결과 다운로드 중...")
-        val result = downloadPlyResult(context, taskId) ?: run {
+        val bundle = downloadServerPipelineArtifacts(context, taskId, ::updateNotification) ?: run {
             context.stopService(Intent(context, AppForegroundService::class.java))
-            return false
+            return null
         }
 
         updateNotification(100, "완료되었습니다!")
         stopForegroundService(context, "3D 모델 생성 완료", "완료되었습니다!")
-        return true
+        return bundle
     } catch (e: Exception) {
         e.printStackTrace()
         context.stopService(Intent(context, AppForegroundService::class.java))
-        return false
+        return null
     }
 }
 
-private fun listImageFiles(dir: File): List<File> {
+internal fun listImageFiles(dir: File): List<File> {
     val exts = setOf("jpg", "jpeg", "png", "webp")
     return dir.listFiles()
         ?.filter { it.isFile && exts.contains(it.extension.lowercase()) }
@@ -11351,7 +4439,7 @@ private fun listImageFiles(dir: File): List<File> {
         ?: emptyList()
 }
 
-private fun sharpenBitmapFast(src: Bitmap, amount: Float = 1.2f): Bitmap {
+internal fun sharpenBitmapFast(src: Bitmap, amount: Float = 1.2f): Bitmap {
     val w = src.width
     val h = src.height
     if (w < 3 || h < 3) return src.copy(src.config ?: Bitmap.Config.ARGB_8888, true)
@@ -11405,7 +4493,7 @@ private fun sharpenBitmapFast(src: Bitmap, amount: Float = 1.2f): Bitmap {
     return out
 }
 
-private fun applyExifOrientation(src: Bitmap, orientation: Int): Bitmap {
+internal fun applyExifOrientation(src: Bitmap, orientation: Int): Bitmap {
     if (orientation == ExifInterface.ORIENTATION_NORMAL || orientation == ExifInterface.ORIENTATION_UNDEFINED) {
         return src
     }
@@ -11433,7 +4521,7 @@ private fun applyExifOrientation(src: Bitmap, orientation: Int): Bitmap {
     }
 }
 
-private suspend fun enhanceDatasetFolders(
+internal suspend fun enhanceDatasetFolders(
     context: Context,
     folders: List<File>,
     onProgress: (processed: Int, total: Int, message: String, etaMs: Long?) -> Unit
@@ -11802,7 +4890,7 @@ private class PlySurfaceView(context: Context) : GLSurfaceView(context) {
  * @param useHttps HTTPS 사용 여부
  * @return 연결 성공 여부
  */
-private suspend fun testServerConnection(
+internal suspend fun testServerConnection(
     context: Context,
     serverAddress: String,
     serverPort: Int,
@@ -11876,10 +4964,12 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
         }
     }
 
+    val palette = LocalAppUiPalette.current
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(AppBackgroundColor)
+            .background(palette.background)
             .padding(16.dp)
             .verticalScroll(rememberScrollState())
     ) {
@@ -11887,19 +4977,19 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
             text = "LLM API 키",
             fontSize = 24.sp,
             fontWeight = FontWeight.Bold,
-            color = Color.White
+            color = palette.onBackground
         )
         Spacer(modifier = Modifier.height(16.dp))
         Text(
             text = "AI 메뉴에서 사용할 LLM을 선택한 뒤 해당 API 키를 입력하세요. 기본값은 local.properties의 claude_api_key·openai_api_key·gemini_api_key(빌드 시 주입)입니다. 필드를 비우고 저장하면 해당 제공자는 빌드 기본 키를 사용합니다.",
-            color = Color.White.copy(alpha = 0.75f),
+            color = palette.onBackgroundMuted,
             fontSize = 14.sp,
             lineHeight = 20.sp
         )
         Spacer(modifier = Modifier.height(20.dp))
         Text(
             text = "AI 메뉴에 사용할 제공자",
-            color = Color.White.copy(alpha = 0.9f),
+            color = palette.onBackground,
             fontSize = 14.sp,
             fontWeight = FontWeight.Medium
         )
@@ -11913,10 +5003,10 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
                 onClick = { selectedProvider = LlmProvider.CLAUDE },
                 label = { Text("클로드", fontSize = 13.sp) },
                 colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = Color(0xFF9CD83B),
-                    selectedLabelColor = Color.Black,
-                    containerColor = Color(0xFF2A2A2A),
-                    labelColor = Color.White
+                    selectedContainerColor = palette.brand,
+                    selectedLabelColor = palette.onBrand,
+                    containerColor = palette.chipUnselectedBg,
+                    labelColor = palette.chipUnselectedLabel
                 )
             )
             FilterChip(
@@ -11924,10 +5014,10 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
                 onClick = { selectedProvider = LlmProvider.OPENAI },
                 label = { Text("GPT", fontSize = 13.sp) },
                 colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = Color(0xFF9CD83B),
-                    selectedLabelColor = Color.Black,
-                    containerColor = Color(0xFF2A2A2A),
-                    labelColor = Color.White
+                    selectedContainerColor = palette.brand,
+                    selectedLabelColor = palette.onBrand,
+                    containerColor = palette.chipUnselectedBg,
+                    labelColor = palette.chipUnselectedLabel
                 )
             )
             FilterChip(
@@ -11935,10 +5025,10 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
                 onClick = { selectedProvider = LlmProvider.GEMINI },
                 label = { Text("제미나이", fontSize = 13.sp) },
                 colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = Color(0xFF9CD83B),
-                    selectedLabelColor = Color.Black,
-                    containerColor = Color(0xFF2A2A2A),
-                    labelColor = Color.White
+                    selectedContainerColor = palette.brand,
+                    selectedLabelColor = palette.onBrand,
+                    containerColor = palette.chipUnselectedBg,
+                    labelColor = palette.chipUnselectedLabel
                 )
             )
         }
@@ -11946,20 +5036,20 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
         OutlinedTextField(
             value = keyValue,
             onValueChange = onKeyChange,
-            label = { Text(keyLabel, color = Color.White) },
+            label = { Text(keyLabel, color = palette.onBackground) },
             placeholder = { Text(keyPlaceholder, color = Color.LightGray) },
             modifier = Modifier.fillMaxWidth(),
             minLines = 2,
             maxLines = 4,
             visualTransformation = PasswordVisualTransformation(),
             colors = OutlinedTextFieldDefaults.colors(
-                focusedTextColor = Color.White,
-                unfocusedTextColor = Color.White,
-                focusedBorderColor = Color(0xFF9CD83B),
-                unfocusedBorderColor = Color.White.copy(alpha = 0.6f),
-                cursorColor = Color(0xFF9CD83B),
-                focusedLabelColor = Color.White,
-                unfocusedLabelColor = Color.White.copy(alpha = 0.7f),
+                focusedTextColor = palette.onBackground,
+                unfocusedTextColor = palette.onBackground,
+                focusedBorderColor = palette.brand,
+                unfocusedBorderColor = palette.onBackground.copy(alpha = 0.35f),
+                cursorColor = palette.brand,
+                focusedLabelColor = palette.onBackground,
+                unfocusedLabelColor = palette.onBackground.copy(alpha = 0.7f),
                 focusedPlaceholderColor = Color.LightGray,
                 unfocusedPlaceholderColor = Color.LightGray
             )
@@ -11971,8 +5061,8 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
         ) {
             OutlinedButton(
                 onClick = onBack,
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.6f)),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = palette.onBackground),
+                border = BorderStroke(1.dp, palette.divider),
                 modifier = Modifier.weight(1f)
             ) {
                 Text("닫기")
@@ -11989,8 +5079,8 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
                     onBack()
                 },
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF9CD83B),
-                    contentColor = Color.Black
+                    containerColor = palette.brand,
+                    contentColor = palette.onBrand
                 ),
                 modifier = Modifier.weight(1f)
             ) {
@@ -12005,6 +5095,7 @@ fun ServerSettingsScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val palette = LocalAppUiPalette.current
     var serverAddress by remember { mutableStateOf(getServerAddress(context)) }
     var serverPort by remember { mutableStateOf(getServerPort(context).toString()) }
     var useHttps by remember { mutableStateOf(getUseHttps(context)) }
@@ -12016,13 +5107,24 @@ fun ServerSettingsScreen(
         onBack()
     }
 
+    val fieldColors = OutlinedTextFieldDefaults.colors(
+        focusedTextColor = palette.onBackground,
+        unfocusedTextColor = palette.onBackground,
+        focusedBorderColor = palette.brand,
+        unfocusedBorderColor = palette.onBackground.copy(alpha = 0.35f),
+        cursorColor = palette.brand,
+        focusedLabelColor = palette.onBackground,
+        unfocusedLabelColor = palette.onBackground.copy(alpha = 0.7f),
+        focusedPlaceholderColor = Color.LightGray,
+        unfocusedPlaceholderColor = Color.LightGray
+    )
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(AppBackgroundColor)
+            .background(palette.background)
             .padding(16.dp)
     ) {
-        // 헤더
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -12031,64 +5133,40 @@ fun ServerSettingsScreen(
                 text = "서버 설정",
                 fontSize = 24.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color.White
+                color = palette.onBackground
             )
         }
 
         Spacer(modifier = Modifier.height(32.dp))
 
-        // 서버 주소 입력 필드 (IP 또는 도메인)
         OutlinedTextField(
             value = serverAddress,
             onValueChange = { serverAddress = it },
-            label = { Text("서버 주소 (IP 또는 도메인)", color = Color.White) },
+            label = { Text("서버 주소 (IP 또는 도메인)", color = palette.onBackground) },
             placeholder = { Text("예: 192.168.0.88 또는 example.com", color = Color.LightGray) },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedTextColor = Color.White,
-                unfocusedTextColor = Color.White,
-                focusedBorderColor = Color.White,
-                unfocusedBorderColor = Color.White.copy(alpha = 0.6f),
-                cursorColor = Color.White,
-                focusedLabelColor = Color.White,
-                unfocusedLabelColor = Color.White.copy(alpha = 0.7f),
-                focusedPlaceholderColor = Color.LightGray,
-                unfocusedPlaceholderColor = Color.LightGray
-            )
+            colors = fieldColors
         )
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // 포트 입력 필드
         OutlinedTextField(
             value = serverPort,
             onValueChange = { newValue ->
-                // 숫자만 입력 가능하도록
                 if (newValue.all { it.isDigit() } || newValue.isEmpty()) {
                     serverPort = newValue
                 }
             },
-            label = { Text("포트 번호", color = Color.White) },
+            label = { Text("포트 번호", color = palette.onBackground) },
             placeholder = { Text("예: 8000", color = Color.LightGray) },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedTextColor = Color.White,
-                unfocusedTextColor = Color.White,
-                focusedBorderColor = Color.White,
-                unfocusedBorderColor = Color.White.copy(alpha = 0.6f),
-                cursorColor = Color.White,
-                focusedLabelColor = Color.White,
-                unfocusedLabelColor = Color.White.copy(alpha = 0.7f),
-                focusedPlaceholderColor = Color.LightGray,
-                unfocusedPlaceholderColor = Color.LightGray
-            )
+            colors = fieldColors
         )
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // HTTPS 사용 여부 선택
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -12097,42 +5175,40 @@ fun ServerSettingsScreen(
                 text = "HTTPS 사용",
                 fontSize = 16.sp,
                 modifier = Modifier.weight(1f),
-                color = Color.White
+                color = palette.onBackground
             )
             androidx.compose.material3.Switch(
                 checked = useHttps,
                 onCheckedChange = { useHttps = it },
                 colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = Color.DarkGray,
-                    uncheckedThumbColor = Color.White,
-                    uncheckedTrackColor = Color.Gray
+                    checkedThumbColor = palette.onBrand,
+                    checkedTrackColor = palette.brand,
+                    uncheckedThumbColor = palette.onBackground,
+                    uncheckedTrackColor = palette.chipUnselectedBg
                 )
             )
         }
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // 엔드포인트 정보 표시
         Text(
             text = "업로드: $UPLOAD_ENDPOINT",
             fontSize = 14.sp,
-            color = Color.White.copy(alpha = 0.6f)
+            color = palette.onBackgroundMuted
         )
         Text(
             text = "상태조회: $STATUS_ENDPOINT/{task_id}",
             fontSize = 12.sp,
-            color = Color.White.copy(alpha = 0.5f)
+            color = palette.onBackgroundMuted
         )
         Text(
             text = "다운로드: $DOWNLOAD_ENDPOINT/{task_id}",
             fontSize = 12.sp,
-            color = Color.White.copy(alpha = 0.5f)
+            color = palette.onBackgroundMuted
         )
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // 전체 URL 미리보기
         val portValue = serverPort.toIntOrNull() ?: DEFAULT_SERVER_PORT
         val protocol = if (useHttps) "https" else "http"
         val previewUrl = if (serverAddress.isNotBlank() && serverPort.isNotBlank()) {
@@ -12140,25 +5216,24 @@ fun ServerSettingsScreen(
         } else {
             ""
         }
-        
+
         if (previewUrl.isNotEmpty()) {
             Text(
                 text = "URL: $previewUrl",
                 fontSize = 12.sp,
-                color = Color.White.copy(alpha = 0.8f),
+                color = palette.onBackground,
                 modifier = Modifier.fillMaxWidth()
             )
         }
 
         Spacer(modifier = Modifier.height(32.dp))
 
-        // 연결 테스트 버튼
         val canTest = !isTesting && serverAddress.isNotBlank() && serverPort.isNotBlank()
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(24.dp))
-                .background(if (canTest) Color.White else Color.Gray)
+                .background(if (canTest) palette.brand else palette.chatComposerPillInactive)
                 .clickable(enabled = canTest) {
                     isTesting = true
                     testResult = null
@@ -12178,27 +5253,26 @@ fun ServerSettingsScreen(
         ) {
             Text(
                 text = if (isTesting) "테스트 중..." else "서버 연결 테스트",
-                color = Color.Black,
+                color = palette.onBrand,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold
             )
         }
 
-        // 테스트 결과 표시
         testResult?.let { result ->
             Spacer(modifier = Modifier.height(16.dp))
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(
-                        Color.White.copy(alpha = 0.15f),
+                        palette.surfaceCard,
                         RoundedCornerShape(8.dp)
                     )
                     .padding(16.dp)
             ) {
                 Text(
                     text = result,
-                    color = Color.White,
+                    color = palette.onBackground,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold
                 )
@@ -12207,13 +5281,12 @@ fun ServerSettingsScreen(
 
         Spacer(modifier = Modifier.weight(1f))
 
-        // 저장 버튼
         val canSave = serverAddress.isNotBlank() && serverPort.isNotBlank()
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(24.dp))
-                .background(if (canSave) Color.White else Color.Gray)
+                .background(if (canSave) palette.brand else palette.chatComposerPillInactive)
                 .clickable(enabled = canSave) {
                     val port = serverPort.toIntOrNull() ?: DEFAULT_SERVER_PORT
                     saveServerSettings(context, serverAddress, port, useHttps)
@@ -12224,7 +5297,7 @@ fun ServerSettingsScreen(
         ) {
             Text(
                 text = "저장",
-                color = Color.Black,
+                color = palette.onBrand,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold
             )
@@ -12241,7 +5314,7 @@ fun ServerSettingsScreen(
  * @param message    현재 단계 메시지
  * @param startMs    작업 시작 시각 (예상 시간 계산용, 0이면 무시)
  */
-private fun startOrUpdateForegroundService(
+internal fun startOrUpdateForegroundService(
     context: Context,
     taskTitle: String,
     progress: Int,
@@ -12262,7 +5335,7 @@ private fun startOrUpdateForegroundService(
 }
 
 /** 포그라운드 서비스를 완료(100%) 상태로 업데이트하고 종료합니다. */
-private fun stopForegroundService(context: Context, taskTitle: String, doneMessage: String) {
+internal fun stopForegroundService(context: Context, taskTitle: String, doneMessage: String) {
     startOrUpdateForegroundService(context, taskTitle, 100, doneMessage)
     context.stopService(Intent(context, AppForegroundService::class.java))
 }
@@ -12320,8 +5393,14 @@ class AppForegroundService : Service() {
         } else ""
 
         // ── 앱 복귀 탭 인텐트 ──────────────────────────────────────────────
-        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-            ?.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val launchIntent = (
+            packageManager.getLaunchIntentForPackage(packageName)
+                ?: Intent(this, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+            ).apply {
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
         val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         else PendingIntent.FLAG_UPDATE_CURRENT
@@ -12353,7 +5432,12 @@ class AppForegroundService : Service() {
             builder.setProgress(0, 0, true) // 불확정 스피너
         }
 
-        startForeground(NOTIF_ID, builder.build())
+        ServiceCompat.startForeground(
+            this,
+            NOTIF_ID,
+            builder.build(),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        )
 
         // 100% 완료 시 자동 종료
         if (progress >= 100) {

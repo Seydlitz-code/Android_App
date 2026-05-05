@@ -60,6 +60,8 @@ object MobileGaussianSplattingEngine {
 
     // ── 설정 상수 ─────────────────────────────────────────────────────────────
     private const val MAX_SPLATS     = 20_000
+    /** COLMAP points3D 기반 뷰어: 점이 많을 때도 디테일 유지 (메모리·GPU 여유 전제) */
+    private const val MAX_COLMAP_SPLATS = 120_000
     private const val DECODE_SIDE    = 224
     private const val BASE_GRID_STEP = 4
     private const val SCENE_RADIUS   = 0.9f
@@ -611,5 +613,69 @@ object MobileGaussianSplattingEngine {
         val sq   = FloatArray(src.size) { i -> src[i] * src[i] }
         val meanSq = boxBlur(sq, w, h, radius)
         return FloatArray(src.size) { i -> max(0f, meanSq[i] - mean[i] * mean[i]) }
+    }
+
+    // =========================================================================
+    // COLMAP points3D.bin → 스플랫 씬 (Mobile-GS scene/colmap_loader.py 참조)
+    // =========================================================================
+
+    /**
+     * COLMAP `points3D.bin` 에서 읽은 점군으로 [MobileSplatScene] 을 만듭니다.
+     *
+     * - 상한 [maxSplats] 초과 시 **재투영 오차가 작고 트랙(관측)이 긴 점**을 우선 선택합니다.
+     * - 스플랫 반경은 오차·관측 수에 따라 달리 해 빈 공간을 줄입니다.
+     */
+    fun buildSceneFromColmapPointCloud(
+        bundle: ColmapBinaryReader.Points3dBin,
+        maxSplats: Int = MAX_COLMAP_SPLATS,
+    ): MobileSplatScene? {
+        val nIn = bundle.count
+        if (nIn <= 0) return null
+        val cap = minOf(maxSplats, nIn)
+
+        val sortedIdx: List<Int>? =
+            if (nIn > cap) {
+                (0 until nIn).sortedWith(
+                    compareBy({ bundle.reprojErr[it] }, { -bundle.trackLen[it] }),
+                )
+            } else {
+                null
+            }
+
+        val densityScale =
+            kotlin.math.sqrt((35_000.0 / cap.toDouble()).coerceIn(0.22, 1.05)).toFloat()
+
+        val allPos = ArrayList<Float>(cap * 3)
+        val allCol = ArrayList<Float>(cap * 3)
+        val allSiz = ArrayList<Float>(cap)
+        for (k in 0 until cap) {
+            val i = sortedIdx?.get(k) ?: k
+            val o = i * 3
+            allPos.add(bundle.xyz[o])
+            allPos.add(bundle.xyz[o + 1])
+            allPos.add(bundle.xyz[o + 2])
+            val cr = (bundle.rgb[o] * 1.06f).coerceIn(0f, 1f)
+            val cg = (bundle.rgb[o + 1] * 1.06f).coerceIn(0f, 1f)
+            val cb = (bundle.rgb[o + 2] * 1.06f).coerceIn(0f, 1f)
+            allCol.add(cr)
+            allCol.add(cg)
+            allCol.add(cb)
+
+            val err = bundle.reprojErr.getOrElse(i) { 1f }.coerceIn(0f, 80f)
+            val tr = bundle.trackLen.getOrElse(i) { 1 }.coerceAtLeast(1)
+            val conf = (1.12f / (0.2f + err)).coerceIn(0.42f, 2.5f)
+            val obsBoost = (0.68f + 0.15f * ln(tr.toFloat())).coerceIn(0.68f, 1.7f)
+            val sz = 2.45f * conf * obsBoost * densityScale
+            allSiz.add(sz.coerceIn(1.15f, 15f))
+        }
+        if (allPos.size < 9) return null
+        normalizeScene(allPos)
+        val count = allPos.size / 3
+        return MobileSplatScene(
+            positions  = allPos.toFloatArray(),
+            colors     = allCol.toFloatArray(),
+            sizes      = allSiz.toFloatArray(),
+            splatCount = count,
+        )
     }
 }

@@ -2,6 +2,7 @@ package com.example.app_01
 
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -9,7 +10,26 @@ import kotlinx.coroutines.withContext
 /**
  * Mobile-GS 온디바이스 파이프라인 오케스트레이션.
  *
- * ## 처리 단계 (이미지만 입력)
+ * ## 메인 화면(Mobile 3DGS)에서의 입력 흐름
+ * 1. **사진 데이터셋** — `Mobile3dGsScreen`에서 “사진 데이터셋 선택”을 누르면 팝업이 열리고,
+ *    - **사진**: 앱 내 갤러리 라이브러리에서 [1, MAX_DATASET_IMAGES]장 다중 선택.
+ *    - **데이터셋 폴더**: 앱 내 데이터셋 폴더 목록에서 폴더 하나 선택 → 이미지 확장자 파일을 순서대로 읽어
+ *      최대 [MAX_DATASET_IMAGES]장까지 URI 목록으로 전달.
+ * 2. **COLMAP 바이너리** — “COLMAP 바이너리 파일 선택”으로 SAF([OpenMultipleDocuments])를 열어
+ *    기기 내 파일 **정확히 3개**(일반적으로 `cameras.bin`, `images.bin`, `points3D.bin`)를 선택.
+ *    순서는 자유이며 [ColmapBinaryReader.resolveColmapTriple]이 파일 내용으로 판별.
+ * 3. **실행** — [runFromSelectedInputs]가 위 URI들을 받아 분기:
+ *    - COLMAP 3개가 있으면 **points3D** 기반 씬 생성(선택된 사진 장수는 로그·추후 확장 참고용).
+ *    - COLMAP 없이 사진만 있으면 **이미지 전용** 깊이·역투영 파이프라인([runPipeline]).
+ * 4. **출력** — 메모리상 [MobileSplatScene] → [MobileGaussianSplatGlView] 전용 뷰어.  
+ *    PC용 학습·압축(comp.xz 등)은 `assets/mobile_gs_ref/upstream/` 의 `train.py`·`render.py` 참고만 (앱 내 미실행).
+ *
+ * ## 업스트림 참조 (Mobile-GS 저장소)
+ *
+ * APK 에셋 `mobile_gs_ref/upstream/` 에 COLMAP 로더·`graphics_utils`·`gaussian_model`·학습 엔트리 등 원본 Python을 포함합니다.
+ * 매핑 표는 `mobile_gs_ref/ANDROID_UPSTREAM_MAP.md` 를 참고합니다.
+ *
+ * ## 처리 단계 (이미지만 입력, [runPipeline])
  *  1. EXIF 파싱 — 이미지별 초점거리(35mm 환산) 및 방향 추출
  *  2. 피보나치 구체 위에 가상 카메라 N개 균등 배치 (SfM 대체)
  *  3. 다중 스케일 깊이 추정 (선명도·분산·채도·중심·휘도)
@@ -17,6 +37,62 @@ import kotlinx.coroutines.withContext
  *  5. 씬 정규화 (getNerfppNorm 개념)
  */
 object MobileGaussianSplattingScript {
+
+    /**
+     * APK 에셋 내 업스트림 Python 참조 디렉터리 (`assets/mobile_gs_ref/upstream/`).
+     * 필요 시 `AssetManager`으로 목록을 열거나 특정 파일을 스트림으로 읽을 수 있습니다.
+     */
+    const val ASSET_UPSTREAM_DIR = "mobile_gs_ref/upstream"
+
+    /** 갤러리·데이터셋 폴더에서 허용하는 최대 이미지 장수 (UI와 동일). */
+    const val MAX_DATASET_IMAGES = 100
+
+    /**
+     * 메인 화면에서 모은 **사진 URI 목록**과 **COLMAP 바이너리 URI(0 또는 3개)**로 씬을 생성합니다.
+     *
+     * 우선순위: COLMAP 3개가 준비되어 있으면 [runColmapPointCloudPipeline],
+     * 아니면 사진 1장 이상으로 [runPipeline].
+     */
+    suspend fun runFromSelectedInputs(
+        context: Context,
+        imageUris: List<Uri>,
+        colmapUris: List<Uri>,
+        onLog: suspend (String) -> Unit = {},
+        onProgress: suspend (Int) -> Unit,
+    ): MobileSplatScene? {
+        val colmapOk = colmapUris.size == 3
+        val nImg = imageUris.size
+        if (nImg > MAX_DATASET_IMAGES) {
+            onLog("[오류] 사진은 최대 ${MAX_DATASET_IMAGES}장까지입니다.")
+            onProgress(100)
+            return null
+        }
+        return when {
+            colmapOk -> {
+                if (nImg > 0) {
+                    onLog("• 입력: COLMAP 바이너리 3개 + 참고 사진 ${nImg}장")
+                } else {
+                    onLog("• 입력: COLMAP 바이너리 3개 (사진 미선택)")
+                }
+                runColmapPointCloudPipeline(
+                    context,
+                    colmapUris,
+                    datasetImageCount = nImg,
+                    onLog = onLog,
+                    onProgress = onProgress,
+                )
+            }
+            nImg >= 1 -> {
+                onLog("• 입력: 사진 ${nImg}장 (온디바이스 이미지 파이프라인)")
+                runPipeline(context, imageUris, onLog, onProgress)
+            }
+            else -> {
+                onLog("[오류] COLMAP 파일 3개 또는 사진 1~${MAX_DATASET_IMAGES}장이 필요합니다.")
+                onProgress(100)
+                null
+            }
+        }
+    }
 
     suspend fun runPipeline(
         context: Context,
@@ -101,5 +177,99 @@ object MobileGaussianSplattingScript {
         onLog("• GLES2 원근 보정 포인트 스프라이트 렌더러로 전달")
         onProgress(100); delay(40)
         return scene
+    }
+
+    /**
+     * COLMAP sparse 바이너리 3개(cameras.bin, images.bin, points3D.bin)를 읽어
+     * [points3D] 점군으로 [MobileSplatScene] 을 만듭니다 (Mobile-GS `colmap_loader.py` 경로).
+     *
+     * @param datasetImageCount 갤러리/폴더에서 선택한 사진 장수(참고 로그용, 씬 생성에는 points3D 사용).
+     */
+    suspend fun runColmapPointCloudPipeline(
+        context: Context,
+        colmapUris: List<Uri>,
+        datasetImageCount: Int,
+        onLog: suspend (String) -> Unit,
+        onProgress: suspend (Int) -> Unit,
+    ): MobileSplatScene? {
+        require(colmapUris.size == 3) { "COLMAP 바이너리 3개가 필요합니다." }
+        onLog("=== COLMAP points3D → Mobile 3DGS ===")
+        onProgress(2)
+        delay(20)
+
+        onLog("• 바이너리 읽는 중…")
+        val triplePairs = withContext(Dispatchers.IO) {
+            val list = ArrayList<Pair<String, ByteArray>>(3)
+            for (uri in colmapUris) {
+                val name = colmapDisplayName(context, uri)
+                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                if (bytes == null || bytes.isEmpty()) return@withContext null
+                list.add(name to bytes)
+            }
+            list
+        }
+        if (triplePairs == null) {
+            onLog("[오류] 파일을 읽을 수 없습니다.")
+            onProgress(100)
+            return null
+        }
+
+        onProgress(12)
+        val colmap = ColmapBinaryReader.resolveColmapTripleWithPointsFallback(
+            triplePairs[0],
+            triplePairs[1],
+            triplePairs[2],
+        )
+        if (colmap == null) {
+            val hint = ColmapBinaryReader.diagnoseColmapTripleFailure(
+                triplePairs[0],
+                triplePairs[1],
+                triplePairs[2],
+            )
+            onLog("[오류] $hint")
+            onProgress(100)
+            return null
+        }
+
+        if (colmap.cameras.isEmpty() && colmap.images.isEmpty()) {
+            onLog("• 참고: cameras/images는 생략하고 points3D 점군만 사용합니다 (뷰어 표시에 충분).")
+        }
+        onLog(
+            "• COLMAP: cameras=${colmap.cameras.size}, images=${colmap.images.size}, " +
+                "points3D=${colmap.points.count}"
+        )
+        if (datasetImageCount > 0) {
+            onLog("• 선택된 사진: ${datasetImageCount}장 (씬은 points3D 기반)")
+        }
+
+        onProgress(35)
+        delay(10)
+
+        val scene = withContext(Dispatchers.IO) {
+            MobileGaussianSplattingEngine.buildSceneFromColmapPointCloud(colmap.points)
+        }
+
+        if (scene == null || scene.splatCount <= 0) {
+            onLog("[오류] 점군이 비어 있거나 변환에 실패했습니다.")
+            onProgress(100)
+            return null
+        }
+
+        onLog("• 스플랫 수: ${scene.splatCount}")
+        onLog("• GLES2 포인트 스플랫 뷰어로 표시")
+        onProgress(100)
+        delay(30)
+        return scene
+    }
+
+    private fun colmapDisplayName(context: Context, uri: Uri): String {
+        val fromQuery = runCatching {
+            context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (i >= 0 && c.moveToFirst()) c.getString(i) else null
+            }
+        }.getOrNull()
+        if (!fromQuery.isNullOrBlank()) return fromQuery
+        return uri.lastPathSegment?.substringAfterLast(':') ?: "file.bin"
     }
 }
