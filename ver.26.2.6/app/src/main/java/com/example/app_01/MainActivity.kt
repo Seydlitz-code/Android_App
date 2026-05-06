@@ -740,11 +740,12 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                     }
                                 }
                             },
-                            onServerPipelineOpenImageViewer = { uris ->
+                            onServerPipelineOpenImageViewer = { uris, startIndex ->
                                 if (uris.isNotEmpty()) {
                                     viewingMediaList = uris
-                                    selectedMediaIndex = 0
-                                    selectedMediaUri = uris.first()
+                                    val i = startIndex.coerceIn(0, uris.size - 1)
+                                    selectedMediaIndex = i
+                                    selectedMediaUri = uris[i]
                                 }
                             },
                             onServerPipelineStart3dgsAi = { pending ->
@@ -1044,7 +1045,7 @@ fun MediaDetailScreen(
                                             val threshold = viewWidth * 0.3f
                                             when {
                                                 dragX > threshold && currentIndex > 0 -> currentIndex--
-                                                dragX < -threshold && currentIndex < mediaList.size - 1 -> currentIndex++
+                                                dragX < -threshold && currentIndex < mutableMediaList.size - 1 -> currentIndex++
                                             }
                                         }
                                         // scale 1 미만 방지 + 최종 경계 클램핑

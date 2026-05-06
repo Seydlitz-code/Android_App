@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CameraAlt
-import androidx.compose.material.icons.outlined.Chat
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Public
@@ -22,7 +21,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -55,7 +56,7 @@ fun BottomNavigationBar(
             )
             BottomNavItem(
                 label = "AI",
-                icon = Icons.Outlined.Chat,
+                painter = painterResource(R.drawable.ic_bottom_nav_ai),
                 isSelected = selectedTab == MainTab.CLAUDE,
                 onClick = { onTabSelected(MainTab.CLAUDE) }
             )
@@ -88,6 +89,40 @@ fun BottomNavItem(
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
+    BottomNavItem(label, isSelected, onClick) { contentColor ->
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = contentColor,
+            modifier = Modifier.size(24.dp)
+        )
+    }
+}
+
+@Composable
+fun BottomNavItem(
+    label: String,
+    painter: Painter,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    BottomNavItem(label, isSelected, onClick) { contentColor ->
+        Icon(
+            painter = painter,
+            contentDescription = label,
+            tint = contentColor,
+            modifier = Modifier.size(24.dp)
+        )
+    }
+}
+
+@Composable
+private fun BottomNavItem(
+    label: String,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    icon: @Composable (contentColor: Color) -> Unit
+) {
     val palette = LocalAppUiPalette.current
     val contentColor =
         if (isSelected) palette.bottomNavContent else palette.bottomNavContentMuted
@@ -97,12 +132,7 @@ fun BottomNavItem(
             .padding(horizontal = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = label,
-            tint = contentColor,
-            modifier = Modifier.size(24.dp)
-        )
+        icon(contentColor)
         Text(
             text = label,
             color = contentColor,

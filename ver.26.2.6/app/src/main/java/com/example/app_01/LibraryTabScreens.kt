@@ -114,6 +114,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.graphics.SolidColor
@@ -1125,7 +1126,7 @@ fun GalleryScreen(
     onAiCadLibraryInvalidate: () -> Unit = {},
     galleryGridState: androidx.compose.foundation.lazy.grid.LazyGridState =
         androidx.compose.foundation.lazy.grid.rememberLazyGridState(),
-    onServerPipelineOpenImageViewer: (List<Uri>) -> Unit = {},
+    onServerPipelineOpenImageViewer: (List<Uri>, Int) -> Unit = { _, _ -> },
     onServerPipelineStart3dgsAi: (Pending3dgsServerAutoSend) -> Unit = {},
     serverPipelineCompleteBundle: ServerPipelineResultBundle?,
     onServerPipelineCompleteBundleChange: (ServerPipelineResultBundle?) -> Unit,
@@ -3186,7 +3187,7 @@ fun GalleryScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(gsPreviewUris, key = { it.toString() }) { uri ->
+                    itemsIndexed(gsPreviewUris, key = { _, uri -> uri.toString() }) { index, uri ->
                         Image(
                             painter = rememberGalleryGridPhotoPainter(uri, gridThumbPx),
                             contentDescription = "3DGS 미리보기",
@@ -3194,7 +3195,7 @@ fun GalleryScreen(
                                 .aspectRatio(1f)
                                 .clip(RoundedCornerShape(8.dp))
                                 .clickable {
-                                    onServerPipelineOpenImageViewer(listOf(uri))
+                                    onServerPipelineOpenImageViewer(gsPreviewUris, index)
                                 },
                             contentScale = ContentScale.Crop
                         )
@@ -3222,7 +3223,7 @@ fun GalleryScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(gsAnalysisUris, key = { it.toString() }) { uri ->
+                    itemsIndexed(gsAnalysisUris, key = { _, uri -> uri.toString() }) { index, uri ->
                         Image(
                             painter = rememberGalleryGridPhotoPainter(uri, gridThumbPx),
                             contentDescription = "3DGS 분석 이미지",
@@ -3230,7 +3231,7 @@ fun GalleryScreen(
                                 .aspectRatio(1f)
                                 .clip(RoundedCornerShape(8.dp))
                                 .clickable {
-                                    onServerPipelineOpenImageViewer(listOf(uri))
+                                    onServerPipelineOpenImageViewer(gsAnalysisUris, index)
                                 },
                             contentScale = ContentScale.Crop
                         )
@@ -3740,7 +3741,12 @@ fun GalleryScreen(
                                                         android.widget.Toast.LENGTH_SHORT
                                                     ).show()
                                                 } else {
-                                                    onServerPipelineOpenImageViewer(listOf(u))
+                                                    val ai = gsAnalysisUris.indexOfFirst { it == u }
+                                                    if (ai >= 0) {
+                                                        onServerPipelineOpenImageViewer(gsAnalysisUris, ai)
+                                                    } else {
+                                                        onServerPipelineOpenImageViewer(listOf(u), 0)
+                                                    }
                                                 }
                                             },
                                         contentAlignment = Alignment.Center
@@ -3819,7 +3825,12 @@ fun GalleryScreen(
                                                         android.widget.Toast.LENGTH_SHORT
                                                     ).show()
                                                 } else {
-                                                    onServerPipelineOpenImageViewer(listOf(u1, u2))
+                                                    val pi = gsPreviewUris.indexOfFirst { it == u1 }
+                                                    if (pi >= 0) {
+                                                        onServerPipelineOpenImageViewer(gsPreviewUris, pi)
+                                                    } else {
+                                                        onServerPipelineOpenImageViewer(listOf(u1, u2), 0)
+                                                    }
                                                 }
                                             },
                                         contentAlignment = Alignment.Center

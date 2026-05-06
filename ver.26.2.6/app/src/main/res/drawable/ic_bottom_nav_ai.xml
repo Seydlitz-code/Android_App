@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Bold "A" with inner counter (pictogram style); fill uses theme tint in Compose -->
+    <path
+        android:fillColor="#FF000000"
+        android:fillType="evenOdd"
+        android:pathData="M3.0,19.8 L8.15,3.9 L13.35,19.8 H11.7 L10.45,14.85 H5.55 L4.25,19.8 Z M8.15,8.35 L10.15,13.45 H6.2 Z" />
+    <!-- Bold "I" with rounded ends -->
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M15.65,4.35 L18.85,4.35 Q19.85,4.35 19.85,5.35 L19.85,18.65 Q19.85,19.65 18.85,19.65 L15.65,19.65 Q14.65,19.65 14.65,18.65 L14.65,5.35 Q14.65,4.35 15.65,4.35 Z" />
+</vector>
