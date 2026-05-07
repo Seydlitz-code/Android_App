@@ -96,7 +96,7 @@ dependencies {
     // Coil for image loading
     implementation("io.coil-kt:coil-compose:2.5.0")
 
-    // Glide — 광택 제거 파이프라인: URI → Bitmap (512×512)
+    // Glide — URI·파일에서 Bitmap 로드 등
     implementation("com.github.bumptech.glide:glide:4.16.0")
     
     // Material Icons Extended
@@ -119,19 +119,12 @@ dependencies {
     // EXIF (이미지 회전/방향 보정)
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
-    // (삭제) OpenCV: 광택/반사 제거 옵션 제거에 따라 의존성 제거
-
     // MediaPipe Tasks (사물 경계/크기 분석 - ObjectDetector, Interactive Segmenter)
     val mediaPipeVer = "0.10.21"
     implementation("com.google.mediapipe:tasks-vision:$mediaPipeVer")
 
-    // ML Kit 제거: 네이티브 GPU/드라이버 비호환 크래시 문제로 MediaPipe InteractiveSegmenter로 교체
-    // InteractiveSegmenter는 tasks-vision에 포함되어 있음 (별도 의존성 불필요)
-
     // ONNX Runtime Android — U²-Net(u2netp) 카테고리 제한 없는 배경 제거
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
-
-    // 누끼 따기는 기존 ONNX Runtime + u2netp.onnx (BackgroundRemovalProcessor.segmentForeground) 사용
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

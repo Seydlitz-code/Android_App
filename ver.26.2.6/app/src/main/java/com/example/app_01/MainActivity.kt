@@ -505,8 +505,6 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         ClaudeChatClient.init(applicationContext)
 
-        // (삭제) 광택/반사 제거 옵션 제거에 따라 OpenCV 초기화 제거
-
         setContent {
             var themeMode by remember { mutableStateOf(readAppUiThemeMode(this@MainActivity)) }
             val palette = remember(themeMode) { appUiPaletteFor(themeMode) }
@@ -1211,7 +1209,7 @@ fun MediaDetailScreen(
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
-                        ) { /* TODO: 2차 사물 배경 분리 */ },
+                        ) { },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -2773,8 +2771,6 @@ internal fun startVideoRecording(
     }
 }
 
-// (삭제) TFLite 기반 광택/반사 제거 기능: 요청에 따라 Inpainting 기반으로 전면 교체됨
-
 // [수정] 모델링 적합성 판단 (이동식 공간 촬영용)
 // - 기존: "가상 점 5개가 모두 같은 공간"과 유사한 개념을 십자선 전체 표준편차로 간접 판단
 // - 변경: 3x3 배열(9개)의 "가상 점(샘플 포인트)"을 중앙 주변에 배치하고,
@@ -2866,8 +2862,6 @@ internal fun checkModelingSuitability(bitmap: android.graphics.Bitmap): Boolean 
     return stdDev > 30.0
 }
 
-// (삭제) IID/MSA 기반 광택 제거 기능: 요청에 따라 Inpainting 기반으로 전면 교체됨
-
 // [추가] 이미지 파일 로드 시 EXIF 회전 정보 반영
 internal fun loadBitmapWithRotation(path: String): android.graphics.Bitmap? {
     return try {
@@ -2894,9 +2888,6 @@ internal fun loadBitmapWithRotation(path: String): android.graphics.Bitmap? {
         null
     }
 }
-
-// (삭제) 픽셀 억제/금속/반광/통합 파이프라인: 요청에 따라 Inpainting 기반으로 전면 교체됨
-
 
 internal fun saveBitmapToFile(bitmap: android.graphics.Bitmap, file: File) {
     try {
@@ -4030,8 +4021,6 @@ internal suspend fun startServerTaskWithZip(
         }
     }
 }
-
-// (삭제) 서버 기반 광택/반사 제거 파이프라인: 요청에 따라 로컬 Inpainting 기반으로 교체됨
 
 internal data class ServerTaskStatus(
     val status: String,
