@@ -317,13 +317,15 @@ import java.security.cert.X509Certificate
 private const val MAX_JSON_APPENDIX_TOTAL_CHARS = 200_000
 private const val MAX_JSON_APPENDIX_PER_FILE_CHARS = 80_000
 private const val MAX_3DGS_AUX_ATTACHMENTS = 12
+
 private const val GLTF_MAGIC = 0x46546C67
 
 /** 파손 분석 모드: 텍스트가 비어 있고 이미지만 보낼 때 LLM에 넣는 기본 요청 */
 private const val DAMAGE_ANALYSIS_DEFAULT_PROMPT =
     "첨부 사고·차량 사진만을 근거로, 한국어 python-docx 스크립트(단일 ```python 블록)를 출력하세요. " +
         "생성되는 Word(.docx)에는 반드시 포함하세요: (1) 차량 모델·차급 유추 및 근거·한계, (2) 파손 부위 정리 표, (3) 부위별 피해 규모(깊이·너비 등) 시각 추정 표—실측 아님 명시, (4) 수리 예상 견적·기간 참고 표—만 원·일자 범위, (5) 종합 결론 및 면책. " +
-        "모든 표는 table.cell 또는 row.cells에 한글 문자열 리터럴로 채우세요."
+        "모든 표는 `표 = doc.add_table(...)` 이후 **`표.cell(정수행, 정수열).text = \"…\"`** 로만 셀을 채우세요(행·열은 리터럴 정수). " +
+        "문장 중간에 문자열 안에서 줄을 바꾸지 마세요. 한 문단은 한 줄 문자열이거나 add_paragraph를 여러 번 호출하세요."
 
 private fun uriFileExtension(uri: Uri): String {
     val name = uri.lastPathSegment?.substringAfterLast('/', missingDelimiterValue = "") ?: ""
@@ -1015,7 +1017,7 @@ fun ClaudeChatScreen(
             }
             if (aiTabMode == AiChatTabMode.DAMAGE_ANALYSIS) {
                 Text(
-                    text = "프로필 → LLM API 키로 제공자를 고릅니다. 응답은 python-docx로 .docx를 만드는 Python 스크립트(단일 ```python 블록)가 중심입니다. 스크립트에는 차량 모델 유추, 파손 정리 표, 피해 규모(시각 추정) 표, 수리 견적·기간 참고 표, 결론 등이 포함되도록 설정되어 있습니다. 텍스트 없이 사진만 보내도 위 구조로 생성을 요청합니다. 아래「저장」에서 기기에 .docx를 만들고 열 수 있습니다.",
+                    text = "프로필 → LLM API 키로 제공자를 고릅니다. 응답은 python-docx로 .docx를 만드는 Python 스크립트(단일 ```python 블록)가 중심입니다. 스크립트에는 차량 모델 유추, 파손 정리 표, 피해 규모(시각 추정) 표, 수리 견적·기간 참고 표, 결론 등이 포함되도록 설정되어 있습니다. 텍스트 없이 사진만 보내도 위 구조로 생성을 요청합니다. 사진이 많으면 전송 용량 제한에 맞춰 해상도를 줄이고 일부 장만 보냅니다. 아래「저장」에서 기기에 .docx를 만들고 열 수 있습니다.",
                     color = palette.onBackgroundMuted,
                     fontSize = 11.sp,
                     lineHeight = 15.sp,
@@ -1030,13 +1032,23 @@ fun ClaudeChatScreen(
                 if (isStreaming) return@sendLambda
                 val text = messageText.trim()
                 val images = attachedImages
-                val imagesForLlm = if (
+                val imagesForLlmRaw = if (
                     aiTabMode == AiChatTabMode.MOBILE_3DGS ||
                         aiTabMode == AiChatTabMode.DAMAGE_ANALYSIS
                 ) {
                     images.filter { !it.isChatPickVideoUri() }
                 } else {
                     images
+                }
+                val imagesForLlm = if (imagesForLlmRaw.size > MAX_LLM_VISION_IMAGES_PER_REQUEST) {
+                    Toast.makeText(
+                        context,
+                        "API 전송 용량 제한으로 사진 ${imagesForLlmRaw.size}장 중 ${MAX_LLM_VISION_IMAGES_PER_REQUEST}장만 보냅니다. (전체 구간에서 고르게 선택)",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    evenlySampleListForLlm(imagesForLlmRaw, MAX_LLM_VISION_IMAGES_PER_REQUEST)
+                } else {
+                    imagesForLlmRaw
                 }
                 val rawAuxSnap =
                     if (aiTabMode == AiChatTabMode.MOBILE_3DGS) attachedAuxUris else emptyList()
@@ -1092,7 +1104,7 @@ fun ClaudeChatScreen(
                         try {
                             context.contentResolver.openInputStream(uri)?.use { stream ->
                                 val bitmap = BitmapFactory.decodeStream(stream)
-                                bitmap?.let { ClaudeChatClient.bitmapToBase64(it) }
+                                bitmap?.let { ClaudeChatClient.bitmapToBase64ForLlm(it) }
                             }
                         } catch (e: Exception) {
                             null

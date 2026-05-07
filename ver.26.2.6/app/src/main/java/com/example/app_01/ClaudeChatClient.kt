@@ -15,6 +15,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import retrofit2.HttpException
 import java.io.ByteArrayOutputStream
+import kotlin.math.max
+import kotlin.math.roundToInt
 
 /**
  * Claude API를 통한 채팅 클라이언트.
@@ -400,8 +402,10 @@ APP CONTEXT (keep the script’s narrative aligned with the real app):
 - User goal often includes **materials that insurance companies or police can use as *templates*** (not legal advice): structured **tables**, **evidence mapping**, and a **measured, cautious conclusion** section with explicit limitations.
 - **Android in-app Word (.docx) mirror (no Python on device)** extracts, **in source order**, string literals from:
   - `add_heading("…", level=…)`, `add_paragraph("…")`, `add_run("…")` when the **first argument is** a `r`/`f`/`b`/`u`-prefixed normal or triple-quoted **string literal**;
-  - `…text = "…"` / `…text = '…'` assignments (**not** `==`), e.g. `table.cell(r,c).text = "값"` or `row.cells[i].text = "값"`.
+  - `식별자.cell(row, col).text = "…"` (**row/col must be integer literals**, same identifier as `add_table` result);
+  - other `…text = "…"` assignments (e.g. `row.cells[i].text`) when not part of `.cell(r,c).text`.
   Narrative paragraphs and **every table cell** must appear in one of these patterns. Scripts that only build empty tables or pass **variables** as the first argument to `add_paragraph` will produce **missing** text in the mirrored .docx.
+- **Do not** break Korean sentences across lines **inside** one string literal (no arbitrary `\\n` in the middle of a sentence). Use **one long string** per `add_paragraph`, or call `add_paragraph` **multiple times** for separate paragraphs. The mirror collapses single `\\n` inside a literal to a space so lines are not chopped mid-sentence.
 
 PRIMARY OUTPUT (mandatory):
 - The assistant reply must be **one single fenced Markdown code block** labeled **python** (`python-docx` or `python3` tag allowed) containing a **complete, runnable Python 3 script**.
@@ -415,7 +419,7 @@ PRIMARY OUTPUT (mandatory):
   6) **추가 조사·정비 권고**
   7) **종합 결론(정리 bullet)** — 사실/추정 구분, **면책**: 본 문서는 현장 재현·기술 요약용 템플릿이며 법적·보험 확정 판단을 대체하지 않음
 - **Encode analysis text and table cell text as string literals** in `add_heading` / `add_paragraph` / table cells, derived from **user text, attached images, and the JSON/PLY/ZIP appendix in this turn**. Do not dump a long prose report *outside* the code block; the .docx content lives in the script.
-- For `add_table`: build `table = doc.add_table(rows=n, cols=m)` then set **each cell** with a **string literal**, preferably `table.cell(r, c).text = "한글 내용"` or `table.rows[r].cells[c].text = "…"` (mirrored on the phone). You may also use `cell.paragraphs[0].add_run("…")` with a literal. Avoid leaving cells unset.
+- For `add_table`: `table = doc.add_table(rows=n, cols=m)` then **every cell** MUST use **`table.cell(r, c).text = "…"`** or **`tbl.cell(r, c).text = "…"`** with **integer literals** for `r` and `c` (not variables, not `i`/`j`), so the in-app mirror can rebuild the grid. You may add headings/paragraphs between tables. `row.cells[i].text` is not used for the mirror grid—prefer `table.cell(r,c).text` for all body cells.
 - Optional `add_picture(path)` only via **CLI args** for PC-side image paths, with comments — never embed base64 from chat.
 
 STRICTLY FORBIDDEN:
@@ -456,7 +460,8 @@ DOCUMENT CRAFT (quality bar):
 - Prefer **consistent terminology** (전면/후면/좌·우, 범퍼, 펜더, 도어, 쿼터, 리어패널, 루프레일 등).
 
 ANDROID IN-APP .docx MIRROR (no Python on phone):
-- The app extracts string literals from **`add_heading`**, **`add_paragraph`**, **`add_run`**, and **`.text = "…"`** cell assignments **in source order**. Put **all report substance** in those patterns. Do **not** leave table cells unset.
+- The app extracts string literals from **`add_heading`**, **`add_paragraph`**, **`add_run`**, **`table.cell(INT, INT).text = "…"`**, and other **`.text = "…"`** assignments **in source order**.
+- Use **only integer literals** for row/col in `table.cell(r,c).text` so tables appear as real Word tables. Do **not** put line breaks inside a long sentence string—use a single line or multiple `add_paragraph` calls.
 
 STRICTLY FORBIDDEN:
 - No second code block. No OpenSCAD/STL.
@@ -865,11 +870,63 @@ ${rawUser.trim()}
         return Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
     }
 
+    /**
+     * LLM vision 요청용: 긴 변을 [maxSidePx] 이하로 줄인 뒤 JPEG로 인코딩한다.
+     * 고해상도 다중 첨부 시 HTTP 413(request too large)를 줄이기 위해 AI 채팅 전송 경로에서 사용한다.
+     */
+    fun bitmapToBase64ForLlm(
+        bitmap: Bitmap,
+        maxSidePx: Int = 1280,
+        jpegQuality: Int = 78,
+    ): String {
+        val scaled = scaleBitmapMaxSide(bitmap, maxSidePx)
+        return try {
+            val stream = ByteArrayOutputStream()
+            scaled.compress(
+                Bitmap.CompressFormat.JPEG,
+                jpegQuality.coerceIn(55, 92),
+                stream,
+            )
+            Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
+        } finally {
+            if (scaled !== bitmap) scaled.recycle()
+            bitmap.recycle()
+        }
+    }
+
+    private fun scaleBitmapMaxSide(bitmap: Bitmap, maxSidePx: Int): Bitmap {
+        val w = bitmap.width
+        val h = bitmap.height
+        val maxDim = max(w, h)
+        if (maxDim <= maxSidePx) return bitmap
+        val scale = maxSidePx.toFloat() / maxDim
+        val nw = (w * scale).roundToInt().coerceAtLeast(1)
+        val nh = (h * scale).roundToInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(bitmap, nw, nh, true)
+    }
+
     private fun parseTextFromAnthropicResponse(resp: AnthropicMessagesResponse): String? {
         val sb = StringBuilder()
         resp.content?.forEach { block ->
             if (block.type == "text") sb.append(block.text.orEmpty())
         }
         return sb.toString().takeIf { it.isNotBlank() }
+    }
+}
+
+/** 한 번에 보내는 vision 이미지 장수 상한(HTTP 413 방지). */
+internal const val MAX_LLM_VISION_IMAGES_PER_REQUEST = 28
+
+internal fun <T> evenlySampleListForLlm(
+    items: List<T>,
+    maxCount: Int = MAX_LLM_VISION_IMAGES_PER_REQUEST,
+): List<T> {
+    if (items.size <= maxCount) return items
+    if (maxCount <= 1) return listOf(items.first())
+    val lastIndex = items.lastIndex
+    val step = lastIndex.toDouble() / (maxCount - 1)
+    return List(maxCount) { i ->
+        val idx = (i.toDouble() * step).roundToInt().coerceIn(0, lastIndex)
+        items[idx]
     }
 }

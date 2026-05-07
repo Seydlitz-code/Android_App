@@ -17,7 +17,8 @@ import java.util.zip.ZipOutputStream
  * - `.add_heading("…", level=…)`
  * - `.add_paragraph("…")` (첫 인자가 문자열인 호출만)
  * - `.add_run("…")` (표·문단 런 — LLM이 자주 사용)
- * - `…text = "…"` / `…text = '…'` (`table.cell` / `cells[i].text` 등 **할당**만; `==` 제외)
+ * - `식별자.cell(r, c).text = "…"` (python-docx 표 셀; [식별자]는 `doc.add_table` 결과 변수)
+ * - 그 외 `…text = "…"` / `…text = '…'` (`cells[i].text` 등 **할당**만; `==` 제외, 셀 패턴과 겹치면 셀만 사용)
  *
  * 괄호 짝 맞추기는 문자열·`#` 주석 안의 괄호를 무시하므로, 본문에 `(` `)` 가 있어도 이후 코드가 통째로
  * 누락되지 않습니다. (이전 구현의 잘림 버그 수정)
@@ -27,6 +28,8 @@ object ThreeDgsChatDocxExport {
     sealed class DocPiece {
         data class Heading(val level: Int, val text: String) : DocPiece()
         data class Paragraph(val text: String) : DocPiece()
+        /** `tbl.cell(r,c).text = "…"` 로 채운 셀들을 한 격자로 묶어 `<w:tbl>` 로 출력 */
+        data class Table(val rows: List<List<String>>) : DocPiece()
     }
 
     data class ExportResult(
@@ -48,9 +51,8 @@ object ThreeDgsChatDocxExport {
         fileBasePrefix: String = "3dgs_report",
         mirrorDocTitle: String = "3DGS 분석 보고서 (LLM 스크립트 미러)",
         mirrorIntro: String =
-            "이 문서는 기기에서 Python을 실행하지 않고, LLM 스크립트에서 " +
-                "add_heading · add_paragraph · add_run 의 문자열 인자와 .text = \"…\" 셀 할당만 " +
-                "순서대로 추출해 자동 생성했습니다. (표 레이아웃은 동일하지 않을 수 있으나 본문·표 텍스트는 위 패턴으로 수집됩니다.)",
+            "이 문서는 기기에서 Python을 실행하지 않고, LLM 스크립트 문자열·" +
+                "table.cell(r,c).text 할당을 추출해 생성했습니다. 본문 줄바꿈은 공백으로 합쳐지며 셀은 표로 조립됩니다.",
     ): ExportResult? {
         val py = extractFirstPythonFence(fullMarkdown) ?: return null
         return try {
@@ -129,17 +131,131 @@ object ThreeDgsChatDocxExport {
             "from docx import" in low || "from docx." in low
     }
 
-    private data class Extracted(val index: Int, val piece: DocPiece)
+    private data class Extracted(val index: Int, val piece: DocPiece?)
+    private data class CellExtract(
+        val index: Int,
+        val endExclusive: Int,
+        val tableVar: String,
+        val row: Int,
+        val col: Int,
+        val text: String,
+    )
 
     fun extractPiecesFromPythonDocxScript(py: String): List<DocPiece> {
         val raw = ArrayList<Extracted>()
         collectCallLiterals(py, ".add_heading", raw, isHeading = true)
         collectCallLiterals(py, ".add_paragraph", raw, isHeading = false)
         collectCallLiterals(py, ".add_run", raw, isHeading = false)
-        collectTextAssignments(py, raw)
-        if (raw.isEmpty()) return emptyList()
-        return raw.sortedBy { it.index }.map { it.piece }
+        val cells = collectTableCellAssignments(py)
+        val cellBlockedRanges = cells.map { it.index until it.endExclusive }
+        collectPlainTextAssignments(py, raw, cellBlockedRanges)
+        if (raw.isEmpty() && cells.isEmpty()) return emptyList()
+        return mergeExtractsToDocPieces(raw, cells)
     }
+
+    private fun collectTableCellAssignments(py: String): List<CellExtract> {
+        val out = ArrayList<CellExtract>()
+        val re = Regex(
+            """\b([a-zA-Z_]\w*)\s*\.\s*cell\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*\.\s*text\s*=""",
+            RegexOption.IGNORE_CASE,
+        )
+        for (m in re.findAll(py)) {
+            val tbl = m.groupValues[1]
+            val r = m.groupValues[2].toIntOrNull() ?: continue
+            val c = m.groupValues[3].toIntOrNull() ?: continue
+            val parsed = readFirstStringArg(py, m.range.last + 1) ?: continue
+            out.add(
+                CellExtract(
+                    index = m.range.first,
+                    endExclusive = parsed.second,
+                    tableVar = tbl,
+                    row = r,
+                    col = c,
+                    text = parsed.first,
+                ),
+            )
+        }
+        return out
+    }
+
+    private fun overlapsAny(idx: Int, ranges: List<IntRange>): Boolean =
+        ranges.any { idx in it }
+
+    private fun collectPlainTextAssignments(py: String, out: MutableList<Extracted>, blocked: List<IntRange>) {
+        var search = 0
+        while (true) {
+            val idx = py.indexOf(".text", search)
+            if (idx < 0) return
+            var j = idx + 5
+            j = skipWs(py, j)
+            if (j >= py.length) {
+                search = idx + 5
+                continue
+            }
+            if (py[j] != '=' || py.getOrNull(j + 1) == '=') {
+                search = idx + 5
+                continue
+            }
+            if (overlapsAny(idx, blocked)) {
+                search = idx + 5
+                continue
+            }
+            j = skipWs(py, j + 1)
+            val parsed = readFirstStringArg(py, j) ?: run {
+                search = idx + 5
+                continue
+            }
+            out.add(Extracted(idx, DocPiece.Paragraph(parsed.first)))
+            search = parsed.second
+        }
+    }
+
+    private fun mergeExtractsToDocPieces(raw: List<Extracted>, cells: List<CellExtract>): List<DocPiece> {
+        val events = ArrayList<Pair<Int, DocPiece>>()
+        for (e in raw) {
+            val p = e.piece ?: continue
+            when (p) {
+                is DocPiece.Heading -> events.add(
+                    e.index to DocPiece.Heading(p.level, normalizeSingleBlockText(p.text)),
+                )
+                is DocPiece.Paragraph -> events.add(
+                    e.index to DocPiece.Paragraph(normalizeSingleBlockText(p.text)),
+                )
+                else -> events.add(e.index to p)
+            }
+        }
+        if (cells.isNotEmpty()) {
+            val byVar = cells.groupBy { it.tableVar }
+            for ((_, list) in byVar) {
+                val sortedCells = list.sortedWith(compareBy({ it.row }, { it.col }, { it.index }))
+                val maxR = sortedCells.maxOf { it.row }
+                val maxC = sortedCells.maxOf { it.col }
+                val grid = Array(maxR + 1) { r ->
+                    Array(maxC + 1) { c ->
+                        sortedCells.find { it.row == r && it.col == c }?.text ?: ""
+                    }
+                }
+                val rows = grid.map { row -> row.map { normalizeSingleBlockText(it) }.toList() }.toList()
+                val minIdx = list.minOf { it.index }
+                events.add(minIdx to DocPiece.Table(rows))
+            }
+        }
+        if (events.isEmpty()) return emptyList()
+        return events.sortedWith(compareBy({ it.first }, { sortTieBreaker(it.second) })).map { it.second }
+    }
+
+    private fun sortTieBreaker(p: DocPiece): Int = when (p) {
+        is DocPiece.Heading -> 0
+        is DocPiece.Table -> 1
+        is DocPiece.Paragraph -> 2
+    }
+
+    private fun normalizeSingleBlockText(s: String): String =
+        s.replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .replace(Regex("\n"), " ")
+            .replace(Regex(" +"), " ")
+            .trim()
 
     private fun collectCallLiterals(py: String, needle: String, out: MutableList<Extracted>, isHeading: Boolean) {
         var search = 0
@@ -171,32 +287,6 @@ object ThreeDgsChatDocxExport {
         }
     }
 
-    private fun collectTextAssignments(py: String, out: MutableList<Extracted>) {
-        var search = 0
-        while (true) {
-            val idx = py.indexOf(".text", search)
-            if (idx < 0) return
-            var j = idx + 5
-            j = skipWs(py, j)
-            if (j >= py.length) {
-                search = idx + 5
-                continue
-            }
-            if (py[j] != '=' || py.getOrNull(j + 1) == '=') {
-                search = idx + 5
-                continue
-            }
-            j = skipWs(py, j + 1)
-            val parsed = readFirstStringArg(py, j) ?: run {
-                search = idx + 5
-                continue
-            }
-            out.add(Extracted(idx, DocPiece.Paragraph(parsed.first)))
-            search = parsed.second
-        }
-    }
-
-    /** 문자열·`#` 줄주석 안의 괄호는 깊이 계산에서 제외 */
     private fun indexOfMatchingCloseParen(s: String, openParen: Int): Int {
         require(openParen < s.length && s[openParen] == '(')
         var depth = 1
@@ -417,13 +507,35 @@ object ThreeDgsChatDocxExport {
             escapeXml(if (line.isEmpty()) " " else line) +
             "</w:t></w:r></w:p>\n"
 
+    private fun tableXml(rows: List<List<String>>): String {
+        if (rows.isEmpty()) return ""
+        val cols = rows.maxOf { it.size }.coerceAtLeast(1)
+        val sb = StringBuilder(1024)
+        sb.append("<w:tbl>")
+        sb.append("<w:tblPr><w:tblW w:w=\"5000\" w:type=\"pct\"/></w:tblPr>")
+        sb.append("<w:tblGrid>")
+        repeat(cols) { sb.append("<w:gridCol w:w=\"2880\"/>") }
+        sb.append("</w:tblGrid>")
+        for (row in rows) {
+            sb.append("<w:tr>")
+            for (c in 0 until cols) {
+                val txt = row.getOrElse(c) { "" }.let { normalizeSingleBlockText(it) }
+                sb.append("<w:tc>")
+                sb.append(bodyParagraph(if (txt.isEmpty()) " " else txt).removeSuffix("\n"))
+                sb.append("</w:tc>")
+            }
+            sb.append("</w:tr>")
+        }
+        sb.append("</w:tbl>\n")
+        return sb.toString()
+    }
+
     private fun buildDocumentXml(
         pieces: List<DocPiece>,
         mirrorDocTitle: String = "3DGS 분석 보고서 (LLM 스크립트 미러)",
         mirrorIntro: String =
-            "이 문서는 기기에서 Python을 실행하지 않고, LLM 스크립트에서 " +
-                "add_heading · add_paragraph · add_run 의 문자열 인자와 .text = \"…\" 셀 할당만 " +
-                "순서대로 추출해 자동 생성했습니다. (표 레이아웃은 동일하지 않을 수 있으나 본문·표 텍스트는 위 패턴으로 수집됩니다.)",
+            "이 문서는 기기에서 Python을 실행하지 않고, LLM 스크립트 문자열·" +
+                "table.cell(r,c).text 할당을 추출해 생성했습니다. 본문 줄바꿈은 공백으로 합쳐지며 셀은 표로 조립됩니다.",
     ): String {
         val sb = StringBuilder(32_768)
         sb.append(
@@ -439,11 +551,8 @@ object ThreeDgsChatDocxExport {
         for (piece in pieces) {
             when (piece) {
                 is DocPiece.Heading -> sb.append(headingParagraph(piece.text, piece.level))
-                is DocPiece.Paragraph -> {
-                    for (line in piece.text.split('\n')) {
-                        sb.append(bodyParagraph(line))
-                    }
-                }
+                is DocPiece.Paragraph -> sb.append(bodyParagraph(piece.text))
+                is DocPiece.Table -> sb.append(tableXml(piece.rows))
             }
         }
         sb.append("</w:body></w:document>")

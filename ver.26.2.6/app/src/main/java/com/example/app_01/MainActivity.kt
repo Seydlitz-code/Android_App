@@ -291,6 +291,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import com.example.app_01.ui.theme.App_01Theme
 import java.io.BufferedOutputStream
 import java.io.File
@@ -334,11 +335,23 @@ private const val SERVER_UPLOAD_PART_PC = "file_pc"
 private const val SERVER_UPLOAD_PART_GS = "file_gs"
 private const val SERVER_UPLOAD_FILENAME_PC = "pc.zip"
 private const val SERVER_UPLOAD_FILENAME_GS = "gs.zip"
-/** 서버에서 PLY·대용량 결과 수신 시 네트워크→파일 스트리밍 복사 버퍼 */
-private const val SERVER_DOWNLOAD_BUFFER_BYTES = 8 * 1024 * 1024
+/**
+ * 네트워크→파일 스트리밍 시 한 번에 읽는 크기.
+ * 과대(예: 8MB)는 읽기 버퍼 + [BufferedOutputStream] 버퍼와 겹쳐 저메모리 기기에서 OOM을 유발할 수 있음.
+ */
+private const val SERVER_DOWNLOAD_STREAM_BUFFER_BYTES = 256 * 1024
 
-/** 동시에 여러 결과 파일을 받을 때 너무 많은 연결·메모리를 쓰지 않도록 상한 */
-private const val SERVER_DOWNLOAD_MAX_PARALLEL = 2
+/** 디스크 출력 버퍼. 힙 점유를 줄이기 위해 읽기 버퍼보다 작게 둠. */
+private const val SERVER_DOWNLOAD_FILE_OUT_BUFFER_BYTES = 64 * 1024
+
+/** 장시간 다운로드 루프에서 협력 양보(스레드·다른 코루틴 기아 완화) */
+private const val SERVER_DOWNLOAD_YIELD_INTERVAL_BYTES = 16 * 1024 * 1024
+
+/**
+ * 동시에 여러 결과 파일을 받을 때의 병렬度.
+ * 병렬 2 + 대형 버퍼는 힙 피크가 커져 크래시가 날 수 있어 기본은 순차(1).
+ */
+private const val SERVER_DOWNLOAD_MAX_PARALLEL = 1
 
 private const val SERVER_PIPELINE_WAKE_MAX_MS = 4 * 60 * 60 * 1000L // 최대 4시간
 private const val DEFAULT_SERVER_ADDRESS = "192.168.0.88"
@@ -4118,14 +4131,23 @@ internal suspend fun downloadHttpUrlToFile(
                 var lastProgressAt = 0L
                 val progressMinIntervalMs = 1600L
                 body.byteStream().use { input ->
-                    BufferedOutputStream(FileOutputStream(outFile), SERVER_DOWNLOAD_BUFFER_BYTES).use { output ->
-                        val buf = ByteArray(SERVER_DOWNLOAD_BUFFER_BYTES)
+                    BufferedOutputStream(
+                        FileOutputStream(outFile),
+                        SERVER_DOWNLOAD_FILE_OUT_BUFFER_BYTES,
+                    ).use { output ->
+                        val buf = ByteArray(SERVER_DOWNLOAD_STREAM_BUFFER_BYTES)
                         var total = 0L
+                        var sinceYield = 0L
                         while (true) {
                             val n = input.read(buf)
                             if (n <= 0) break
                             output.write(buf, 0, n)
                             total += n.toLong()
+                            sinceYield += n.toLong()
+                            if (sinceYield >= SERVER_DOWNLOAD_YIELD_INTERVAL_BYTES) {
+                                sinceYield = 0L
+                                yield()
+                            }
                             if (onStreamProgress != null) {
                                 val now = System.currentTimeMillis()
                                 val done = contentLength > 0 && total >= contentLength
@@ -4156,7 +4178,7 @@ internal suspend fun downloadHttpUrlToFile(
  * 엔드포인트가 없거나 실패하면 PLY 단일 다운로드로 폴백합니다.
  *
  * - HTTP 클라이언트·TCP 연결은 [getServerDownloadOkHttpClient]로 재사용합니다.
- * - 여러 파일은 [SERVER_DOWNLOAD_MAX_PARALLEL]개까지 병렬로 받아 총 소요 시간을 줄입니다.
+ * - 여러 파일은 [SERVER_DOWNLOAD_MAX_PARALLEL]개까지 병렬로 받습니다(기본 1: 메모리·안정성 우선).
  * - 단일 대용량 파일은 Content-Length 기반으로 진행 알림을 갱신합니다(포그라운드 유지·절전 완화).
  */
 internal suspend fun downloadServerPipelineArtifacts(
@@ -4252,11 +4274,12 @@ internal suspend fun runServer3dgsAnalysisInBackground(
     pending: Pending3dgsServerAutoSend
 ): Boolean {
     val imageBase64List = withContext(Dispatchers.IO) {
-        pending.imageUris.mapNotNull { uri ->
+        val uris = evenlySampleListForLlm(pending.imageUris)
+        uris.mapNotNull { uri ->
             try {
                 context.contentResolver.openInputStream(uri)?.use { stream ->
                     val bitmap = BitmapFactory.decodeStream(stream)
-                    bitmap?.let { ClaudeChatClient.bitmapToBase64(it) }
+                    bitmap?.let { ClaudeChatClient.bitmapToBase64ForLlm(it) }
                 }
             } catch (_: Exception) {
                 null
