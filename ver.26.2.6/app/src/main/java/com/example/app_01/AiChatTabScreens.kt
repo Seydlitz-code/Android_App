@@ -203,6 +203,7 @@ import android.view.WindowManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -270,6 +271,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
@@ -286,6 +288,7 @@ import com.example.app_01.ui.theme.App_01Theme
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.util.TimeZone
 import java.io.IOException
 import java.text.SimpleDateFormat
@@ -313,14 +316,102 @@ import java.security.cert.X509Certificate
 
 private const val MAX_JSON_APPENDIX_TOTAL_CHARS = 200_000
 private const val MAX_JSON_APPENDIX_PER_FILE_CHARS = 80_000
+private const val MAX_3DGS_AUX_ATTACHMENTS = 12
+private const val GLTF_MAGIC = 0x46546C67
 
-private suspend fun readJsonAppendixForLlm(context: Context, uris: List<Uri>): String =
-    withContext(Dispatchers.IO) {
-        if (uris.isEmpty()) return@withContext ""
-        val sb = StringBuilder()
-        for (uri in uris) {
-            if (sb.length >= MAX_JSON_APPENDIX_TOTAL_CHARS) break
-            val label = uri.lastPathSegment ?: uri.toString()
+/** 파손 분석 모드: 텍스트가 비어 있고 이미지만 보낼 때 LLM에 넣는 기본 요청 */
+private const val DAMAGE_ANALYSIS_DEFAULT_PROMPT =
+    "첨부 사고·차량 사진만을 근거로, 한국어 python-docx 스크립트(단일 ```python 블록)를 출력하세요. " +
+        "생성되는 Word(.docx)에는 반드시 포함하세요: (1) 차량 모델·차급 유추 및 근거·한계, (2) 파손 부위 정리 표, (3) 부위별 피해 규모(깊이·너비 등) 시각 추정 표—실측 아님 명시, (4) 수리 예상 견적·기간 참고 표—만 원·일자 범위, (5) 종합 결론 및 면책. " +
+        "모든 표는 table.cell 또는 row.cells에 한글 문자열 리터럴로 채우세요."
+
+private fun uriFileExtension(uri: Uri): String {
+    val name = uri.lastPathSegment?.substringAfterLast('/', missingDelimiterValue = "") ?: ""
+    val dot = name.lastIndexOf('.')
+    return if (dot >= 0) name.substring(dot + 1).lowercase(Locale.getDefault()) else ""
+}
+
+private fun Uri.lengthBytesOrNull(context: Context): Long? {
+    return try {
+        when (scheme) {
+            "file" -> {
+                val p = path ?: return null
+                val f = File(p)
+                if (f.isFile) f.length() else null
+            }
+            else -> {
+                val len = context.contentResolver.openAssetFileDescriptor(this, "r")?.use { it.length }
+                if (len != null && len >= 0) len else null
+            }
+        }
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun Uri.isChatPickVideoUri(): Boolean {
+    val pl = path?.lowercase(Locale.getDefault()) ?: return false
+    return pl.endsWith(".mp4") || pl.endsWith(".mov") || pl.endsWith(".webm")
+}
+
+private fun Uri.isLikelyImageOrVideoUri(context: Context): Boolean {
+    if (isChatPickVideoUri()) return true
+    val pl = path?.lowercase(Locale.getDefault()) ?: ""
+    if (pl.endsWith(".jpg") || pl.endsWith(".jpeg") || pl.endsWith(".png") ||
+        pl.endsWith(".webp") || pl.endsWith(".heic") || pl.endsWith(".heif")
+    ) {
+        return true
+    }
+    val t = context.contentResolver.getType(this)?.lowercase(Locale.getDefault()) ?: ""
+    return t.startsWith("image/") || t.startsWith("video/")
+}
+
+/** 이미지·동영상 URI와 그 외(JSON·PLY·GLB·ZIP 등) 첨부 URI 분리 */
+private fun partitionMediaAndAuxUris(context: Context, uris: List<Uri>): Pair<List<Uri>, List<Uri>> {
+    val media = ArrayList<Uri>()
+    val aux = ArrayList<Uri>()
+    val seenM = HashSet<String>()
+    val seenA = HashSet<String>()
+    for (u in uris) {
+        val k = u.toString()
+        if (u.isLikelyImageOrVideoUri(context)) {
+            if (seenM.add(k)) media.add(u)
+        } else {
+            if (seenA.add(k)) aux.add(u)
+        }
+    }
+    return media to aux
+}
+
+private fun readPlyHeaderExcerpt(inp: InputStream, maxLinesAfterHeader: Int = 0): String {
+    val reader = inp.bufferedReader(Charsets.US_ASCII)
+    val sb = StringBuilder()
+    var pastHeader = false
+    var extra = 0
+    while (true) {
+        val line = reader.readLine() ?: break
+        sb.appendLine(line)
+        if (line.trim() == "end_header") {
+            pastHeader = true
+            if (maxLinesAfterHeader <= 0) break
+        } else if (pastHeader) {
+            extra++
+            if (extra >= maxLinesAfterHeader) break
+        }
+        if (sb.length > 24_000) {
+            sb.appendLine("...(PLY 헤더/본문 발췌 상한)")
+            break
+        }
+    }
+    return sb.toString()
+}
+
+private fun buildOne3dgsAppendixBlock(context: Context, uri: Uri): String? {
+    val label = uri.lastPathSegment ?: uri.toString()
+    val ext = uriFileExtension(uri)
+    val len = uri.lengthBytesOrNull(context)
+    return when (ext) {
+        "json" -> {
             val raw = try {
                 when (uri.scheme) {
                     "file" -> {
@@ -334,13 +425,99 @@ private suspend fun readJsonAppendixForLlm(context: Context, uris: List<Uri>): S
             } catch (_: Exception) {
                 ""
             }
-            if (raw.isEmpty()) continue
+            if (raw.isEmpty()) return null
             val chunk = if (raw.length > MAX_JSON_APPENDIX_PER_FILE_CHARS) {
                 raw.take(MAX_JSON_APPENDIX_PER_FILE_CHARS) + "\n...(파일 길이로 인해 잘림)"
             } else raw
+            "### $label (JSON)\n${chunk}"
+        }
+        "ply" -> {
+            val header = try {
+                context.contentResolver.openInputStream(uri)?.use { inp ->
+                    readPlyHeaderExcerpt(inp)
+                } ?: ""
+            } catch (_: Exception) {
+                ""
+            }
+            if (header.isEmpty()) return null
+            val sizeStr = len?.toString() ?: "알 수 없음"
+            "### $label (PLY)\n크기(bytes): $sizeStr\n--- ASCII 헤더 발췌 ---\n$header"
+        }
+        "glb" -> {
+            val summary = try {
+                context.contentResolver.openInputStream(uri)?.use { inp ->
+                    val hdr = ByteArray(12)
+                    if (inp.read(hdr) < 12) return@use "(GLB 헤더 12바이트 미만)"
+                    val bb = ByteBuffer.wrap(hdr).order(ByteOrder.LITTLE_ENDIAN)
+                    val magic = bb.int
+                    val ver = bb.int
+                    val declared = bb.int
+                    val magicOk = magic == GLTF_MAGIC
+                    "magic glTF: $magicOk, version: $ver, declared total length: $declared bytes"
+                } ?: ""
+            } catch (e: Exception) {
+                "(GLB 요약 실패: ${e.message})"
+            }
+            val sizeStr = len?.toString() ?: "알 수 없음"
+            "### $label (GLB)\n크기(bytes): $sizeStr\n$summary"
+        }
+        "zip" -> {
+            val listing = try {
+                context.contentResolver.openInputStream(uri)?.use { rawIn ->
+                    ZipInputStream(rawIn).use { zis ->
+                        val names = ArrayList<String>()
+                        while (names.size < 200) {
+                            val e = zis.nextEntry ?: break
+                            if (!e.isDirectory) names.add(e.name)
+                            zis.closeEntry()
+                        }
+                        buildString {
+                            appendLine(names.joinToString("\n"))
+                            if (names.size >= 200) appendLine("...(ZIP 항목 최대 200개만 표시)")
+                        }.trimEnd()
+                    }
+                } ?: ""
+            } catch (e: Exception) {
+                "(ZIP 목록 실패: ${e.message})"
+            }
+            if (listing.isEmpty()) return null
+            val sizeStr = len?.toString() ?: "알 수 없음"
+            "### $label (ZIP)\n크기(bytes): $sizeStr\n--- 엔트리(일부) ---\n$listing"
+        }
+        else -> {
+            val maxProbe = 120_000L
+            if (len != null && len > maxProbe) {
+                "### $label ($ext)\n크기(bytes): $len\n(바이너리·대용량으로 간주, 본문 생략)"
+            } else {
+                val raw = try {
+                    context.contentResolver.openInputStream(uri)?.bufferedReader()
+                        ?.use { it.readText() } ?: ""
+                } catch (_: Exception) {
+                    ""
+                }
+                if (raw.isEmpty()) {
+                    val sz = len?.toString() ?: "?"
+                    "### $label ($ext)\n크기(bytes): $sz\n(UTF-8 텍스트로 읽지 못함)"
+                } else {
+                    val chunk = if (raw.length > MAX_JSON_APPENDIX_PER_FILE_CHARS) {
+                        raw.take(MAX_JSON_APPENDIX_PER_FILE_CHARS) + "\n...(잘림)"
+                    } else raw
+                    "### $label ($ext, 텍스트로 추정)\n$chunk"
+                }
+            }
+        }
+    }
+}
+
+private suspend fun read3dgsDataAppendixForLlm(context: Context, uris: List<Uri>): String =
+    withContext(Dispatchers.IO) {
+        if (uris.isEmpty()) return@withContext ""
+        val sb = StringBuilder()
+        for (uri in uris) {
+            if (sb.length >= MAX_JSON_APPENDIX_TOTAL_CHARS) break
+            val block = buildOne3dgsAppendixBlock(context, uri) ?: continue
             if (sb.isNotEmpty()) sb.append("\n\n")
-            sb.append("### ").append(label).append('\n').append(chunk)
-            if (sb.length > MAX_JSON_APPENDIX_TOTAL_CHARS) break
+            sb.append(block)
         }
         sb.toString().take(MAX_JSON_APPENDIX_TOTAL_CHARS)
     }
@@ -352,6 +529,8 @@ fun ClaudeChatScreen(
     onAiCadSavedToLibrary: () -> Unit = {},
     pending3dgsServerAutoSend: Pending3dgsServerAutoSend? = null,
     onPending3dgsServerAutoSendConsumed: () -> Unit = {},
+    /** 서버 파이프라인 결과 폴더가 바뀔 때마다 증가시켜 3DGS 이미지 피커 목록을 갱신합니다. */
+    serverArtifactLibraryVersion: Int = 0,
 ) {
     val context = LocalContext.current
     val palette = LocalAppUiPalette.current
@@ -364,14 +543,18 @@ fun ClaudeChatScreen(
     var showImageSelectDialog by remember { mutableStateOf(false) }
     var datasetFolders by remember { mutableStateOf<List<DatasetFolder>>(emptyList()) }
     var attachedImages by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    var attachedJsonUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    var showJsonLibraryPicker by remember { mutableStateOf(false) }
+    /** 3DGS: JSON·PLY·GLB·ZIP 등 LLM 텍스트 부록용 (비이미지) */
+    var attachedAuxUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var imagePickerSession by remember { mutableIntStateOf(0) }
+    var serverPreviewUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var serverAnalysisUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var aiTabMode by remember { mutableStateOf(AiChatTabMode.CLAUDE) }
     var aiCadOption by remember { mutableStateOf(ClaudeChatClient.AiCadInputOption.DIMENSIONS_DIRECT) }
     var modeMenuExpanded by remember { mutableStateOf(false) }
     var stlDialogForIndex by remember { mutableStateOf<Int?>(null) }
     var stlSaveNameInput by remember { mutableStateOf("") }
     var stlBusyMessageIndex by remember { mutableStateOf<Int?>(null) }
+    var docxBusyMessageIndex by remember { mutableStateOf<Int?>(null) }
     val listState = rememberLazyListState()
     // 스레드 관리 상태
     var currentThreadId by remember { mutableStateOf<String?>(null) }
@@ -392,9 +575,32 @@ fun ClaudeChatScreen(
         }
     }
 
+    /** 3DGS·파손 분석: 갤러리 이미지+동영상. 그 외 모드: 이미지만 */
+    val galleryForImagePicker = remember(galleryImages, aiTabMode) {
+        if (aiTabMode == AiChatTabMode.MOBILE_3DGS || aiTabMode == AiChatTabMode.DAMAGE_ANALYSIS) {
+            galleryImages.filter { uri ->
+                val pl = uri.path?.lowercase(Locale.getDefault()) ?: ""
+                pl.endsWith(".jpg") || pl.endsWith(".jpeg") || pl.endsWith(".png") ||
+                    pl.endsWith(".webp") || pl.endsWith(".heic") || pl.endsWith(".heif") ||
+                    pl.endsWith(".mp4") || pl.endsWith(".mov") || pl.endsWith(".webm")
+            }
+        } else {
+            galleryImageUris
+        }
+    }
+
     LaunchedEffect(Unit) {
         loadDatasetFolders(context) { datasetFolders = it }
         allThreads = ChatThreadStorage.loadAll(context)
+    }
+
+    LaunchedEffect(serverArtifactLibraryVersion) {
+        val (previews, analyses) = withContext(Dispatchers.IO) {
+            val infos = scanServerTaskManifestInfos(context)
+            previewUrisForServerTasks(infos) to analysisImageUrisForServerTasks(infos)
+        }
+        serverPreviewUris = previews
+        serverAnalysisUris = analyses
     }
 
     // 새 메시지 추가 또는 스트리밍 시작 시 최하단으로 스크롤
@@ -443,6 +649,7 @@ fun ClaudeChatScreen(
                             AiChatTabMode.CLAUDE -> "클로드"
                             AiChatTabMode.AI_CAD -> "AI CAD"
                             AiChatTabMode.MOBILE_3DGS -> "3DGS 분석"
+                            AiChatTabMode.DAMAGE_ANALYSIS -> "파손부위 분석"
                         },
                         color = palette.onBackground,
                         fontSize = 20.sp,
@@ -499,7 +706,7 @@ fun ClaudeChatScreen(
                             Column {
                                 Text("3DGS 분석", color = palette.onBackground, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                                 Text(
-                                    "3DGS 분석: Anthropic Claude API(또는 프로필에서 고른 LLM)로 Mobile 3DGS·COLMAP·촬영 품질을 질의합니다.",
+                                    "3DGS 분석: 첨부(갤러리·데이터셋·서버 미리보기/분석·JSON/PLY·GLB·ARCore 등)를 바탕으로 보험·경찰 제출용 틀에 맞춘 한국어 Word(.docx) python-docx 스크립트를 출력합니다.",
                                     color = palette.onBackground.copy(alpha = 0.65f),
                                     fontSize = 11.sp,
                                     lineHeight = 14.sp
@@ -508,6 +715,23 @@ fun ClaudeChatScreen(
                         },
                         onClick = {
                             aiTabMode = AiChatTabMode.MOBILE_3DGS
+                            modeMenuExpanded = false
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text("파손부위 분석", color = palette.onBackground, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                Text(
+                                    "사고 차량 사진을 바탕으로 모델 유추·파손 표·피해 규모 추정·수리 견적 참고 표·결론까지 담은 정교한 python-docx Word 스크립트를 출력합니다.",
+                                    color = palette.onBackground.copy(alpha = 0.65f),
+                                    fontSize = 11.sp,
+                                    lineHeight = 14.sp
+                                )
+                            }
+                        },
+                        onClick = {
+                            aiTabMode = AiChatTabMode.DAMAGE_ANALYSIS
                             modeMenuExpanded = false
                         }
                     )
@@ -520,7 +744,8 @@ fun ClaudeChatScreen(
                 currentThreadId = null
                 streamingText = ""
                 errorMessage = null
-                attachedJsonUris = emptyList()
+                attachedImages = emptyList()
+                attachedAuxUris = emptyList()
             }) {
                 Icon(
                     imageVector = Icons.Filled.Edit,
@@ -555,7 +780,65 @@ fun ClaudeChatScreen(
                         onSaveClick = { stlDialogForIndex = index }
                     )
                 } else {
-                    ChatMessageItem(message = msg)
+                    val threeDgsExport =
+                        if (!msg.isUser && (
+                            aiTabMode == AiChatTabMode.MOBILE_3DGS ||
+                                aiTabMode == AiChatTabMode.DAMAGE_ANALYSIS
+                            )
+                        ) {
+                        MarkdownThreeDgsExport(
+                            isExporting = docxBusyMessageIndex == index,
+                            onExport = {
+                                scope.launch {
+                                    docxBusyMessageIndex = index
+                                    val result = withContext(Dispatchers.IO) {
+                                        when (aiTabMode) {
+                                            AiChatTabMode.DAMAGE_ANALYSIS ->
+                                                ThreeDgsChatDocxExport.tryExportToFiles(
+                                                    context,
+                                                    msg.text,
+                                                    subdirectory = "damage_llm_exports",
+                                                    fileBasePrefix = "damage_report",
+                                                    mirrorDocTitle = "교통사고 파손·부위 분석 보고서 (LLM 스크립트 미러)",
+                                                    mirrorIntro =
+                                                        "이 문서는 기기에서 Python을 실행하지 않고, LLM 스크립트의 " +
+                                                            "add_heading·add_paragraph·add_run 문자열과 .text=\"…\" 셀 할당을 추출해 자동 생성했습니다. " +
+                                                            "보험사·경찰 제출용 틀 참고용이며 법적 효력을 보장하지 않습니다.",
+                                                )
+                                            else ->
+                                                ThreeDgsChatDocxExport.tryExportToFiles(context, msg.text)
+                                        }
+                                    }
+                                    docxBusyMessageIndex = null
+                                    if (result == null) {
+                                        Toast.makeText(
+                                            context,
+                                            "python 코드 블록이 없거나 저장에 실패했습니다.",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    } else {
+                                        if (result.extractedPieceCount == 0) {
+                                            Toast.makeText(
+                                                context,
+                                                "스크립트에서 문단 문자열을 찾지 못했습니다. .py·.docx는 저장되었습니다.",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        } else {
+                                            Toast.makeText(
+                                                context,
+                                                "저장: ${result.docxFile.name}",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                        PoliceInsuranceDocxWriter.openDocx(context, result.docxFile)
+                                    }
+                                }
+                            }
+                        )
+                    } else {
+                        null
+                    }
+                    ChatMessageItem(message = msg, threeDgsExport = threeDgsExport)
                 }
             }
             // 스트리밍 중: 실시간으로 들어오는 텍스트 표시
@@ -563,7 +846,8 @@ fun ClaudeChatScreen(
                 item(key = "streaming") {
                     ChatMessageItem(
                         message = ChatMessage(text = streamingText, isUser = false),
-                        isStreaming = true
+                        isStreaming = true,
+                        threeDgsExport = null,
                     )
                 }
             }
@@ -720,7 +1004,18 @@ fun ClaudeChatScreen(
 
             if (aiTabMode == AiChatTabMode.MOBILE_3DGS) {
                 Text(
-                    text = "프로필 → LLM API 키에서 Anthropic(클로드)를 선택하면 이 탭이 Claude 메시지 API로 동작합니다. 이미지 첨부 시 촬영 적합도 코멘트를 요청할 수 있습니다.",
+                    text = "프로필 → LLM API 키로 제공자를 고릅니다. 응답은 python-docx로 .docx를 생성하는 Python 스크립트(단일 ```python 블록)가 중심입니다. 첨부는 한 팝업에서 갤러리·데이터셋·서버 3DGS 미리보기/분석·JSON·PLY/GLB·ARCore·기기 파일을 함께 여러 개 고를 수 있습니다.",
+                    color = palette.onBackgroundMuted,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp)
+                )
+            }
+            if (aiTabMode == AiChatTabMode.DAMAGE_ANALYSIS) {
+                Text(
+                    text = "프로필 → LLM API 키로 제공자를 고릅니다. 응답은 python-docx로 .docx를 만드는 Python 스크립트(단일 ```python 블록)가 중심입니다. 스크립트에는 차량 모델 유추, 파손 정리 표, 피해 규모(시각 추정) 표, 수리 견적·기간 참고 표, 결론 등이 포함되도록 설정되어 있습니다. 텍스트 없이 사진만 보내도 위 구조로 생성을 요청합니다. 아래「저장」에서 기기에 .docx를 만들고 열 수 있습니다.",
                     color = palette.onBackgroundMuted,
                     fontSize = 11.sp,
                     lineHeight = 15.sp,
@@ -735,16 +1030,45 @@ fun ClaudeChatScreen(
                 if (isStreaming) return@sendLambda
                 val text = messageText.trim()
                 val images = attachedImages
-                val jsonSnap =
-                    if (aiTabMode == AiChatTabMode.MOBILE_3DGS) attachedJsonUris else emptyList()
-                if (text.isEmpty() && images.isEmpty() && jsonSnap.isEmpty()) return@sendLambda
+                val imagesForLlm = if (
+                    aiTabMode == AiChatTabMode.MOBILE_3DGS ||
+                        aiTabMode == AiChatTabMode.DAMAGE_ANALYSIS
+                ) {
+                    images.filter { !it.isChatPickVideoUri() }
+                } else {
+                    images
+                }
+                val rawAuxSnap =
+                    if (aiTabMode == AiChatTabMode.MOBILE_3DGS) attachedAuxUris else emptyList()
+                val auxSnap = if (rawAuxSnap.size > MAX_3DGS_AUX_ATTACHMENTS) {
+                    Toast.makeText(
+                        context,
+                        "데이터 파일(JSON·PLY·ZIP 등)은 최대 ${MAX_3DGS_AUX_ATTACHMENTS}개까지 전송됩니다.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    rawAuxSnap.take(MAX_3DGS_AUX_ATTACHMENTS)
+                } else rawAuxSnap
+                if (text.isEmpty() && imagesForLlm.isEmpty() && auxSnap.isEmpty()) {
+                    if (images.isNotEmpty() && (
+                        aiTabMode == AiChatTabMode.MOBILE_3DGS ||
+                            aiTabMode == AiChatTabMode.DAMAGE_ANALYSIS
+                        )
+                    ) {
+                        Toast.makeText(
+                            context,
+                            "동영상만 선택되었습니다. 이미지를 첨부하세요.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@sendLambda
+                }
 
                 val userBubbleText = when {
                     text.isNotEmpty() -> text
-                    images.size > 1 -> "[${images.size}장의 이미지]"
-                    images.size == 1 -> "[이미지 1장]"
-                    jsonSnap.isNotEmpty() && images.isEmpty() -> "[JSON ${jsonSnap.size}개]"
-                    jsonSnap.isNotEmpty() -> "[이미지 ${images.size}장·JSON ${jsonSnap.size}개]"
+                    images.size > 1 -> "[${images.size}개 미디어]"
+                    images.size == 1 -> if (images.single().isChatPickVideoUri()) "[동영상 1개]" else "[이미지 1장]"
+                    auxSnap.isNotEmpty() && images.isEmpty() -> "[데이터 파일 ${auxSnap.size}개]"
+                    auxSnap.isNotEmpty() -> "[미디어 ${images.size}개·데이터 파일 ${auxSnap.size}개]"
                     else -> ""
                 }
 
@@ -753,18 +1077,18 @@ fun ClaudeChatScreen(
                         text = userBubbleText,
                         isUser = true,
                         imageUris = images,
-                        jsonUris = jsonSnap
+                        jsonUris = auxSnap
                     )
                 )
                 messageText = ""
                 attachedImages = emptyList()
-                attachedJsonUris = emptyList()
+                attachedAuxUris = emptyList()
                 isStreaming = true
                 streamingText = ""
                 errorMessage = null
 
                 scope.launch {
-                    val imageBase64List = images.mapNotNull { uri ->
+                    val imageBase64List = imagesForLlm.mapNotNull { uri ->
                         try {
                             context.contentResolver.openInputStream(uri)?.use { stream ->
                                 val bitmap = BitmapFactory.decodeStream(stream)
@@ -774,15 +1098,19 @@ fun ClaudeChatScreen(
                             null
                         }
                     }
-                    val jsonAppendix = if (aiTabMode == AiChatTabMode.MOBILE_3DGS && jsonSnap.isNotEmpty()) {
-                        readJsonAppendixForLlm(context, jsonSnap)
+                    val dataAppendix = if (aiTabMode == AiChatTabMode.MOBILE_3DGS && auxSnap.isNotEmpty()) {
+                        read3dgsDataAppendixForLlm(context, auxSnap)
                     } else ""
                     val defaultImgPrompt = when (aiTabMode) {
                         AiChatTabMode.MOBILE_3DGS -> when {
                             imageBase64List.size > 1 ->
-                                "첨부된 여러 이미지를 3D Gaussian Splatting·다시점 재구성 관점에서 검토해 주세요."
+                                "첨부된 여러 이미지를 근거로 3DGS·서버 분석 관점에서 요약한 내용을 한국어 Word(.docx)로 저장하는 python-docx 기반 Python 스크립트 전체를 단일 ```python 코드 블록으로만 출력하세요."
                             imageBase64List.size == 1 ->
-                                "첨부된 이미지를 3DGS 촬영·데이터 품질 관점에서 검토해 주세요."
+                                "첨부 이미지를 근거로 3DGS·서버 분석 관점에서 요약한 내용을 한국어 Word(.docx)로 저장하는 python-docx 기반 Python 스크립트 전체를 단일 ```python 코드 블록으로만 출력하세요."
+                            else -> ""
+                        }
+                        AiChatTabMode.DAMAGE_ANALYSIS -> when {
+                            imageBase64List.isNotEmpty() -> DAMAGE_ANALYSIS_DEFAULT_PROMPT
                             else -> ""
                         }
                         else -> when {
@@ -814,19 +1142,36 @@ fun ClaudeChatScreen(
                             val basePrompt = text.ifBlank {
                                 when {
                                     imageBase64List.isNotEmpty() -> defaultImgPrompt
-                                    jsonAppendix.isNotBlank() ->
-                                        "첨부된 JSON 데이터를 바탕으로 Mobile 3DGS·COLMAP·촬영 데이터 관점에서 분석해 주세요."
+                                    dataAppendix.isNotBlank() ->
+                                        "첨부 데이터 파일(JSON·PLY/GLB·ZIP 등)과 이미지를 반영해 사고 현장·차량을 보험사·경찰 자료 틀로 정리할 수 있도록 Mobile 3DGS·서버 분석 관점의 표·결론까지 담은 내용을 작성하고, 그 내용을 한국어 Word(.docx)로 만드는 python-docx Python 스크립트 전체를 단일 ```python 코드 블록으로만 출력하세요."
                                     else ->
-                                        "이 앱의 Mobile 3DGS(COLMAP 바이너리·갤러리 사진) 파이프라인을 소개하고, 흔한 문제 진단 방법을 알려 주세요."
+                                        "이 앱의 Mobile 3DGS(COLMAP·갤러리·서버 미리보기/분석 이미지) 워크플로와 흔한 진단 요점을 한국어 Word 보고서로 정리하기 위한 python-docx 샘플 스크립트 전체를 단일 ```python 코드 블록으로만 출력하세요."
                                 }
                             }
-                            val fullText = if (jsonAppendix.isNotBlank()) {
-                                basePrompt + "\n\n--- 첨부 JSON ---\n" + jsonAppendix
+                            val fullText = if (dataAppendix.isNotBlank()) {
+                                basePrompt + "\n\n--- 첨부 데이터 파일 요약(JSON·PLY·GLB·ZIP 등) ---\n" + dataAppendix
                             } else {
                                 basePrompt
                             }
                             ClaudeChatClient.streamMobile3dGsAnalysisMessage(
                                 userText = fullText,
+                                imageBase64List = imageBase64List,
+                                onDelta = { delta ->
+                                    streamBuffer.append(delta)
+                                    streamingText = streamBuffer.toString()
+                                }
+                            )
+                        }
+                        AiChatTabMode.DAMAGE_ANALYSIS -> {
+                            val basePrompt = text.ifBlank {
+                                if (imageBase64List.isNotEmpty()) {
+                                    DAMAGE_ANALYSIS_DEFAULT_PROMPT
+                                } else {
+                                    "사고 차량 사진을 바탕으로 차량 모델 정보·파손 부위 표·피해 규모(시각 추정) 표·수리 견적·기간 참고 표·종합 결론을 담은 정교한 한국어 Word(.docx)용 python-docx 스크립트 전체를 단일 ```python 코드 블록으로만 출력하세요. 표 셀은 문자열 리터럴로 채우세요."
+                                }
+                            }
+                            ClaudeChatClient.streamDamageAnalysisReportMessage(
+                                userText = basePrompt,
                                 imageBase64List = imageBase64List,
                                 onDelta = { delta ->
                                     streamBuffer.append(delta)
@@ -935,36 +1280,25 @@ fun ClaudeChatScreen(
                         .size(40.dp)
                         .clip(CircleShape)
                         .background(palette.chatComposerPill)
-                        .clickable { showImageSelectDialog = true },
+                        .clickable {
+                            imagePickerSession++
+                            showImageSelectDialog = true
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = if (aiTabMode == AiChatTabMode.AI_CAD)
                             Icons.Filled.Add else Icons.Filled.AddPhotoAlternate,
                         contentDescription = "첨부",
-                        tint = if (attachedImages.isNotEmpty()) palette.brand
-                               else palette.onBackground.copy(alpha = 0.85f),
+                        tint = if (attachedImages.isNotEmpty() ||
+                            (aiTabMode == AiChatTabMode.MOBILE_3DGS && attachedAuxUris.isNotEmpty())
+                        ) {
+                            palette.brand
+                        } else {
+                            palette.onBackground.copy(alpha = 0.85f)
+                        },
                         modifier = Modifier.size(20.dp)
                     )
-                }
-
-                if (aiTabMode == AiChatTabMode.MOBILE_3DGS) {
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(CircleShape)
-                            .background(palette.chatComposerPill)
-                            .clickable { showJsonLibraryPicker = true },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Description,
-                            contentDescription = "JSON 라이브러리에서 첨부",
-                            tint = if (attachedJsonUris.isNotEmpty()) palette.brand
-                            else palette.onBackground.copy(alpha = 0.85f),
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
                 }
 
                 // Pill 입력 컨테이너
@@ -981,7 +1315,8 @@ fun ClaudeChatScreen(
                                 Text(
                                     text = when (aiTabMode) {
                                         AiChatTabMode.AI_CAD -> "모델·치수 입력"
-                                        AiChatTabMode.MOBILE_3DGS -> "3DGS·COLMAP 질문 입력…"
+                                        AiChatTabMode.MOBILE_3DGS -> "Word 보고서 스크립트 요청 또는 맥락 입력…"
+                                        AiChatTabMode.DAMAGE_ANALYSIS -> "파손 보고서 스크립트 요청 또는 맥락 입력…"
                                         else -> "메시지 입력…"
                                     },
                                     color = palette.placeholder,
@@ -1004,7 +1339,7 @@ fun ClaudeChatScreen(
                         // 전송 버튼 (pill 내부 오른쪽, 원형)
                         val canSend = !isStreaming && (
                             messageText.isNotBlank() || attachedImages.isNotEmpty() ||
-                                (aiTabMode == AiChatTabMode.MOBILE_3DGS && attachedJsonUris.isNotEmpty())
+                                (aiTabMode == AiChatTabMode.MOBILE_3DGS && attachedAuxUris.isNotEmpty())
                             )
                         Box(
                             modifier = Modifier
@@ -1036,43 +1371,30 @@ fun ClaudeChatScreen(
             }
         }
 
-        if (showJsonLibraryPicker) {
-            JsonLibraryPickerDialog(
-                onDismiss = { showJsonLibraryPicker = false },
-                onPickFile = { file ->
-                    val uri = Uri.fromFile(file)
-                    if (attachedJsonUris.none { it.path == uri.path }) {
-                        if (attachedJsonUris.size >= 8) {
-                            Toast.makeText(
-                                context,
-                                "JSON 첨부는 최대 8개까지입니다.",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        } else {
-                            attachedJsonUris = attachedJsonUris + uri
-                        }
-                    }
-                    showJsonLibraryPicker = false
-                }
-            )
-        }
-
-        // 이미지 선택 다이얼로그 (갤러리·데이터셋 폴더)
+        // 이미지·파일 선택 다이얼로그 (갤러리·데이터셋·3DGS 라이브러리)
         if (showImageSelectDialog) {
             ClaudeImageSelectDialog(
-                galleryImages = galleryImageUris,
+                dialogSession = imagePickerSession,
+                initialSelection = attachedImages + attachedAuxUris,
+                galleryMedia = galleryForImagePicker,
                 datasetFolders = datasetFolders,
-                onGalleryImageSelected = { uri ->
-                    attachedImages = listOf(uri)
-                    showImageSelectDialog = false
-                },
-                onDatasetFolderSelected = { folder ->
-                    val imageExts = setOf("jpg", "jpeg", "png", "webp")
-                    val uris = folder.dir.listFiles { f ->
-                        f.isFile && imageExts.contains(f.extension.lowercase())
-                    }?.sortedBy { it.nameWithoutExtension.toIntOrNull() ?: Int.MAX_VALUE }
-                        ?.map { Uri.fromFile(it) } ?: emptyList()
-                    attachedImages = uris
+                includeServerLibraryTabs = aiTabMode == AiChatTabMode.MOBILE_3DGS ||
+                    aiTabMode == AiChatTabMode.DAMAGE_ANALYSIS,
+                include3dgsFileLibraryTabs = aiTabMode == AiChatTabMode.MOBILE_3DGS,
+                serverPreviewUris = serverPreviewUris,
+                serverAnalysisUris = serverAnalysisUris,
+                onPickMedia = { uris ->
+                    val (media, aux) = partitionMediaAndAuxUris(context, uris)
+                    val auxTrim = if (aux.size > MAX_3DGS_AUX_ATTACHMENTS) {
+                        Toast.makeText(
+                            context,
+                            "데이터 파일(JSON·PLY 등)은 최대 ${MAX_3DGS_AUX_ATTACHMENTS}개까지 첨부됩니다.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                        aux.take(MAX_3DGS_AUX_ATTACHMENTS)
+                    } else aux
+                    attachedImages = media
+                    attachedAuxUris = auxTrim
                     showImageSelectDialog = false
                 },
                 onDismiss = { showImageSelectDialog = false }
@@ -1124,6 +1446,7 @@ fun ClaudeChatScreen(
                     aiTabMode = when (thread.modeName) {
                         "AI_CAD" -> AiChatTabMode.AI_CAD
                         "MOBILE_3DGS" -> AiChatTabMode.MOBILE_3DGS
+                        "DAMAGE_ANALYSIS" -> AiChatTabMode.DAMAGE_ANALYSIS
                         "GEMMA4_ON_DEVICE" -> AiChatTabMode.CLAUDE // 구버전 스레드 호환
                         else -> AiChatTabMode.CLAUDE
                     }
@@ -1154,160 +1477,551 @@ fun ClaudeChatScreen(
     } // end outer Box
 }
 
+private enum class ClaudeImageLibraryTab {
+    GALLERY,
+    DATASET,
+    GS_PREVIEW,
+    GS_ANALYSIS,
+    JSON_LIBRARY,
+    MODEL_3D,
+    ARCORE_LIBRARY,
+    DEVICE_FILES,
+}
+
+private fun scanModel3dLibraryFiles(context: Context): List<File> {
+    val root = ModelLibraryPaths.plyDir(context)
+    if (!root.isDirectory) return emptyList()
+    return root.walkTopDown()
+        .maxDepth(6)
+        .filter { it.isFile }
+        .filter { f ->
+            val e = f.extension.lowercase(Locale.getDefault())
+            e == "ply" || e == "glb"
+        }
+        .sortedByDescending { it.lastModified() }
+        .take(500)
+        .toList()
+}
+
+private fun scanArcoreAttachFiles(context: Context): List<File> {
+    return ArcoreLibrary.listFilesSorted(context).filter { f ->
+        val e = f.extension.lowercase(Locale.getDefault())
+        e == "zip" || e == "json" || e == "glb"
+    }
+}
+
+private fun datasetFolderMediaUrisForPicker(folder: DatasetFolder): List<Uri> {
+    val exts = setOf("jpg", "jpeg", "png", "webp", "mp4", "mov", "webm")
+    return folder.dir.listFiles { f ->
+        f.isFile && exts.contains(f.extension.lowercase(Locale.getDefault()))
+    }?.sortedBy { it.nameWithoutExtension.toIntOrNull() ?: Int.MAX_VALUE }
+        ?.map { Uri.fromFile(it) } ?: emptyList()
+}
+
+@Composable
+private fun ChatPickMediaThumbnail(
+    uri: Uri,
+    palette: AppUiPalette,
+    restrictVideoForLlm: Boolean,
+    isSelected: Boolean,
+    onToggle: () -> Unit,
+) {
+    val context = LocalContext.current
+    val isVid = remember(uri) { uri.isChatPickVideoUri() }
+    Box(
+        modifier = Modifier
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable {
+                if (restrictVideoForLlm && isVid) {
+                    Toast.makeText(
+                        context,
+                        "동영상은 이 모드에서 LLM에 전송되지 않습니다. 이미지를 선택하세요.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                } else {
+                    onToggle()
+                }
+            }
+            .border(
+                width = if (isSelected) 3.dp else 1.dp,
+                color = if (isSelected) palette.brand else palette.divider,
+                shape = RoundedCornerShape(8.dp),
+            ),
+    ) {
+        if (isVid) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.42f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Videocam,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(32.dp),
+                )
+            }
+        } else {
+            Image(
+                painter = rememberAsyncImagePainter(uri),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        }
+        if (isSelected) {
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(4.dp)
+                    .size(22.dp)
+                    .clip(CircleShape)
+                    .background(palette.brand),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Check,
+                    contentDescription = null,
+                    tint = palette.onBrand,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatPickAuxFileRow(
+    file: File,
+    palette: AppUiPalette,
+    isSelected: Boolean,
+    onToggle: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(
+                if (isSelected) palette.brand.copy(alpha = 0.18f)
+                else palette.chatComposerPill,
+            )
+            .border(
+                1.dp,
+                if (isSelected) palette.brand else palette.divider,
+                RoundedCornerShape(10.dp),
+            )
+            .clickable { onToggle() }
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Outlined.Description,
+            contentDescription = null,
+            tint = palette.brand,
+            modifier = Modifier.size(24.dp),
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = file.name,
+                color = palette.onBackground,
+                fontSize = 14.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = "${file.length() / 1024} KB · ${file.extension.uppercase(Locale.getDefault())}",
+                color = palette.onBackgroundMuted,
+                fontSize = 11.sp,
+            )
+        }
+        if (isSelected) {
+            Icon(
+                imageVector = Icons.Filled.Check,
+                contentDescription = null,
+                tint = palette.brand,
+                modifier = Modifier.size(22.dp),
+            )
+        }
+    }
+}
+
 @Composable
 private fun ClaudeImageSelectDialog(
-    galleryImages: List<Uri>,
+    /** 다이얼로그를 열 때마다 증가시켜 탭 선택을 초기화합니다. */
+    dialogSession: Int,
+    /** 열릴 때 이미 첨부된 항목(이미지 URI + 데이터 파일 URI, 다시 열어 추가 선택 가능) */
+    initialSelection: List<Uri>,
+    galleryMedia: List<Uri>,
     datasetFolders: List<DatasetFolder>,
-    onGalleryImageSelected: (Uri) -> Unit,
-    onDatasetFolderSelected: (DatasetFolder) -> Unit,
-    onDismiss: () -> Unit
+    includeServerLibraryTabs: Boolean = false,
+    /** 3DGS: JSON/PLY·GLB/ARCore 라이브러리 + 기기 다중 파일 탭 */
+    include3dgsFileLibraryTabs: Boolean = false,
+    serverPreviewUris: List<Uri> = emptyList(),
+    serverAnalysisUris: List<Uri> = emptyList(),
+    onPickMedia: (List<Uri>) -> Unit,
+    onDismiss: () -> Unit,
 ) {
+    val context = LocalContext.current
     val palette = LocalAppUiPalette.current
-    var selectedTab by remember { mutableStateOf(0) } // 0: 갤러리, 1: 데이터셋(폴더)
+    val screenH = LocalConfiguration.current.screenHeightDp.dp
+    var selectedTab by remember(dialogSession) { mutableStateOf(ClaudeImageLibraryTab.GALLERY) }
+    var datasetBrowseFolder by remember(dialogSession) { mutableStateOf<DatasetFolder?>(null) }
 
-    Dialog(onDismissRequest = onDismiss) {
-        Box(
+    var jsonLibFiles by remember { mutableStateOf<List<File>>(emptyList()) }
+    var model3dLibFiles by remember { mutableStateOf<List<File>>(emptyList()) }
+    var arcoreLibFiles by remember { mutableStateOf<List<File>>(emptyList()) }
+
+    LaunchedEffect(dialogSession, include3dgsFileLibraryTabs) {
+        if (!include3dgsFileLibraryTabs) {
+            jsonLibFiles = emptyList()
+            model3dLibFiles = emptyList()
+            arcoreLibFiles = emptyList()
+        } else {
+            val triple = withContext(Dispatchers.IO) {
+                Triple(
+                    JsonLibrary.listFilesSorted(context),
+                    scanModel3dLibraryFiles(context),
+                    scanArcoreAttachFiles(context),
+                )
+            }
+            jsonLibFiles = triple.first
+            model3dLibFiles = triple.second
+            arcoreLibFiles = triple.third
+        }
+    }
+
+    val selection = remember(dialogSession) {
+        mutableStateListOf<Uri>().apply { addAll(initialSelection) }
+    }
+
+    fun uriKey(u: Uri) = u.toString()
+    fun isPicked(u: Uri) = selection.any { uriKey(it) == uriKey(u) }
+    fun togglePick(u: Uri) {
+        val k = uriKey(u)
+        val idx = selection.indexOfFirst { uriKey(it) == k }
+        if (idx >= 0) selection.removeAt(idx) else selection.add(u)
+    }
+
+    val openMultiDocs = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { result ->
+        if (result.isNullOrEmpty()) return@rememberLauncherForActivityResult
+        for (u in result) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    u,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            } catch (_: Exception) {
+            }
+            togglePick(u)
+        }
+    }
+
+    val visibleTabs = remember(includeServerLibraryTabs, include3dgsFileLibraryTabs) {
+        buildList {
+            add(ClaudeImageLibraryTab.GALLERY)
+            add(ClaudeImageLibraryTab.DATASET)
+            if (includeServerLibraryTabs) {
+                add(ClaudeImageLibraryTab.GS_PREVIEW)
+                add(ClaudeImageLibraryTab.GS_ANALYSIS)
+            }
+            if (include3dgsFileLibraryTabs) {
+                add(ClaudeImageLibraryTab.JSON_LIBRARY)
+                add(ClaudeImageLibraryTab.MODEL_3D)
+                add(ClaudeImageLibraryTab.ARCORE_LIBRARY)
+                add(ClaudeImageLibraryTab.DEVICE_FILES)
+            }
+        }
+    }
+
+    LaunchedEffect(visibleTabs, dialogSession) {
+        if (selectedTab !in visibleTabs) {
+            selectedTab = ClaudeImageLibraryTab.GALLERY
+        }
+    }
+    LaunchedEffect(selectedTab) {
+        if (selectedTab != ClaudeImageLibraryTab.DATASET) {
+            datasetBrowseFolder = null
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
             modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.7f)
-                .background(palette.dialogSurface, RoundedCornerShape(16.dp))
-                .padding(16.dp)
+                .fillMaxWidth(0.94f)
+                .height(screenH * 0.74f),
+            shape = RoundedCornerShape(16.dp),
+            color = palette.dialogSurface,
         ) {
-            Column(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+            ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.Top,
                 ) {
-                    Text(
-                        text = "이미지 선택 (갤러리·데이터셋폴더)",
-                        color = palette.onBackground,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = when {
+                                include3dgsFileLibraryTabs ->
+                                    "이미지·동영상·데이터 파일 (탭마다 해당 라이브러리만)"
+                                includeServerLibraryTabs ->
+                                    "이미지·동영상 여러 개 선택 (라이브러리별)"
+                                else ->
+                                    "이미지 여러 개 선택 (갤러리·데이터셋)"
+                            },
+                            color = palette.onBackground,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            text = if (include3dgsFileLibraryTabs) {
+                                "탭을 바꿔도 선택은 유지됩니다. 사진·PLY·ZIP 등을 한 번에 고른 뒤 하단「선택 완료」로 미디어와 데이터 파일이 함께 첨부됩니다."
+                            } else {
+                                "썸네일을 눌러 선택·해제하고, 다른 탭으로 이동해 합칠 수 있습니다. 하단「선택 완료」로 첨부합니다."
+                            },
+                            color = palette.onBackgroundMuted,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
                     Icon(
                         imageVector = Icons.Filled.Close,
                         contentDescription = "닫기",
                         tint = palette.onBackground,
                         modifier = Modifier
                             .size(24.dp)
-                            .clickable { onDismiss() }
+                            .clickable { onDismiss() },
                     )
                 }
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(
+                Spacer(modifier = Modifier.height(10.dp))
+                LazyRow(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    listOf("갤러리 (${galleryImages.size})" to 0, "데이터셋폴더 (${datasetFolders.size})" to 1).forEach { (label, index) ->
-                        val isSelected = selectedTab == index
+                    items(visibleTabs.size, key = { visibleTabs[it].name }) { idx ->
+                        val tab = visibleTabs[idx]
+                        val label = when (tab) {
+                            ClaudeImageLibraryTab.GALLERY ->
+                                "갤러리 (${galleryMedia.size})"
+                            ClaudeImageLibraryTab.DATASET ->
+                                "데이터셋 (${datasetFolders.size})"
+                            ClaudeImageLibraryTab.GS_PREVIEW ->
+                                "3DGS 미리보기 (${serverPreviewUris.size})"
+                            ClaudeImageLibraryTab.GS_ANALYSIS ->
+                                "3DGS 분석 (${serverAnalysisUris.size})"
+                            ClaudeImageLibraryTab.JSON_LIBRARY ->
+                                "JSON (${jsonLibFiles.size})"
+                            ClaudeImageLibraryTab.MODEL_3D ->
+                                "PLY/GLB (${model3dLibFiles.size})"
+                            ClaudeImageLibraryTab.ARCORE_LIBRARY ->
+                                "ARCore (${arcoreLibFiles.size})"
+                            ClaudeImageLibraryTab.DEVICE_FILES ->
+                                "기기 파일"
+                        }
+                        val isSel = tab == selectedTab
                         Text(
                             text = label,
-                            color = if (isSelected) palette.onBrand else palette.onBackground,
-                            fontSize = 13.sp,
+                            color = if (isSel) palette.onBrand else palette.onBackground,
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(
-                                    if (isSelected) palette.brand else palette.onBackground.copy(alpha = 0.12f)
+                                    if (isSel) palette.brand
+                                    else palette.onBackground.copy(alpha = 0.12f),
                                 )
-                                .clickable { selectedTab = index }
-                                .padding(horizontal = 14.dp, vertical = 8.dp)
+                                .clickable { selectedTab = tab }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(12.dp))
-                when (selectedTab) {
-                    0 -> {
-                        if (galleryImages.isEmpty()) {
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxWidth(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "갤러리에 이미지가 없습니다.",
-                                    color = palette.onBackgroundMuted,
-                                    fontSize = 14.sp
-                                )
-                            }
-                        } else {
-                            LazyVerticalGrid(
-                                columns = GridCells.Fixed(3),
-                                modifier = Modifier.weight(1f),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                items(galleryImages) { uri ->
-                                    Image(
-                                        painter = rememberAsyncImagePainter(uri),
-                                        contentDescription = null,
-                                        modifier = Modifier
-                                            .aspectRatio(1f)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .clickable { onGalleryImageSelected(uri) }
-                                            .border(1.dp, palette.divider, RoundedCornerShape(8.dp)),
-                                        contentScale = ContentScale.Crop
+                Spacer(modifier = Modifier.height(10.dp))
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                ) {
+                    when (selectedTab) {
+                        ClaudeImageLibraryTab.GALLERY -> {
+                            if (galleryMedia.isEmpty()) {
+                                Box(
+                                    Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        "갤러리에 항목이 없습니다.",
+                                        color = palette.onBackgroundMuted,
+                                        fontSize = 14.sp,
                                     )
+                                }
+                            } else {
+                                LazyVerticalGrid(
+                                    columns = GridCells.Fixed(3),
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    items(galleryMedia, key = { it.toString() }) { uri ->
+                                        ChatPickMediaThumbnail(
+                                            uri = uri,
+                                            palette = palette,
+                                            restrictVideoForLlm = includeServerLibraryTabs,
+                                            isSelected = isPicked(uri),
+                                            onToggle = { togglePick(uri) },
+                                        )
+                                    }
                                 }
                             }
                         }
-                    }
-                    1 -> {
-                        if (datasetFolders.isEmpty()) {
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .fillMaxWidth(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "데이터셋폴더가 없습니다.",
-                                    color = palette.onBackgroundMuted,
-                                    fontSize = 14.sp
-                                )
-                            }
-                        } else {
-                            LazyVerticalGrid(
-                                columns = GridCells.Fixed(2),
-                                modifier = Modifier.weight(1f),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                items(datasetFolders) { folder ->
-                                    Column(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .border(1.dp, palette.divider, RoundedCornerShape(8.dp))
-                                            .clickable { onDatasetFolderSelected(folder) }
-                                    ) {
-                                        Box(
+                        ClaudeImageLibraryTab.DATASET -> {
+                            if (datasetFolders.isEmpty()) {
+                                Box(
+                                    Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        "데이터셋 폴더가 없습니다.",
+                                        color = palette.onBackgroundMuted,
+                                        fontSize = 14.sp,
+                                    )
+                                }
+                            } else if (datasetBrowseFolder == null) {
+                                LazyVerticalGrid(
+                                    columns = GridCells.Fixed(2),
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    items(datasetFolders, key = { it.dir.absolutePath }) { folder ->
+                                        Column(
                                             modifier = Modifier
-                                                .fillMaxWidth()
-                                                .aspectRatio(1f)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .border(1.dp, palette.divider, RoundedCornerShape(8.dp))
+                                                .clickable { datasetBrowseFolder = folder },
                                         ) {
-                                            folder.coverUri?.let { uri ->
-                                                Image(
-                                                    painter = rememberAsyncImagePainter(uri),
-                                                    contentDescription = null,
-                                                    modifier = Modifier.fillMaxSize(),
-                                                    contentScale = ContentScale.Crop
-                                                )
-                                            }
                                             Box(
                                                 modifier = Modifier
-                                                    .align(Alignment.BottomCenter)
                                                     .fillMaxWidth()
-                                                    .background(Color.Black.copy(alpha = 0.6f))
-                                                    .padding(4.dp)
+                                                    .aspectRatio(1f),
                                             ) {
-                                                Text(
-                                                    text = "${folder.name} (${folder.count}장)",
-                                                    color = palette.onBackground,
-                                                    fontSize = 12.sp,
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    textAlign = TextAlign.Center
+                                                folder.coverUri?.let { cUri ->
+                                                    Image(
+                                                        painter = rememberAsyncImagePainter(cUri),
+                                                        contentDescription = null,
+                                                        modifier = Modifier.fillMaxSize(),
+                                                        contentScale = ContentScale.Crop,
+                                                    )
+                                                }
+                                                Box(
+                                                    Modifier
+                                                        .align(Alignment.BottomCenter)
+                                                        .fillMaxWidth()
+                                                        .background(Color.Black.copy(alpha = 0.62f))
+                                                        .padding(4.dp),
+                                                ) {
+                                                    Text(
+                                                        "${folder.name} (${folder.count})",
+                                                        color = Color.White,
+                                                        fontSize = 11.sp,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        textAlign = TextAlign.Center,
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                val folder = datasetBrowseFolder!!
+                                val media = remember(folder) { datasetFolderMediaUrisForPicker(folder) }
+                                Column(Modifier.fillMaxSize()) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        TextButton(onClick = { datasetBrowseFolder = null }) {
+                                            Text(
+                                                "← 폴더",
+                                                color = palette.brand,
+                                                fontWeight = FontWeight.Bold,
+                                            )
+                                        }
+                                        TextButton(
+                                            onClick = {
+                                                val usable = media.filter { u ->
+                                                    !includeServerLibraryTabs || !u.isChatPickVideoUri()
+                                                }
+                                                if (usable.isEmpty() && media.isNotEmpty() && includeServerLibraryTabs) {
+                                                    Toast.makeText(
+                                                        context,
+                                                        "이 폴더에는 LLM에 보낼 이미지가 없습니다 (동영상만 있음).",
+                                                        Toast.LENGTH_LONG,
+                                                    ).show()
+                                                } else {
+                                                    var added = 0
+                                                    for (u in usable) {
+                                                        if (selection.none { uriKey(it) == uriKey(u) }) {
+                                                            selection.add(u)
+                                                            added++
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            enabled = media.isNotEmpty(),
+                                        ) {
+                                            Text(
+                                                "이 폴더 전체 추가 (${media.size})",
+                                                color = palette.brand,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 13.sp,
+                                            )
+                                        }
+                                    }
+                                    if (media.isEmpty()) {
+                                        Box(
+                                            Modifier
+                                                .weight(1f)
+                                                .fillMaxWidth(),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Text(
+                                                "이 폴더에 이미지·동영상이 없습니다.",
+                                                color = palette.onBackgroundMuted,
+                                                fontSize = 14.sp,
+                                                textAlign = TextAlign.Center,
+                                            )
+                                        }
+                                    } else {
+                                        LazyVerticalGrid(
+                                            columns = GridCells.Fixed(3),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            items(media, key = { it.toString() }) { uri ->
+                                                ChatPickMediaThumbnail(
+                                                    uri = uri,
+                                                    palette = palette,
+                                                    restrictVideoForLlm = includeServerLibraryTabs,
+                                                    isSelected = isPicked(uri),
+                                                    onToggle = { togglePick(uri) },
                                                 )
                                             }
                                         }
@@ -1315,100 +2029,234 @@ private fun ClaudeImageSelectDialog(
                                 }
                             }
                         }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun JsonLibraryPickerDialog(
-    onDismiss: () -> Unit,
-    onPickFile: (File) -> Unit
-) {
-    val context = LocalContext.current
-    val palette = LocalAppUiPalette.current
-    var files by remember { mutableStateOf<List<File>>(emptyList()) }
-    LaunchedEffect(Unit) {
-        files = withContext(Dispatchers.IO) { JsonLibrary.listFilesSorted(context) }
-    }
-    Dialog(onDismissRequest = onDismiss) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.55f)
-                .background(palette.dialogSurface, RoundedCornerShape(16.dp))
-                .padding(16.dp)
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "JSON 라이브러리에서 선택",
-                        color = palette.onBackground,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp
-                    )
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Filled.Close, contentDescription = "닫기", tint = palette.onBackground)
-                    }
-                }
-                Spacer(modifier = Modifier.height(12.dp))
-                if (files.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "저장된 JSON이 없습니다.\n서버 파이프라인 완료 후 분석 JSON이 라이브러리에 저장됩니다.",
-                            color = palette.onBackgroundMuted,
-                            fontSize = 14.sp,
-                            textAlign = TextAlign.Center,
-                            lineHeight = 20.sp
-                        )
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(files, key = { it.absolutePath }) { f ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(palette.chatComposerPill)
-                                    .clickable { onPickFile(f) }
-                                    .padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Outlined.Description,
-                                    contentDescription = null,
-                                    tint = palette.brand,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                                Column(modifier = Modifier.weight(1f)) {
+                        ClaudeImageLibraryTab.GS_PREVIEW -> {
+                            if (serverPreviewUris.isEmpty()) {
+                                Box(
+                                    Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
                                     Text(
-                                        text = f.name,
-                                        color = palette.onBackground,
-                                        fontSize = 14.sp,
-                                        maxLines = 2
-                                    )
-                                    Text(
-                                        text = "${f.length() / 1024} KB",
+                                        "3DGS 미리보기 이미지가 없습니다.\n서버 작업을 내려받은 뒤 다시 시도하세요.",
                                         color = palette.onBackgroundMuted,
-                                        fontSize = 11.sp
+                                        fontSize = 14.sp,
+                                        textAlign = TextAlign.Center,
+                                        lineHeight = 20.sp,
+                                    )
+                                }
+                            } else {
+                                LazyVerticalGrid(
+                                    columns = GridCells.Fixed(3),
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    items(serverPreviewUris, key = { it.toString() }) { uri ->
+                                        ChatPickMediaThumbnail(
+                                            uri = uri,
+                                            palette = palette,
+                                            restrictVideoForLlm = false,
+                                            isSelected = isPicked(uri),
+                                            onToggle = { togglePick(uri) },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        ClaudeImageLibraryTab.GS_ANALYSIS -> {
+                            if (serverAnalysisUris.isEmpty()) {
+                                Box(
+                                    Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        "3DGS 분석 이미지가 없습니다.\n분석 결과가 포함된 작업을 내려받으세요.",
+                                        color = palette.onBackgroundMuted,
+                                        fontSize = 14.sp,
+                                        textAlign = TextAlign.Center,
+                                        lineHeight = 20.sp,
+                                    )
+                                }
+                            } else {
+                                LazyVerticalGrid(
+                                    columns = GridCells.Fixed(3),
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    items(serverAnalysisUris, key = { it.toString() }) { uri ->
+                                        ChatPickMediaThumbnail(
+                                            uri = uri,
+                                            palette = palette,
+                                            restrictVideoForLlm = false,
+                                            isSelected = isPicked(uri),
+                                            onToggle = { togglePick(uri) },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        ClaudeImageLibraryTab.JSON_LIBRARY -> {
+                            if (jsonLibFiles.isEmpty()) {
+                                Box(
+                                    Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        "JSON 라이브러리에 파일이 없습니다.\n서버 파이프라인 결과가 수집되면 여기에 표시됩니다.",
+                                        color = palette.onBackgroundMuted,
+                                        fontSize = 14.sp,
+                                        textAlign = TextAlign.Center,
+                                        lineHeight = 20.sp,
+                                    )
+                                }
+                            } else {
+                                LazyColumn(
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    items(jsonLibFiles, key = { it.absolutePath }) { f ->
+                                        val u = Uri.fromFile(f)
+                                        ChatPickAuxFileRow(
+                                            file = f,
+                                            palette = palette,
+                                            isSelected = isPicked(u),
+                                            onToggle = { togglePick(u) },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        ClaudeImageLibraryTab.MODEL_3D -> {
+                            if (model3dLibFiles.isEmpty()) {
+                                Box(
+                                    Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        "PLY/GLB 라이브러리에 파일이 없습니다.\n모델을 내려받거나 옮긴 뒤 다시 시도하세요.",
+                                        color = palette.onBackgroundMuted,
+                                        fontSize = 14.sp,
+                                        textAlign = TextAlign.Center,
+                                        lineHeight = 20.sp,
+                                    )
+                                }
+                            } else {
+                                LazyColumn(
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    items(model3dLibFiles, key = { it.absolutePath }) { f ->
+                                        val u = Uri.fromFile(f)
+                                        ChatPickAuxFileRow(
+                                            file = f,
+                                            palette = palette,
+                                            isSelected = isPicked(u),
+                                            onToggle = { togglePick(u) },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        ClaudeImageLibraryTab.ARCORE_LIBRARY -> {
+                            if (arcoreLibFiles.isEmpty()) {
+                                Box(
+                                    Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        "ARCore 라이브러리에 ZIP/JSON/GLB이 없습니다.",
+                                        color = palette.onBackgroundMuted,
+                                        fontSize = 14.sp,
+                                        textAlign = TextAlign.Center,
+                                        lineHeight = 20.sp,
+                                    )
+                                }
+                            } else {
+                                LazyColumn(
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    items(arcoreLibFiles, key = { it.absolutePath }) { f ->
+                                        val u = Uri.fromFile(f)
+                                        ChatPickAuxFileRow(
+                                            file = f,
+                                            palette = palette,
+                                            isSelected = isPicked(u),
+                                            onToggle = { togglePick(u) },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        ClaudeImageLibraryTab.DEVICE_FILES -> {
+                            val devScroll = rememberScrollState()
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .verticalScroll(devScroll)
+                                    .padding(vertical = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
+                            ) {
+                                Text(
+                                    text = "시스템 파일 선택기에서 사진·동영상·JSON·PLY·GLB·ZIP 등을 한 번에 여러 개 선택할 수 있습니다. 선택한 항목은 다른 탭에서 고른 항목과 합쳐집니다.",
+                                    color = palette.onBackgroundMuted,
+                                    fontSize = 13.sp,
+                                    lineHeight = 18.sp,
+                                )
+                                Button(
+                                    onClick = {
+                                        openMultiDocs.launch(arrayOf("*/*"))
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = palette.brand,
+                                        contentColor = palette.onBrand,
+                                    ),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.FileUpload,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        "기기에서 여러 파일 선택…",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp,
                                     )
                                 }
                             }
+                        }
+                    }
+                }
+                HorizontalDivider(color = palette.divider)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = "선택 ${selection.size}개",
+                        color = palette.onBackground,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(
+                            onClick = { selection.clear() },
+                            enabled = selection.isNotEmpty(),
+                        ) {
+                            Text("초기화", color = palette.brand, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                        Button(
+                            onClick = { onPickMedia(selection.toList()) },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = palette.brand,
+                                contentColor = palette.onBrand,
+                            ),
+                        ) {
+                            Text("선택 완료", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         }
                     }
                 }
@@ -1417,7 +2265,7 @@ private fun JsonLibraryPickerDialog(
     }
 }
 
-private enum class AiChatTabMode { CLAUDE, AI_CAD, MOBILE_3DGS }
+private enum class AiChatTabMode { CLAUDE, AI_CAD, MOBILE_3DGS, DAMAGE_ANALYSIS }
 
 // ─────────────────────────────────────────────────────────────
 // 대화 스레드 드로어 UI
@@ -1543,17 +2391,19 @@ private fun ThreadListItem(
                 val modeLabel = when (thread.modeName) {
                     "AI_CAD" -> "AI CAD"
                     "MOBILE_3DGS" -> "3DGS"
+                    "DAMAGE_ANALYSIS" -> "파손"
                     else -> "클로드"
                 }
                 val isAiCad = thread.modeName == "AI_CAD"
-                val is3dgs = thread.modeName == "MOBILE_3DGS"
+                val isDocxScript = thread.modeName == "MOBILE_3DGS" ||
+                    thread.modeName == "DAMAGE_ANALYSIS"
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(4.dp))
                         .background(
                             when {
                                 isAiCad -> palette.brand.copy(alpha = 0.15f)
-                                is3dgs -> Color(0xFFE8A838).copy(alpha = 0.2f)
+                                isDocxScript -> Color(0xFFE8A838).copy(alpha = 0.2f)
                                 else -> Color(0xFF4A4AFF).copy(alpha = 0.18f)
                             }
                         )
@@ -1563,7 +2413,7 @@ private fun ThreadListItem(
                         text = modeLabel,
                         color = when {
                             isAiCad -> palette.brand
-                            is3dgs -> Color(0xFFC9780A)
+                            isDocxScript -> Color(0xFFC9780A)
                             else -> Color(0xFF9898FF)
                         },
                         fontSize = 10.sp,
@@ -1607,6 +2457,12 @@ private fun formatThreadTime(timestamp: Long): String {
     }
 }
 
+private data class MarkdownThreeDgsExport(
+    val isExporting: Boolean,
+    val onExport: () -> Unit,
+)
+
+/** @param imageUris 비전 입력용 이미지·동영상, @param jsonUris 3DGS 등 텍스트 부록용(JSON·PLY·ZIP 등) URI (영속 필드명 유지) */
 private data class ChatMessage(
     val text: String,
     val isUser: Boolean,
@@ -1733,7 +2589,8 @@ private fun AiCadScriptWindowBubble(
 @Composable
 private fun ChatMessageItem(
     message: ChatMessage,
-    isStreaming: Boolean = false
+    isStreaming: Boolean = false,
+    threeDgsExport: MarkdownThreeDgsExport? = null,
 ) {
     val palette = LocalAppUiPalette.current
     if (message.isUser) {
@@ -1795,7 +2652,7 @@ private fun ChatMessageItem(
                                             modifier = Modifier.size(18.dp)
                                         )
                                         Text(
-                                            text = ju.lastPathSegment ?: "json",
+                                            text = ju.lastPathSegment ?: "파일",
                                             color = palette.onSurfaceCard,
                                             fontSize = 12.sp,
                                             maxLines = 2
@@ -1805,7 +2662,7 @@ private fun ChatMessageItem(
                             }
                             if (message.jsonUris.size > 6) {
                                 Text(
-                                    text = "외 JSON ${message.jsonUris.size - 6}개",
+                                    text = "외 파일 ${message.jsonUris.size - 6}개",
                                     color = palette.onSurfaceCard.copy(alpha = 0.65f),
                                     fontSize = 11.sp
                                 )
@@ -1853,7 +2710,10 @@ private fun ChatMessageItem(
                 isStreaming -> message.text + " ▊"
                 else -> message.text
             }
-            MarkdownText(text = displayText)
+            MarkdownText(
+                text = displayText,
+                threeDgsExport = if (isStreaming) null else threeDgsExport
+            )
         }
     }
 }
@@ -1990,13 +2850,24 @@ private fun MarkdownText(
     text: String,
     modifier: Modifier = Modifier,
     textColor: Color? = null,
-    fontSize: TextUnit = 15.sp
+    fontSize: TextUnit = 15.sp,
+    threeDgsExport: MarkdownThreeDgsExport? = null,
 ) {
     val palette = LocalAppUiPalette.current
     val resolvedColor = textColor ?: palette.markdownDefault
     val blocks = remember(text) { parseMarkdownBlocks(text) }
+    val firstPythonIdx = remember(blocks, threeDgsExport) {
+        if (threeDgsExport == null) {
+            -1
+        } else {
+            blocks.indexOfFirst { b ->
+                if (b !is MarkdownBlock.CodeBlock) return@indexOfFirst false
+                ThreeDgsChatDocxExport.shouldOfferDocxExportForCodeBlock(b.language, b.code)
+            }
+        }
+    }
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        blocks.forEach { block ->
+        blocks.forEachIndexed { idx, block ->
             when (block) {
                 is MarkdownBlock.Heading -> {
                     val headingSize: TextUnit = when (block.level) {
@@ -2050,7 +2921,15 @@ private fun MarkdownText(
                     }
                 }
                 is MarkdownBlock.CodeBlock -> {
-                    MarkdownCodeBlock(language = block.language, code = block.code)
+                    if (idx == firstPythonIdx && threeDgsExport != null) {
+                        MarkdownPythonCodeBlock3dgs(
+                            code = block.code,
+                            isExporting = threeDgsExport.isExporting,
+                            onExport = threeDgsExport.onExport,
+                        )
+                    } else {
+                        MarkdownCodeBlock(language = block.language, code = block.code)
+                    }
                 }
                 is MarkdownBlock.HRule -> {
                     androidx.compose.material3.HorizontalDivider(
@@ -2066,6 +2945,85 @@ private fun MarkdownText(
                         lineHeight = (fontSize.value * 1.6).sp
                     )
                 }
+            }
+        }
+    }
+}
+
+/** 3DGS: python-docx 스크립트 블록 + Word 저장 버튼 */
+@Composable
+private fun MarkdownPythonCodeBlock3dgs(
+    code: String,
+    isExporting: Boolean,
+    onExport: () -> Unit,
+) {
+    val palette = LocalAppUiPalette.current
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = palette.codeBlockBg,
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, palette.codeBlockBorder)
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(palette.codeBlockHeaderBg)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "python",
+                    color = palette.codeBlockMeta,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                if (isExporting) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            color = palette.brand,
+                            strokeWidth = 2.dp
+                        )
+                        Text(
+                            text = "저장 중…",
+                            color = palette.onBackground.copy(alpha = 0.85f),
+                            fontSize = 12.sp
+                        )
+                    }
+                } else {
+                    TextButton(
+                        onClick = onExport,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "Word 저장·열기",
+                            color = palette.brand,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+            val scroll = rememberScrollState()
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(scroll)
+                    .padding(12.dp)
+            ) {
+                Text(
+                    text = code,
+                    color = palette.aiCadCodeText,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    lineHeight = 18.sp,
+                    softWrap = false
+                )
             }
         }
     }

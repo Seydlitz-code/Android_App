@@ -13,7 +13,7 @@ data class PersistedMessage(
 
 /**
  * 한 번의 대화 흐름을 나타내는 스레드.
- * [modeName]: "CLAUDE", "AI_CAD", or "MOBILE_3DGS"
+ * [modeName]: "CLAUDE", "AI_CAD", "MOBILE_3DGS", or "DAMAGE_ANALYSIS"
  */
 data class ConversationThread(
     val id: String = UUID.randomUUID().toString(),

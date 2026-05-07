@@ -33,6 +33,7 @@ fun BottomNavigationBar(
     onTabSelected: (MainTab) -> Unit
 ) {
     val palette = LocalAppUiPalette.current
+    val aiNavPainter = painterResource(R.drawable.ic_bottom_nav_ai)
     Column(modifier = Modifier.fillMaxWidth()) {
         Box(
             modifier = Modifier
@@ -56,7 +57,7 @@ fun BottomNavigationBar(
             )
             BottomNavItem(
                 label = "AI",
-                painter = painterResource(R.drawable.ic_bottom_nav_ai),
+                painter = aiNavPainter,
                 isSelected = selectedTab == MainTab.CLAUDE,
                 onClick = { onTabSelected(MainTab.CLAUDE) }
             )

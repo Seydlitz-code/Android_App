@@ -916,6 +916,7 @@ private fun LibraryAlbumHubGrid(
     gsPreviewCoverUri: Uri?,
     gsAnalysisCoverUri: Uri?,
     jsonLibraryCount: Int,
+    arcoreLibraryCount: Int,
     onOpenSection: (LibraryTab) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -960,6 +961,13 @@ private fun LibraryAlbumHubGrid(
             "${images.size}장",
             galleryCover,
             Icons.Outlined.PhotoLibrary,
+            placeholderInk
+        ),
+        HubEntry(
+            LibraryTab.AR_CORE_LIBRARY, "ARCore 라이브러리",
+            "${arcoreLibraryCount}개",
+            null,
+            Icons.Filled.ViewInAr,
             placeholderInk
         )
     )
@@ -1070,10 +1078,10 @@ private fun LibraryAlbumHubGrid(
     }
 
     LazyVerticalGrid(
-        columns = GridCells.Fixed(3),
+        columns = GridCells.Fixed(4),
         modifier = modifier,
         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item(span = { GridItemSpan(maxLineSpan) }) {
@@ -1141,9 +1149,12 @@ fun GalleryScreen(
     var serverTaskManifestInfos by remember { mutableStateOf<List<ServerTaskManifestInfo>>(emptyList()) }
     var jsonLibraryFiles by remember { mutableStateOf<List<File>>(emptyList()) }
     var jsonLibraryDetailFile by remember { mutableStateOf<File?>(null) }
-    LaunchedEffect(serverArtifactLibraryVersion) {
+    var arcoreLibraryFiles by remember { mutableStateOf<List<File>>(emptyList()) }
+    var arcoreLibraryDetailFile by remember { mutableStateOf<File?>(null) }
+    LaunchedEffect(libraryTab, serverArtifactLibraryVersion) {
         serverTaskManifestInfos = withContext(Dispatchers.IO) { scanServerTaskManifestInfos(context) }
         jsonLibraryFiles = withContext(Dispatchers.IO) { JsonLibrary.listFilesSorted(context) }
+        arcoreLibraryFiles = withContext(Dispatchers.IO) { ArcoreLibrary.listFilesSorted(context) }
     }
     val gsPreviewUris = remember(serverTaskManifestInfos) { previewUrisForServerTasks(serverTaskManifestInfos) }
     val gsAnalysisUris = remember(serverTaskManifestInfos) { analysisImageUrisForServerTasks(serverTaskManifestInfos) }
@@ -1737,6 +1748,7 @@ fun GalleryScreen(
                                 LibraryTab.GS_PREVIEW -> "3DGS 미리보기 라이브러리"
                                 LibraryTab.GS_ANALYSIS -> "3DGS 분석 이미지 라이브러리"
                                 LibraryTab.JSON_LIBRARY -> "JSON 라이브러리"
+                                LibraryTab.AR_CORE_LIBRARY -> "ARCore 라이브러리"
                             }
                         },
                         fontSize = 18.sp,
@@ -2315,6 +2327,7 @@ fun GalleryScreen(
                     gsPreviewCoverUri = gsPreviewCoverUri,
                     gsAnalysisCoverUri = gsAnalysisCoverUri,
                     jsonLibraryCount = jsonLibraryFiles.size,
+                    arcoreLibraryCount = arcoreLibraryFiles.size,
                     onOpenSection = { tab ->
                         onLibraryTabChange(tab)
                         onLibraryHubVisibilityChange(false)
@@ -3256,7 +3269,7 @@ fun GalleryScreen(
                 }
             } else {
                 LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
+                    columns = GridCells.Fixed(4),
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -3295,6 +3308,69 @@ fun GalleryScreen(
                                 text = "${file.length() / 1024} KB",
                                 color = palette.onBackgroundMuted,
                                 fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+            }
+        } else if (libraryTab == LibraryTab.AR_CORE_LIBRARY) {
+            val arcoreDir = remember(context) { ArcoreLibrary.dir(context) }
+            val arcoreHint =
+                "파일을 PC에서 연결하거나 파일 관리자로 다음 폴더에 복사할 수 있습니다.\n${arcoreDir.absolutePath}"
+            if (arcoreLibraryFiles.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "ARCore용 파일이 없습니다.\n\n$arcoreHint",
+                        color = palette.onBackground.copy(alpha = 0.65f),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        lineHeight = 22.sp,
+                        modifier = Modifier.padding(24.dp)
+                    )
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(4),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(arcoreLibraryFiles, key = { it.absolutePath }) { file ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .border(1.dp, palette.onBackground.copy(alpha = 0.18f), RoundedCornerShape(10.dp))
+                                .background(palette.surfaceCard.copy(alpha = 0.35f))
+                                .clickable { arcoreLibraryDetailFile = file }
+                                .padding(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.ViewInAr,
+                                contentDescription = null,
+                                tint = palette.brand,
+                                modifier = Modifier.size(32.dp)
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = file.name,
+                                color = palette.onBackground,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 2,
+                                textAlign = TextAlign.Center,
+                                lineHeight = 14.sp
+                            )
+                            Text(
+                                text = "${file.length() / 1024} KB",
+                                color = palette.onBackgroundMuted,
+                                fontSize = 10.sp
                             )
                         }
                     }
@@ -3775,16 +3851,32 @@ fun GalleryScreen(
                                             .background(completionBtnBg)
                                             .clickable {
                                                 val b = spb
-                                                val payload = buildPoliceInsurance3dgsPayload(context, b)
-                                                onServerPipelineStart3dgsAi(
-                                                    Pending3dgsServerAutoSend(
-                                                        nonce = System.nanoTime(),
-                                                        promptText = payload.first,
-                                                        imageUris = payload.second,
-                                                        switchToAiTab = true,
-                                                        sourceServerTaskId = b.taskId
-                                                    )
-                                                )
+                                                transferScope.launch {
+                                                    val result = withContext(Dispatchers.IO) {
+                                                        PoliceInsuranceDocxWriter.writeReports(
+                                                            context,
+                                                            b,
+                                                        )
+                                                    }
+                                                    if (result == null) {
+                                                        android.widget.Toast.makeText(
+                                                            context,
+                                                            "Word 보고서 생성에 실패했습니다.",
+                                                            android.widget.Toast.LENGTH_SHORT,
+                                                        ).show()
+                                                    } else {
+                                                        android.widget.Toast.makeText(
+                                                            context,
+                                                            "Word 및 Python 스크립트 저장:\n" +
+                                                                result.docxFile.parentFile?.absolutePath,
+                                                            android.widget.Toast.LENGTH_LONG,
+                                                        ).show()
+                                                        PoliceInsuranceDocxWriter.openDocx(
+                                                            context,
+                                                            result.docxFile,
+                                                        )
+                                                    }
+                                                }
                                             },
                                         contentAlignment = Alignment.Center
                                     ) {
@@ -3981,6 +4073,52 @@ fun GalleryScreen(
                 },
                 confirmButton = {
                     TextButton(onClick = { jsonLibraryDetailFile = null }) {
+                        Text("닫기", color = palette.brand)
+                    }
+                },
+                containerColor = palette.dialogSurface
+            )
+        }
+
+        arcoreLibraryDetailFile?.let { af ->
+            val ext = af.extension.lowercase()
+            val bodyText = remember(af.absolutePath, af.lastModified()) {
+                when {
+                    ext in setOf("json", "txt", "xml", "gltf", "csv") || af.length() <= 512_000 -> try {
+                        af.readText(Charsets.UTF_8).let { t ->
+                            if (t.length > 48_000) t.take(48_000) + "\n\n…(이하 생략)" else t
+                        }
+                    } catch (_: Exception) {
+                        "(텍스트를 읽을 수 없습니다)"
+                    }
+                    else -> "(미리보기: ${af.length() / 1024} KB)\n${af.absolutePath}"
+                }
+            }
+            AlertDialog(
+                onDismissRequest = { arcoreLibraryDetailFile = null },
+                title = {
+                    Text(
+                        text = af.name,
+                        color = palette.onBackground,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
+                },
+                text = {
+                    LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
+                        item {
+                            Text(
+                                text = bodyText,
+                                color = palette.onBackground.copy(alpha = 0.92f),
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { arcoreLibraryDetailFile = null }) {
                         Text("닫기", color = palette.brand)
                     }
                 },
@@ -4662,6 +4800,7 @@ fun GalleryScreen(
                                                 uploadProgress = 0 to 100
                                                 uploadMessage = "업로드 준비 중..."
                                                 CoroutineScope(Dispatchers.IO).launch {
+                                                    val mainHandler = Handler(Looper.getMainLooper())
                                                     try {
                                                         val zipFile = createZipFromUris(
                                                             context = context,
@@ -4674,14 +4813,12 @@ fun GalleryScreen(
                                                                 zipFile = zipFile,
                                                                 prompt = promptSnapshot,
                                                                 onProgress = { p, msg ->
-                                                                    withContext(Dispatchers.Main) {
-                                                                        uploadProgress = p to 100
-                                                                        uploadMessage = msg
-                                                                    }
+                                                                    uploadProgress = p to 100
+                                                                    uploadMessage = msg
                                                                 }
                                                             )
                                                         } else null
-                                                        withContext(Dispatchers.Main) {
+                                                        mainHandler.post {
                                                             isUploading = false
                                                             if (bundle != null) {
                                                                 onServerPipelineCompleteBundleChange(bundle)
@@ -4697,7 +4834,7 @@ fun GalleryScreen(
                                                         }
                                                     } catch (e: Exception) {
                                                         e.printStackTrace()
-                                                        withContext(Dispatchers.Main) {
+                                                        mainHandler.post {
                                                             isUploading = false
                                                             uploadMessage = "업로드 실패"
                                                         }
@@ -4710,6 +4847,7 @@ fun GalleryScreen(
                                                 uploadProgress = 0 to 100
                                                 uploadMessage = "업로드 준비 중..."
                                                 CoroutineScope(Dispatchers.IO).launch {
+                                                    val mainHandler = Handler(Looper.getMainLooper())
                                                     try {
                                                         val folderFiles = foldersSnapshot
                                                             .map { File(it) }
@@ -4725,14 +4863,12 @@ fun GalleryScreen(
                                                                 zipFile = zipFile,
                                                                 prompt = promptSnapshot,
                                                                 onProgress = { p, msg ->
-                                                                    withContext(Dispatchers.Main) {
-                                                                        uploadProgress = p to 100
-                                                                        uploadMessage = msg
-                                                                    }
+                                                                    uploadProgress = p to 100
+                                                                    uploadMessage = msg
                                                                 }
                                                             )
                                                         } else null
-                                                        withContext(Dispatchers.Main) {
+                                                        mainHandler.post {
                                                             isUploading = false
                                                             if (bundle != null) {
                                                                 onServerPipelineCompleteBundleChange(bundle)
@@ -4748,7 +4884,7 @@ fun GalleryScreen(
                                                         }
                                                     } catch (e: Exception) {
                                                         e.printStackTrace()
-                                                        withContext(Dispatchers.Main) {
+                                                        mainHandler.post {
                                                             isUploading = false
                                                             uploadMessage = "업로드 실패"
                                                         }

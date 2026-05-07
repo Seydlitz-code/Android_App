@@ -19,9 +19,7 @@ import android.provider.OpenableColumns
 import android.view.Surface
 import org.json.JSONArray
 import org.json.JSONObject
-import android.graphics.BitmapFactory
 import android.graphics.Matrix
-import android.os.SystemClock
 import androidx.exifinterface.media.ExifInterface
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
@@ -125,7 +123,7 @@ import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.outlined.Build
+import androidx.compose.material.icons.outlined.BurstMode
 import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.Chat
 import androidx.compose.material.icons.outlined.Explore
@@ -155,8 +153,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -184,6 +180,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -205,8 +202,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material.icons.filled.Lightbulb
@@ -279,7 +277,12 @@ import android.graphics.Bitmap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import com.example.app_01.ui.theme.App_01Theme
 import java.io.File
@@ -308,8 +311,63 @@ import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 import javax.net.ssl.HostnameVerifier
 import java.security.cert.X509Certificate
+import java.util.Collections
 
-/** 디바이스에서 발견된 개별 카메라 정보 */
+private const val CONTINUOUS_CAPTURE_MAX_SHOTS = 200
+private const val CONTINUOUS_CAPTURE_INTERVAL_MS = 3_000L
+private const val CAMERA_REBIND_WAIT_AFTER_ARCORE_MS = 550L
+
+/**
+ * CameraX 언바인드 뒤 한 번의 ARCore 구간에서 여러 장의 포즈 메타를 채우고 JSON·ZIP을 저장한다.
+ * 연속 촬영은 샷마다 세션을 열지 않고 종료 시 한 번만 호출해 카메라 재바인드 횟수를 줄인다.
+ *
+ * @return 메타 누락 또는 저장 IO 실패한 파일 수
+ */
+private suspend fun runBatchedArcoreMetadataSave(
+    context: Context,
+    photoFiles: List<File>,
+    prepareExclusiveCamera: suspend () -> Unit,
+    requestCameraRebind: suspend () -> Unit,
+): Int {
+    if (photoFiles.isEmpty()) return 0
+    prepareExclusiveCamera()
+    var failures = 0
+    try {
+        val map = withContext(Dispatchers.IO) {
+            if (photoFiles.size == 1) {
+                val f = photoFiles[0]
+                val root = ArcorePoseSnapshotter.capturePhotoMetadataOrNull(context, f.name)
+                val jo = root?.optJSONArray("frames")?.optJSONObject(0)
+                if (jo != null) linkedMapOf(f.name to jo) else linkedMapOf()
+            } else {
+                ArcorePoseSnapshotter.captureDatasetScreenshotsBestEffort(
+                    context,
+                    photoFiles.map { it.name },
+                )
+            }
+        }
+        withContext(Dispatchers.IO) {
+            for (f in photoFiles) {
+                val frameJo = map[f.name]
+                if (frameJo == null) {
+                    failures++
+                    continue
+                }
+                val rootJson = JSONObject().put("frames", JSONArray().put(frameJo))
+                runCatching {
+                    JsonLibrary.saveArCoreFramesJson(context, rootJson)
+                    ArcoreLibrary.savePhotoAndPosesZip(context, f, rootJson.toString())
+                }.onFailure { failures++ }
+            }
+        }
+    } catch (e: Throwable) {
+        e.printStackTrace()
+        failures = maxOf(failures, photoFiles.size)
+    } finally {
+        requestCameraRebind()
+    }
+    return failures
+}
 
 @Composable
 fun CameraScreen(
@@ -320,6 +378,15 @@ fun CameraScreen(
     onGalleryClick: () -> Unit
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var arcoreMetaEnabled by remember {
+        mutableStateOf(CameraArCorePrefs.isArCoreMetaEnabled(context))
+    }
+    var cameraRebindNonce by remember { mutableIntStateOf(0) }
+    var pendingArcoreForVideo by remember { mutableStateOf(false) }
+    var pendingVideoDatasetDirForArcore by remember { mutableStateOf<File?>(null) }
+    /** Compose 상태와 무관하게 Finalize 시 폴더를 찾기 위한 백업 */
+    var pendingVideoDatasetPathForArcore by remember { mutableStateOf<String?>(null) }
     val mediaActionSound = remember {
         MediaActionSound().apply {
             load(MediaActionSound.START_VIDEO_RECORDING)
@@ -337,6 +404,19 @@ fun CameraScreen(
     var isRecording by remember { mutableStateOf(false) }
     var recordingTime by remember { mutableStateOf(0L) }
     var recording: Recording? by remember { mutableStateOf(null) }
+    var isContinuousBurstActive by remember { mutableStateOf(false) }
+    var continuousCapturedCount by remember { mutableIntStateOf(0) }
+    var continuousBurstJob by remember { mutableStateOf<Job?>(null) }
+    /** 셔터로 연속 촬영 중지 시 취소 토스트 중복 방지 */
+    val continuousBurstUserStop = remember { AtomicBoolean(false) }
+    /** 사진·동영상 모드 전환 등으로 연속 촬영 코루틴을 취소할 때 조용히 처리 */
+    val continuousBurstSilentCancel = remember { AtomicBoolean(false) }
+    /** 단일·연속·동영상 ARCore 후처리가 동시에 카메라를 잡지 않도록 직렬화 */
+    val arcoreExclusiveMutex = remember { Mutex() }
+    /** 연속 촬영: 샷 루프에서는 쌓아두고 종료 시 한 번에 배치 저장 */
+    val continuousArcorePending = remember {
+        Collections.synchronizedList(ArrayList<File>(32))
+    }
     var previewView: PreviewView? by remember { mutableStateOf(null) }
     var camera: Camera? by remember { mutableStateOf(null) }
     var isCameraReady by remember { mutableStateOf(false) }
@@ -481,7 +561,7 @@ fun CameraScreen(
         onDispose { meshAnalysisExecutor.shutdown() }
     }
 
-    // [추가] 사물 촬영(OBJECT) 전용: 사물이 중앙 가상 사각형(1000x1000) 밖으로 벗어났는지 경고
+    // [추가] 경차 촬영(OBJECT) 전용: 사물이 중앙 가상 사각형(1000x1000) 밖으로 벗어났는지 경고
     DisposableEffect(Unit) {
         onDispose {
             try {
@@ -660,6 +740,16 @@ fun CameraScreen(
         }
     }
 
+    LaunchedEffect(captureMode) {
+        if (captureMode != CaptureMode.CONTINUOUS) {
+            continuousBurstSilentCancel.set(true)
+            continuousBurstJob?.cancel()
+            continuousBurstJob = null
+            isContinuousBurstActive = false
+            continuousCapturedCount = 0
+        }
+    }
+
     // 동영상 촬영 시간 업데이트
     LaunchedEffect(isRecording) {
         while (isRecording) {
@@ -698,7 +788,7 @@ fun CameraScreen(
                         captureCount++
                         val fileName = "mobile_${captureCount}.jpg"
 
-                        captureDatasetImage(context, 0, 0, dir, capture, fileName) { currentBitmap ->
+                        captureDatasetImageAndAwait(context, 0, 0, dir, capture, fileName) { currentBitmap ->
                             // 그리드 전용 방위(azimuthForGrid)를 기준으로 커버리지 기록.
                             // azimuthForGrid는 alpha=0.7 필터로 거의 실시간이므로
                             // 오버레이(headingDeg=azimuthForGrid)와 동일 좌표계가 됨.
@@ -726,11 +816,6 @@ fun CameraScreen(
                                     mobileSpaceUiRev++
                                     true
                                 } else {
-                                    // 조건 불만족: 저장하지 않음 (너무 다르거나, 너무 비슷함) -> 파일 삭제
-                                    val createdFile = File(dir, fileName)
-                                    if (createdFile.exists()) {
-                                        createdFile.delete()
-                                    }
                                     false
                                 }
                             }
@@ -762,7 +847,13 @@ fun CameraScreen(
                             val dir = datasetDir
                             val capture = imageCapture
                             if (dir != null && capture != null && targetPitch != null) {
-                                captureDatasetImage(context, sectorIndex, targetPitch.toInt(), dir, capture)
+                                captureDatasetImageAndAwait(
+                                    context,
+                                    sectorIndex,
+                                    targetPitch.toInt(),
+                                    dir,
+                                    capture,
+                                )
                             }
                             
                             // 연속 촬영 방지를 위해 잠시 대기
@@ -926,7 +1017,7 @@ fun CameraScreen(
                     }
                 }
 
-                if (captureMode == CaptureMode.PHOTO) {
+                if (captureMode == CaptureMode.PHOTO || captureMode == CaptureMode.CONTINUOUS) {
                     imageCapture = newImageCapture
 
                     // UseCaseGroup을 사용하여 ViewPort 적용
@@ -985,7 +1076,7 @@ fun CameraScreen(
 
     // lensFacing, captureMode, selectedResolution, 카메라ID 변경 시 재바인딩
     LaunchedEffect(lensFacing, captureMode, selectedResolution, previewView,
-        rearTelephotoLogicalId, rearTelephotoPhysId, rearWideId, cameraEntryMode) {
+        rearTelephotoLogicalId, rearTelephotoPhysId, rearWideId, cameraEntryMode, cameraRebindNonce) {
         isCameraReady = false
         previewView?.let { bindCamera(it) }
     }
@@ -1106,34 +1197,44 @@ fun CameraScreen(
 
         // 상단 모드 전환 + 해상도 선택 (한 줄, 알약 형태)
         val topMenuPadding = 8.dp
-        Row(
+        Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
                 .padding(top = topMenuPadding),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            TopMenuSegmented(
-                leftText = "사진",
-                rightText = "동영상",
-                isLeftSelected = captureMode == CaptureMode.PHOTO,
-                onLeftClick = { captureMode = CaptureMode.PHOTO },
-                onRightClick = { captureMode = CaptureMode.VIDEO }
-            )
-            
             Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = { isFlashOn = !isFlashOn }) {
-                    Icon(
-                        imageVector = if (isFlashOn) Icons.Filled.FlashOn else Icons.Filled.FlashOff,
-                        contentDescription = "Flash",
-                        tint = Color.White
-                    )
+                TopMenuSegmentedTriple(
+                    leftText = "사진",
+                    midText = "연속",
+                    rightText = "동영상",
+                    selectedIndex = when (captureMode) {
+                        CaptureMode.PHOTO -> 0
+                        CaptureMode.CONTINUOUS -> 1
+                        CaptureMode.VIDEO -> 2
+                    },
+                    onLeftClick = { captureMode = CaptureMode.PHOTO },
+                    onMidClick = { captureMode = CaptureMode.CONTINUOUS },
+                    onRightClick = { captureMode = CaptureMode.VIDEO },
+                )
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = { isFlashOn = !isFlashOn }) {
+                        Icon(
+                            imageVector = if (isFlashOn) Icons.Filled.FlashOn else Icons.Filled.FlashOff,
+                            contentDescription = "Flash",
+                            tint = Color.White,
+                        )
+                    }
                 }
-                
             }
         }
 
@@ -1175,6 +1276,25 @@ fun CameraScreen(
             )
             }
         
+        if (captureMode == CaptureMode.CONTINUOUS &&
+            (isContinuousBurstActive || continuousCapturedCount > 0)
+        ) {
+            Text(
+                text = "연속 촬영 ${continuousCapturedCount} / $CONTINUOUS_CAPTURE_MAX_SHOTS · 간격 ${CONTINUOUS_CAPTURE_INTERVAL_MS / 1000}초",
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 190.dp)
+                    .background(
+                        Color(0xFF1565C0).copy(alpha = 0.75f),
+                        RoundedCornerShape(12.dp),
+                    )
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+            )
+        }
+
         // 하단 컨트롤 바
         Row(
             modifier = Modifier
@@ -1272,7 +1392,8 @@ fun CameraScreen(
 
             // 동영상 촬영 중 구역 링 표시 (사물/공간 모두) - 이동식 공간 촬영은 제외
             val showRing = captureMode == CaptureMode.VIDEO && isRecording && cameraEntryMode != CameraEntryMode.MOBILE_SPACE
-            val captureButtonSize = if (isRecording) 64.dp else 72.dp
+            val captureButtonSize =
+                if (isRecording || isContinuousBurstActive) 64.dp else 72.dp
 
             // 촬영 버튼 + 링 (중심 일치)
             Box(
@@ -1310,17 +1431,234 @@ fun CameraScreen(
                         .size(captureButtonSize)
                         .align(Alignment.Center)
                         .clip(CircleShape)
-                        .background(if (isRecording) Color.Red else Color.White)
-                        .clickable(enabled = !isRecording || captureMode == CaptureMode.VIDEO) {
-                            if (captureMode == CaptureMode.PHOTO) {
-                                imageCapture?.let { capture ->
-                                    // 셔터 소리를 약 30% 수준으로 낮춤 (MediaActionSound는 볼륨 조절 불가)
-                                    SoftShutterSound.play(volume = 0.3f)
-                                    takePhoto(context, capture) { uri ->
-                                        onImageCaptured(uri)
+                        .background(
+                            when {
+                                isRecording -> Color.Red
+                                isContinuousBurstActive -> Color.Red
+                                else -> Color.White
+                            },
+                        )
+                        .clickable(
+                            enabled = !isRecording ||
+                                captureMode == CaptureMode.VIDEO ||
+                                captureMode == CaptureMode.CONTINUOUS,
+                        ) {
+                            when (captureMode) {
+                                CaptureMode.PHOTO -> {
+                                    imageCapture?.let { capture ->
+                                        val useArcoreMeta = arcoreMetaEnabled &&
+                                            lensFacing == CameraSelector.LENS_FACING_BACK
+                                        // 셔터 소리를 약 30% 수준으로 낮춤 (MediaActionSound는 볼륨 조절 불가)
+                                        SoftShutterSound.play(volume = 0.3f)
+                                        takePhoto(context, capture) { uri, file ->
+                                            onImageCaptured(uri)
+                                            if (useArcoreMeta) {
+                                                scope.launch(Dispatchers.Default) {
+                                                    try {
+                                                        val fails = arcoreExclusiveMutex.withLock {
+                                                            runBatchedArcoreMetadataSave(
+                                                                context,
+                                                                listOf(file),
+                                                                prepareExclusiveCamera = {
+                                                                    withContext(Dispatchers.Main) {
+                                                                        val provider =
+                                                                            ProcessCameraProvider.getInstance(
+                                                                                context,
+                                                                            ).get()
+                                                                        provider.unbindAll()
+                                                                        isCameraReady = false
+                                                                    }
+                                                                },
+                                                                requestCameraRebind = {
+                                                                    withContext(Dispatchers.Main) {
+                                                                        cameraRebindNonce++
+                                                                    }
+                                                                },
+                                                            )
+                                                        }
+                                                        if (fails > 0) {
+                                                            withContext(Dispatchers.Main) {
+                                                                Toast.makeText(
+                                                                    context,
+                                                                    "ARCore 메타를 저장하지 못했습니다. ARCore 설치·지원 여부를 확인하세요.",
+                                                                    Toast.LENGTH_LONG,
+                                                                ).show()
+                                                            }
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        e.printStackTrace()
+                                                        withContext(Dispatchers.Main) {
+                                                            Toast.makeText(
+                                                                context.applicationContext,
+                                                                "ARCore 저장 오류: ${e.message ?: e.javaClass.simpleName}",
+                                                                Toast.LENGTH_SHORT,
+                                                            ).show()
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
-                            } else {
+
+                                CaptureMode.CONTINUOUS -> {
+                                    if (continuousBurstJob?.isActive == true) {
+                                        val doneCount = continuousCapturedCount
+                                        continuousBurstUserStop.set(true)
+                                        continuousBurstJob?.cancel()
+                                        continuousBurstJob = null
+                                        isContinuousBurstActive = false
+                                        Toast.makeText(
+                                            context,
+                                            "연속 촬영을 종료했습니다. (${doneCount}장 · 대기)",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    } else {
+                                        imageCapture?.let { capture ->
+                                            if (!isCameraReady) {
+                                                Toast.makeText(
+                                                    context,
+                                                    "카메라 준비 중입니다.",
+                                                    Toast.LENGTH_SHORT,
+                                                ).show()
+                                                return@let
+                                            }
+                                            continuousBurstJob?.cancel()
+                                            continuousArcorePending.clear()
+                                            isContinuousBurstActive = true
+                                            continuousCapturedCount = 0
+                                            val useArcoreMeta = arcoreMetaEnabled &&
+                                                lensFacing == CameraSelector.LENS_FACING_BACK
+                                            continuousBurstJob = scope.launch(Dispatchers.Default) {
+                                                continuousBurstUserStop.set(false)
+                                                var arcoreFailAccum = 0
+                                                var n = 0
+                                                try {
+                                                    while (isActive && n < CONTINUOUS_CAPTURE_MAX_SHOTS) {
+                                                        val cap =
+                                                            withContext(Dispatchers.Main) { imageCapture }
+                                                                ?: break
+                                                        val camReady =
+                                                            withContext(Dispatchers.Main) { isCameraReady }
+                                                        if (!camReady) {
+                                                            delay(100)
+                                                            continue
+                                                        }
+                                                        withContext(Dispatchers.Main) {
+                                                            SoftShutterSound.play(volume = 0.3f)
+                                                        }
+                                                        val shot = withContext(Dispatchers.Main) {
+                                                            takePhotoSuspend(context, cap)
+                                                        }
+                                                        if (shot == null) {
+                                                            withContext(Dispatchers.Main) {
+                                                                Toast.makeText(
+                                                                    context.applicationContext,
+                                                                    "연속 촬영: 사진 저장 실패 (${n}장까지 완료)",
+                                                                    Toast.LENGTH_LONG,
+                                                                ).show()
+                                                            }
+                                                            break
+                                                        }
+                                                        val (uri, file) = shot
+                                                        withContext(Dispatchers.Main) {
+                                                            onImageCaptured(uri)
+                                                        }
+
+                                                        if (useArcoreMeta) {
+                                                            continuousArcorePending.add(file)
+                                                        }
+
+                                                        n++
+                                                        withContext(Dispatchers.Main) {
+                                                            continuousCapturedCount = n
+                                                        }
+
+                                                        if (n >= CONTINUOUS_CAPTURE_MAX_SHOTS) {
+                                                            withContext(Dispatchers.Main) {
+                                                                Toast.makeText(
+                                                                    context,
+                                                                    "연속 촬영 완료 (${CONTINUOUS_CAPTURE_MAX_SHOTS}장)",
+                                                                    Toast.LENGTH_LONG,
+                                                                ).show()
+                                                            }
+                                                            break
+                                                        }
+                                                        delay(CONTINUOUS_CAPTURE_INTERVAL_MS)
+                                                    }
+                                                } catch (e: CancellationException) {
+                                                    val silent =
+                                                        continuousBurstUserStop.getAndSet(false) ||
+                                                            continuousBurstSilentCancel.getAndSet(false)
+                                                    if (!silent) {
+                                                        withContext(Dispatchers.Main) {
+                                                            Toast.makeText(
+                                                                context.applicationContext,
+                                                                "연속 촬영 종료 (${n}장)",
+                                                                Toast.LENGTH_SHORT,
+                                                            ).show()
+                                                        }
+                                                    }
+                                                    throw e
+                                                } finally {
+                                                    if (useArcoreMeta) {
+                                                        val batch = synchronized(continuousArcorePending) {
+                                                            ArrayList(continuousArcorePending).also {
+                                                                continuousArcorePending.clear()
+                                                            }
+                                                        }
+                                                        if (batch.isNotEmpty()) {
+                                                            withContext(NonCancellable) {
+                                                                try {
+                                                                    val extraFails = arcoreExclusiveMutex.withLock {
+                                                                        runBatchedArcoreMetadataSave(
+                                                                            context,
+                                                                            batch,
+                                                                            prepareExclusiveCamera = {
+                                                                                withContext(Dispatchers.Main) {
+                                                                                    ProcessCameraProvider
+                                                                                        .getInstance(context)
+                                                                                        .get()
+                                                                                        .unbindAll()
+                                                                                    isCameraReady = false
+                                                                                }
+                                                                            },
+                                                                            requestCameraRebind = {
+                                                                                withContext(Dispatchers.Main) {
+                                                                                    cameraRebindNonce++
+                                                                                }
+                                                                            },
+                                                                        )
+                                                                    }
+                                                                    arcoreFailAccum += extraFails
+                                                                    delay(CAMERA_REBIND_WAIT_AFTER_ARCORE_MS)
+                                                                } catch (e: Exception) {
+                                                                    e.printStackTrace()
+                                                                    arcoreFailAccum += batch.size
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if (arcoreFailAccum > 0) {
+                                                        withContext(Dispatchers.Main) {
+                                                            Toast.makeText(
+                                                                context.applicationContext,
+                                                                "연속 촬영: ARCore 저장 실패 ${arcoreFailAccum}장",
+                                                                Toast.LENGTH_LONG,
+                                                            ).show()
+                                                        }
+                                                    }
+                                                    withContext(Dispatchers.Main) {
+                                                        isContinuousBurstActive = false
+                                                        continuousBurstJob = null
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                CaptureMode.VIDEO -> {
                                 if (!isRecording) {
                                     // 동영상 촬영 시작 - 카메라가 준비되었는지 확인
                                     if (isCameraReady && videoCapture != null) {
@@ -1330,6 +1668,8 @@ fun CameraScreen(
                                                 context,
                                                 capture,
                                                 onRecordingStarted = { recordingInstance ->
+                                                    pendingArcoreForVideo = arcoreMetaEnabled &&
+                                                        lensFacing == CameraSelector.LENS_FACING_BACK
                                                     recording = recordingInstance
                                                     isRecording = true
                                                     recordingTime = 0L
@@ -1341,18 +1681,137 @@ fun CameraScreen(
                                                     if (!root.exists()) {
                                                         root.mkdirs()
                                                     }
-                                                    datasetDir = File(root, sessionId).apply {
-                                                        mkdirs()
-                                                    }
+                                                    val sessionFolder = File(root, sessionId).apply { mkdirs() }
+                                                    datasetDir = sessionFolder
+                                                    pendingVideoDatasetDirForArcore = sessionFolder
+                                                    pendingVideoDatasetPathForArcore = sessionFolder.absolutePath
                                                     // 동영상 촬영 시작 시 방위각 기준 설정
                                                     baseAzimuthDegrees = azimuthDegrees
                                                     capturedSectors = emptySet()
                                                     basePitchDegrees = pitchDegrees
                                                     currentPitchIndex = 0
                                                 },
-                                                onVideoSaved = { uri ->
+                                                onVideoSaved = { uri, videoFile ->
+                                                    val datasetDirForCleanup =
+                                                        pendingVideoDatasetDirForArcore
+                                                            ?: pendingVideoDatasetPathForArcore?.let { p ->
+                                                                File(p).takeIf { it.isDirectory }
+                                                            }
+                                                    val doArcore = pendingArcoreForVideo
+                                                    pendingArcoreForVideo = false
+                                                    pendingVideoDatasetDirForArcore = null
+                                                    pendingVideoDatasetPathForArcore = null
                                                     onVideoCaptured(uri)
-                                                }
+                                                    if (doArcore) {
+                                                        scope.launch(Dispatchers.Default) {
+                                                            arcoreExclusiveMutex.withLock {
+                                                            try {
+                                                                withContext(Dispatchers.Main) {
+                                                                    val provider =
+                                                                        ProcessCameraProvider.getInstance(
+                                                                            context,
+                                                                        ).get()
+                                                                    provider.unbindAll()
+                                                                    isCameraReady = false
+                                                                }
+                                                                delay(550L)
+
+                                                                val durationMs = withContext(Dispatchers.IO) {
+                                                                    try {
+                                                                        MediaMetadataRetriever().use { r ->
+                                                                            r.setDataSource(videoFile.absolutePath)
+                                                                            r.extractMetadata(
+                                                                                MediaMetadataRetriever.METADATA_KEY_DURATION,
+                                                                            )?.toLongOrNull() ?: 0L
+                                                                        }
+                                                                    } catch (_: Exception) {
+                                                                        0L
+                                                                    }
+                                                                }
+
+                                                                val timelineJson =
+                                                                    withContext(Dispatchers.IO) {
+                                                                        ArcorePoseSnapshotter
+                                                                            .captureFullVideoTimelineOrNull(
+                                                                                context,
+                                                                                videoFile,
+                                                                            )
+                                                                    }
+                                                                if (timelineJson == null) {
+                                                                    withContext(Dispatchers.Main) {
+                                                                        val msg =
+                                                                            if (ArcorePoseSnapshotter.availabilityInstalled(
+                                                                                    context,
+                                                                                )
+                                                                            ) {
+                                                                                "동영상 길이에 맞춘 ARCore 타임라인을 만들지 못했습니다. 다시 시도해 주세요."
+                                                                            } else {
+                                                                                "ARCore가 없어 포즈 JSON은 비어 저장됩니다. ARCore 설치 후 이용할 수 있습니다."
+                                                                            }
+                                                                        Toast.makeText(
+                                                                            context,
+                                                                            msg,
+                                                                            Toast.LENGTH_LONG,
+                                                                        ).show()
+                                                                    }
+                                                                }
+
+                                                                val rootJson = timelineJson
+                                                                    ?: JSONObject()
+                                                                        .put("mediaType", "video_full_timeline")
+                                                                        .put("videoFileName", videoFile.name)
+                                                                        .put("durationMs", durationMs)
+                                                                        .put("sampleIntervalMs", 33L)
+                                                                        .put(
+                                                                            "captureNoteKo",
+                                                                            if (ArcorePoseSnapshotter.availabilityInstalled(
+                                                                                    context,
+                                                                                )
+                                                                            ) {
+                                                                                "ARCore 세션을 열었으나 포즈 타임라인을 수집하지 못했습니다."
+                                                                            } else {
+                                                                                "ARCore가 설치되어 있지 않습니다. frames는 비어 있습니다."
+                                                                            },
+                                                                        )
+                                                                        .put("frames", JSONArray())
+
+                                                                withContext(Dispatchers.IO) {
+                                                                    JsonLibrary.saveArCoreFramesJson(
+                                                                        context,
+                                                                        rootJson,
+                                                                    )
+                                                                    ArcoreLibrary.saveVideoFullTimelineArCoreZip(
+                                                                        context,
+                                                                        videoFile,
+                                                                        rootJson.toString(),
+                                                                    )
+                                                                    datasetDirForCleanup?.let { d ->
+                                                                        if (d.exists() && d.isDirectory) {
+                                                                            val fs = d.listFiles()
+                                                                            if (fs == null || fs.isEmpty()) {
+                                                                                d.delete()
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            } catch (e: Exception) {
+                                                                e.printStackTrace()
+                                                                withContext(Dispatchers.Main) {
+                                                                    Toast.makeText(
+                                                                        context.applicationContext,
+                                                                        "동영상 ARCore 저장 오류: ${e.message ?: e.javaClass.simpleName}",
+                                                                        Toast.LENGTH_SHORT,
+                                                                    ).show()
+                                                                }
+                                                            } finally {
+                                                                withContext(Dispatchers.Main) {
+                                                                    cameraRebindNonce++
+                                                                }
+                                                            }
+                                                            }
+                                                        }
+                                                    }
+                                                },
                                             )
                                         }
                                     }
@@ -1369,13 +1828,18 @@ fun CameraScreen(
                                         mobileSpaceUiRev++
                                     }
 
-                                    // [추가] 빈 데이터셋 폴더 정리
-                                    // 데이터셋 폴더에 이미지가 하나도 없으면 폴더 자동 삭제
+                                    // [추가] 빈 데이터셋 폴더 정리 — ImageCapture 비동기 저장 중이면 비어 보일 수 있어
+                                    // ARCore·데이터셋 ZIP을 위해 pendingArcoreForVideo인 경우 즉시 삭제하지 않는다.
                                     val targetDir = datasetDir
-                                    if (targetDir != null && targetDir.exists() && targetDir.isDirectory) {
-                                        val files = targetDir.listFiles()
-                                        if (files == null || files.isEmpty()) {
-                                            targetDir.delete()
+                                    val skipImmediateEmptyCleanup = pendingArcoreForVideo
+                                    if (targetDir != null && targetDir.exists() && targetDir.isDirectory && !skipImmediateEmptyCleanup) {
+                                        scope.launch(Dispatchers.IO) {
+                                            delay(2800L)
+                                            if (!targetDir.exists() || !targetDir.isDirectory) return@launch
+                                            val files = targetDir.listFiles()
+                                            if (files == null || files.isEmpty()) {
+                                                targetDir.delete()
+                                            }
                                         }
                                     }
 
@@ -1386,32 +1850,55 @@ fun CameraScreen(
                                     basePitchDegrees = null
                                     currentPitchIndex = 0
                                 }
+                                }
                             }
                         },
                     contentAlignment = Alignment.Center
                 ) {
-                    if (captureMode == CaptureMode.PHOTO) {
-                        Icon(
-                            imageVector = Icons.Outlined.CameraAlt,
-                            contentDescription = "촬영",
-                            tint = Color.Black,
-                            modifier = Modifier.size(36.dp)
-                        )
-                    } else {
-                        if (isRecording) {
-                            Box(
-                                modifier = Modifier
-                                    .size(24.dp)
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(Color.White)
-                            )
-                        } else {
+                    when (captureMode) {
+                        CaptureMode.PHOTO -> {
                             Icon(
-                                imageVector = Icons.Filled.Videocam,
-                                contentDescription = "동영상 촬영",
+                                imageVector = Icons.Outlined.CameraAlt,
+                                contentDescription = "촬영",
                                 tint = Color.Black,
-                                modifier = Modifier.size(36.dp)
+                                modifier = Modifier.size(36.dp),
                             )
+                        }
+
+                        CaptureMode.CONTINUOUS -> {
+                            if (isContinuousBurstActive) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(Color.White),
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Outlined.BurstMode,
+                                    contentDescription = "연속 촬영",
+                                    tint = Color.Black,
+                                    modifier = Modifier.size(36.dp),
+                                )
+                            }
+                        }
+
+                        CaptureMode.VIDEO -> {
+                            if (isRecording) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(Color.White),
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Filled.Videocam,
+                                    contentDescription = "동영상 촬영",
+                                    tint = Color.Black,
+                                    modifier = Modifier.size(36.dp),
+                                )
+                            }
                         }
                     }
                 }
@@ -1472,7 +1959,7 @@ fun CameraEntryScreen(
                 horizontalArrangement = Arrangement.spacedBy(gridGap)
             ) {
                 CameraEntryPictogramTile(
-                    label = "사물촬영",
+                    label = "경차 촬영",
                     pictogramRes = R.drawable.ic_camera_mode_object,
                     isSelected = selectedMode == CameraEntryMode.OBJECT,
                     onClick = { onModeSelected(CameraEntryMode.OBJECT) },
@@ -1481,7 +1968,7 @@ fun CameraEntryScreen(
                         .aspectRatio(1f)
                 )
                 CameraEntryPictogramTile(
-                    label = "2차원 공간 스캔",
+                    label = "중형 차량 촬영",
                     pictogramRes = R.drawable.ic_camera_mode_space_2d,
                     isSelected = selectedMode == CameraEntryMode.SPACE_2D,
                     onClick = { onModeSelected(CameraEntryMode.SPACE_2D) },
@@ -1496,7 +1983,7 @@ fun CameraEntryScreen(
                 horizontalArrangement = Arrangement.spacedBy(gridGap)
             ) {
                 CameraEntryPictogramTile(
-                    label = "3차원 공간 스캔",
+                    label = "대형 차량 촬영",
                     pictogramRes = R.drawable.ic_camera_mode_space_3d,
                     isSelected = selectedMode == CameraEntryMode.SPACE_3D,
                     onClick = { onModeSelected(CameraEntryMode.SPACE_3D) },
@@ -1505,7 +1992,7 @@ fun CameraEntryScreen(
                         .aspectRatio(1f)
                 )
                 CameraEntryPictogramTile(
-                    label = "이동식 공간 촬영",
+                    label = "사고 현장 촬영",
                     pictogramRes = R.drawable.ic_camera_mode_mobile_space,
                     isSelected = selectedMode == CameraEntryMode.MOBILE_SPACE,
                     onClick = { onModeSelected(CameraEntryMode.MOBILE_SPACE) },
@@ -1518,17 +2005,34 @@ fun CameraEntryScreen(
     }
 }
 
-/** 카메라 허브: drawable PNG(라이트 원본 / 다크: RGB 반전으로 흰 실루엣·흰 배경은 카드와 합침) + 테마별 테두리 */
-private val CameraEntryDarkPictogramColorFilter = ColorFilter.colorMatrix(
-    ColorMatrix(
-        floatArrayOf(
-            -1f, 0f, 0f, 0f, 255f,
-            0f, -1f, 0f, 0f, 255f,
-            0f, 0f, -1f, 0f, 255f,
-            0f, 0f, 0f, 1f, 0f
+@Composable
+private fun CameraEntryPictogramImage(
+    pictogramRes: Int,
+    ink: Color,
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+    contentScale: ContentScale = ContentScale.Fit,
+) {
+    val context = LocalContext.current
+    val bmp by produceState<ImageBitmap?>(
+        initialValue = CameraEntryPictogramCache.peek(pictogramRes, ink),
+        key1 = pictogramRes,
+        key2 = ink,
+    ) {
+        value = CameraEntryPictogramCache.ensureLoaded(context, pictogramRes, ink)
+    }
+    val bitmap = bmp
+    if (bitmap != null) {
+        Image(
+            painter = remember(bitmap) {
+                BitmapPainter(bitmap, filterQuality = FilterQuality.Low)
+            },
+            contentDescription = contentDescription,
+            modifier = modifier,
+            contentScale = contentScale,
         )
-    )
-)
+    }
+}
 
 @Composable
 private fun CameraEntryPictogramTile(
@@ -1565,14 +2069,14 @@ private fun CameraEntryPictogramTile(
                 .weight(1f),
             contentAlignment = Alignment.Center
         ) {
-            Image(
-                painter = painterResource(pictogramRes),
+            CameraEntryPictogramImage(
+                pictogramRes = pictogramRes,
+                ink = ink,
                 contentDescription = label,
                 modifier = Modifier
                     .fillMaxWidth(0.88f)
                     .wrapContentHeight(),
                 contentScale = ContentScale.Fit,
-                colorFilter = if (palette.isDark) CameraEntryDarkPictogramColorFilter else null
             )
         }
         Text(
@@ -1609,6 +2113,88 @@ fun TopMenuPill(
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold
         )
+    }
+}
+
+@Composable
+fun TopMenuSegmentedTriple(
+    leftText: String,
+    midText: String,
+    rightText: String,
+    selectedIndex: Int,
+    onLeftClick: () -> Unit,
+    onMidClick: () -> Unit,
+    onRightClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .height(34.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color.Black)
+            .border(1.dp, Color.White, RoundedCornerShape(18.dp)),
+    ) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .background(if (selectedIndex == 0) Color.White else Color.Black)
+                .clickable { onLeftClick() }
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = leftText,
+                color = if (selectedIndex == 0) Color.Black else Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        Box(
+            Modifier
+                .width(1.dp)
+                .fillMaxHeight()
+                .background(Color.White),
+        )
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .background(if (selectedIndex == 1) Color.White else Color.Black)
+                .clickable { onMidClick() }
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = midText,
+                color = if (selectedIndex == 1) Color.Black else Color.White,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Box(
+            Modifier
+                .width(1.dp)
+                .fillMaxHeight()
+                .background(Color.White),
+        )
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .background(if (selectedIndex == 2) Color.White else Color.Black)
+                .clickable { onRightClick() }
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = rightText,
+                color = if (selectedIndex == 2) Color.Black else Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
     }
 }
 

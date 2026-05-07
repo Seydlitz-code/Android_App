@@ -14,7 +14,7 @@ import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector.ObjectDet
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * 사물 촬영(OBJECT) 모드에서만 사용:
+ * 경차 촬영(OBJECT) 모드에서만 사용:
  * - MediaPipe ObjectDetector로 프레임 내 사물 bounding box 추출
  * - 중앙 1000x1000 가상 사각형을 벗어났는지 판단
  */

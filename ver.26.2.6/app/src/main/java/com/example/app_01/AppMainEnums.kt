@@ -1,7 +1,10 @@
 package com.example.app_01
 
 enum class CaptureMode {
-    PHOTO, VIDEO
+    PHOTO,
+    /** 5초 간격·최대 200장 사진 + (옵션) ARCore */
+    CONTINUOUS,
+    VIDEO,
 }
 
 enum class ResolutionPreset(val width: Int, val height: Int) {
@@ -20,6 +23,8 @@ enum class LibraryTab {
     GS_ANALYSIS,
     /** LLM 3DGS·서버 분석용 JSON 저장소 */
     JSON_LIBRARY,
+    /** ARCore용 에셋(모델·설정 등) 로컬 저장소 */
+    AR_CORE_LIBRARY,
 }
 
 enum class LibraryDetailScreen {

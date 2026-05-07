@@ -14,6 +14,9 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.view.Surface
@@ -63,8 +66,6 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import android.util.Size
-import android.os.Handler
-import android.os.Looper
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -164,6 +165,8 @@ import androidx.compose.material3.IconButton
 import java.util.Calendar
 import java.util.Date
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import androidx.compose.material3.MaterialTheme
@@ -281,7 +284,12 @@ import android.graphics.Bitmap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import com.example.app_01.ui.theme.App_01Theme
 import java.io.BufferedOutputStream
@@ -290,16 +298,19 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.TimeZone
 import java.io.IOException
+import java.io.SyncFailedException
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.sqrt
-import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.delay
+import kotlin.coroutines.resume
+import kotlin.coroutines.resume
+import okhttp3.ConnectionPool
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -318,8 +329,18 @@ private const val STATUS_ENDPOINT = "/status"
 private const val DOWNLOAD_ENDPOINT = "/download"
 /** FastAPI `GET /results/{task_id}` — 결과 파일 목록 + 개별 다운로드 URL */
 private const val RESULTS_ENDPOINT = "/results"
-/** 서버에서 PLY·대용량 결과 수신 시 네트워크→파일 스트리밍 복사 버퍼 (기본 8KB보다 처리량↑). */
-private const val SERVER_DOWNLOAD_BUFFER_BYTES = 512 * 1024
+/** DA3/3DGS API (mobile_api_guide) — `POST /upload` multipart 파트 이름·Content-Disposition 파일명 */
+private const val SERVER_UPLOAD_PART_PC = "file_pc"
+private const val SERVER_UPLOAD_PART_GS = "file_gs"
+private const val SERVER_UPLOAD_FILENAME_PC = "pc.zip"
+private const val SERVER_UPLOAD_FILENAME_GS = "gs.zip"
+/** 서버에서 PLY·대용량 결과 수신 시 네트워크→파일 스트리밍 복사 버퍼 */
+private const val SERVER_DOWNLOAD_BUFFER_BYTES = 8 * 1024 * 1024
+
+/** 동시에 여러 결과 파일을 받을 때 너무 많은 연결·메모리를 쓰지 않도록 상한 */
+private const val SERVER_DOWNLOAD_MAX_PARALLEL = 2
+
+private const val SERVER_PIPELINE_WAKE_MAX_MS = 4 * 60 * 60 * 1000L // 최대 4시간
 private const val DEFAULT_SERVER_ADDRESS = "192.168.0.88"
 private const val DEFAULT_SERVER_PORT = 8000
 private const val DEFAULT_USE_HTTPS = false // HTTP 기본값
@@ -530,6 +551,7 @@ fun CameraApp(modifier: Modifier = Modifier) {
     }
     var showLlmApiKeySettings by remember { mutableStateOf(false) }
     var showServerSettings by remember { mutableStateOf(false) }
+    var showArCoreSettings by remember { mutableStateOf(false) }
     var showSensorCheck by remember { mutableStateOf(false) }
     var showPermissions by remember { mutableStateOf(false) }
     var selectedTab by remember { mutableStateOf(MainTab.CAMERA) }
@@ -616,6 +638,13 @@ fun CameraApp(modifier: Modifier = Modifier) {
     var server3dgsLlmAutoHandledTaskIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     val rootPalette = LocalAppUiPalette.current
+
+    // 카메라 허브 픽토그램: 테마별로 백그라운드에서 미리 캐시에 올려 탭 진입 시 바로 표시
+    LaunchedEffect(rootPalette.isDark) {
+        val ink = if (rootPalette.isDark) Color.White else Color.Black
+        CameraEntryPictogramCache.warmup(context, ink)
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -657,6 +686,10 @@ fun CameraApp(modifier: Modifier = Modifier) {
         } else if (showServerSettings) {
             ServerSettingsScreen(
                 onBack = { showServerSettings = false }
+            )
+        } else if (showArCoreSettings) {
+            ArCoreSettingsScreen(
+                onBack = { showArCoreSettings = false }
             )
         } else if (showSensorCheck) {
             SensorCheckScreen(
@@ -772,7 +805,8 @@ fun CameraApp(modifier: Modifier = Modifier) {
                             },
                             onAiCadSavedToLibrary = { aiCadLibraryVersion++ },
                             pending3dgsServerAutoSend = pending3dgsServerAutoSend,
-                            onPending3dgsServerAutoSendConsumed = { pending3dgsServerAutoSend = null }
+                            onPending3dgsServerAutoSendConsumed = { pending3dgsServerAutoSend = null },
+                            serverArtifactLibraryVersion = serverArtifactLibraryVersion
                         )
                     }
                     MainTab.CAMERA -> {
@@ -846,6 +880,7 @@ fun CameraApp(modifier: Modifier = Modifier) {
                         ProfileScreen(
                             onLlmApiKeyClick = { showLlmApiKeySettings = true },
                             onServerSettingsClick = { showServerSettings = true },
+                            onArCoreSettingsClick = { showArCoreSettings = true },
                             onSensorCheckClick = { showSensorCheck = true },
                             onPermissionsClick = { showPermissions = true }
                         )
@@ -2617,7 +2652,7 @@ internal suspend fun saveEditedImage(
 internal fun takePhoto(
     context: Context,
     imageCapture: ImageCapture,
-    onPhotoTaken: (Uri) -> Unit
+    onPhotoTaken: (Uri, File) -> Unit
 ) {
     val photoFile = File(
         context.getExternalFilesDir(null),
@@ -2636,9 +2671,39 @@ internal fun takePhoto(
             }
 
             override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                onPhotoTaken(Uri.fromFile(photoFile))
+                onPhotoTaken(Uri.fromFile(photoFile), photoFile)
             }
         }
+    )
+}
+
+/** [takePhoto]의 콜백을 코루틴으로 기다릴 수 있는 형태. 실패 시 null. */
+internal suspend fun takePhotoSuspend(
+    context: Context,
+    imageCapture: ImageCapture,
+): Pair<Uri, File>? = suspendCancellableCoroutine { cont ->
+    fun resumeOk(value: Pair<Uri, File>?) {
+        if (cont.isActive) cont.resume(value)
+    }
+    val photoFile = File(
+        context.getExternalFilesDir(null),
+        SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
+            .format(System.currentTimeMillis()) + ".jpg",
+    )
+    val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
+    imageCapture.takePicture(
+        outputOptions,
+        ContextCompat.getMainExecutor(context),
+        object : ImageCapture.OnImageSavedCallback {
+            override fun onError(exception: ImageCaptureException) {
+                exception.printStackTrace()
+                resumeOk(null)
+            }
+
+            override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                resumeOk(Pair(Uri.fromFile(photoFile), photoFile))
+            }
+        },
     )
 }
 
@@ -2646,7 +2711,7 @@ internal fun startVideoRecording(
     context: Context,
     videoCapture: VideoCapture<androidx.camera.video.Recorder>,
     onRecordingStarted: (Recording) -> Unit,
-    onVideoSaved: (Uri) -> Unit
+    onVideoSaved: (Uri, File) -> Unit,
 ) {
     try {
         val videoFile = File(
@@ -2678,7 +2743,7 @@ internal fun startVideoRecording(
                         if (!event.hasError()) {
                             // 동영상 저장 완료
                             val videoUri = Uri.fromFile(videoFile)
-                            onVideoSaved(videoUri)
+                            onVideoSaved(videoUri, videoFile)
                         } else {
                             // 오류 발생
                             event.cause?.printStackTrace()
@@ -2822,23 +2887,31 @@ internal fun loadBitmapWithRotation(path: String): android.graphics.Bitmap? {
 
 internal fun saveBitmapToFile(bitmap: android.graphics.Bitmap, file: File) {
     try {
-        java.io.FileOutputStream(file).use { out ->
+        FileOutputStream(file).use { out ->
             bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 100, out)
+            try {
+                out.fd.sync()
+            } catch (_: SyncFailedException) {
+            } catch (_: IOException) {
+            }
         }
     } catch (e: Exception) {
         e.printStackTrace()
     }
 }
 
-internal fun captureDatasetImage(
+internal suspend fun captureDatasetImageAndAwait(
     context: Context,
     sectorIndex: Int,
     pitchAngle: Int,
     dir: File,
     capture: ImageCapture,
     customFileName: String? = null,
-    validationCallback: ((android.graphics.Bitmap) -> Boolean)? = null
-) {
+    validationCallback: ((android.graphics.Bitmap) -> Boolean)? = null,
+): Boolean = suspendCancellableCoroutine { cont ->
+    fun resumeOk(value: Boolean) {
+        if (cont.isActive) cont.resume(value)
+    }
     try {
         if (!dir.exists()) {
             dir.mkdirs()
@@ -2848,8 +2921,7 @@ internal fun captureDatasetImage(
         } else {
             File(dir, "${pitchAngle}_${sectorIndex + 1}.jpg")
         }
-        
-        // 메모리로 캡처 후 후처리 적용
+
         capture.takePicture(
             ContextCompat.getMainExecutor(context),
             object : ImageCapture.OnImageCapturedCallback() {
@@ -2860,51 +2932,53 @@ internal fun captureDatasetImage(
                         val bytes = ByteArray(buffer.remaining())
                         buffer.get(bytes)
                         bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                        
-                        // 회전 보정
+
                         val rotation = image.imageInfo.rotationDegrees
                         if (rotation != 0 && bitmap != null) {
                             val matrix = Matrix()
                             matrix.postRotate(rotation.toFloat())
                             bitmap = android.graphics.Bitmap.createBitmap(
-                                bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
+                                bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true,
                             )
                         }
 
-                        if (bitmap != null) {
-                            // [추가] 1:1 비율로 중앙 크롭 및 1024x1024 리사이징
-                            val originalWidth = bitmap.width
-                            val originalHeight = bitmap.height
-                            val size = if (originalWidth < originalHeight) originalWidth else originalHeight
-                            val xOffset = (originalWidth - size) / 2
-                            val yOffset = (originalHeight - size) / 2
-                            
-                            // 중앙 정사각형 크롭
-                            var croppedBitmap = android.graphics.Bitmap.createBitmap(
-                                bitmap, xOffset, yOffset, size, size
-                            )
-                            
-                            // 1024x1024로 리사이징
-                            if (size != 1024) {
-                                croppedBitmap = android.graphics.Bitmap.createScaledBitmap(
-                                    croppedBitmap, 1024, 1024, true
-                                )
-                            }
-                            bitmap = croppedBitmap
+                        if (bitmap == null) {
+                            resumeOk(false)
+                            return
+                        }
 
-                            // [추가] 저장 전 검증 (유사도 체크 등)
-                            if (validationCallback != null) {
-                                if (!validationCallback(bitmap)) {
-                                    // 검증 실패 시 저장하지 않음 (유사도 조건 불만족 등)
-                                    return
+                        val originalWidth = bitmap.width
+                        val originalHeight = bitmap.height
+                        val size = if (originalWidth < originalHeight) originalWidth else originalHeight
+                        val xOffset = (originalWidth - size) / 2
+                        val yOffset = (originalHeight - size) / 2
+
+                        var croppedBitmap = android.graphics.Bitmap.createBitmap(
+                            bitmap, xOffset, yOffset, size, size,
+                        )
+
+                        if (size != 1024) {
+                            croppedBitmap = android.graphics.Bitmap.createScaledBitmap(
+                                croppedBitmap, 1024, 1024, true,
+                            )
+                        }
+                        bitmap = croppedBitmap
+
+                        if (validationCallback != null) {
+                            if (!validationCallback.invoke(bitmap!!)) {
+                                if (file.exists()) {
+                                    file.delete()
                                 }
+                                resumeOk(false)
+                                return
                             }
-
-                            // [변경] 촬영 시에는 원본을 그대로 저장 (광택/반사 보정은 폴더 선택 후 옵션에서 수행)
-                            saveBitmapToFile(bitmap, file)
                         }
+
+                        saveBitmapToFile(bitmap!!, file)
+                        resumeOk(true)
                     } catch (e: Exception) {
                         e.printStackTrace()
+                        resumeOk(false)
                     } finally {
                         image.close()
                     }
@@ -2912,11 +2986,13 @@ internal fun captureDatasetImage(
 
                 override fun onError(exception: ImageCaptureException) {
                     exception.printStackTrace()
+                    resumeOk(false)
                 }
-            }
+            },
         )
     } catch (e: Exception) {
         e.printStackTrace()
+        resumeOk(false)
     }
 }
 
@@ -3742,16 +3818,29 @@ internal fun buildOkHttpClientBase(useHttps: Boolean): OkHttpClient {
 }
 
 /**
- * 서버 결과 파일 다운로드 전용 클라이언트.
- * read/write/call 타임아웃 0 = 무제한(OkHttp 규약) — 수 GB·저속 회선에서 조기 종료 방지.
+ * 서버 결과 파일 다운로드 전용 OkHttp 클라이언트 — **모드(HTTP/HTTPS)당 싱글톤**.
+ * 매 다운로드마다 새 클라이언트를 만들면 TCP·TLS 핸드셰이크가 반복되어 PLY/GLB가 비정상적으로 느려질 수 있음.
  */
-internal fun buildServerDownloadOkHttpClient(useHttps: Boolean): OkHttpClient {
-    return createOkHttpClient(useHttps).newBuilder()
-        .connectTimeout(120, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS)
-        .writeTimeout(0, TimeUnit.SECONDS)
-        .callTimeout(0, TimeUnit.SECONDS)
-        .build()
+private val serverDownloadClientLock = Any()
+private val serverDownloadClientPlainCache = AtomicReference<OkHttpClient?>(null)
+private val serverDownloadClientHttpsCache = AtomicReference<OkHttpClient?>(null)
+
+internal fun getServerDownloadOkHttpClient(useHttps: Boolean): OkHttpClient {
+    val cache = if (useHttps) serverDownloadClientHttpsCache else serverDownloadClientPlainCache
+    cache.get()?.let { return it }
+    synchronized(serverDownloadClientLock) {
+        cache.get()?.let { return it }
+        val c = createOkHttpClient(useHttps).newBuilder()
+            .connectTimeout(10, TimeUnit.MINUTES)
+            .readTimeout(0, TimeUnit.SECONDS)
+            .writeTimeout(0, TimeUnit.SECONDS)
+            .callTimeout(0, TimeUnit.SECONDS)
+            .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
+            .retryOnConnectionFailure(true)
+            .build()
+        cache.set(c)
+        return c
+    }
 }
 
 internal fun resolveDisplayName(context: Context, uri: Uri): String? {
@@ -3855,15 +3944,16 @@ internal suspend fun createZipFromFolders(
 }
 
 /**
- * 미디어 파일을 서버에 업로드하는 함수
- * @param context 컨텍스트
- * @param file 업로드할 파일
- * @return 업로드 성공 여부
+ * 미디어 파일을 서버에 업로드하는 함수 (`mobile_api_guide` DA3 API).
+ * @param zipFile DA3용 ZIP → 폼 필드 [SERVER_UPLOAD_PART_PC], 전송 파일명 [SERVER_UPLOAD_FILENAME_PC]
+ * @param gsZipFile 선택: 3DGS용 ZIP → [SERVER_UPLOAD_PART_GS] / [SERVER_UPLOAD_FILENAME_GS]. null이면 미전송(서버에서 3DGS 스킵)
+ * @param prompt 서버 `text_prompt` (선택)
  */
 internal suspend fun startServerTaskWithZip(
     context: Context,
     zipFile: File,
-    prompt: String = ""
+    prompt: String = "",
+    gsZipFile: File? = null,
 ): String? {
     return withContext(Dispatchers.IO) {
         try {
@@ -3872,24 +3962,34 @@ internal suspend fun startServerTaskWithZip(
             val useHttps = getUseHttps(context)
             val client = createOkHttpClient(useHttps).newBuilder()
                 .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(60, TimeUnit.SECONDS)
-                .callTimeout(60, TimeUnit.SECONDS)
+                .readTimeout(120, TimeUnit.SECONDS)
+                .writeTimeout(300, TimeUnit.SECONDS)
+                .callTimeout(900, TimeUnit.SECONDS)
                 .build()
 
             if (!zipFile.name.endsWith(".zip", ignoreCase = true)) {
+                return@withContext null
+            }
+            if (gsZipFile != null && !gsZipFile.name.endsWith(".zip", ignoreCase = true)) {
                 return@withContext null
             }
 
             val multipartBuilder = MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
                 .addFormDataPart(
-                    "file",
-                    zipFile.name,
+                    SERVER_UPLOAD_PART_PC,
+                    SERVER_UPLOAD_FILENAME_PC,
                     zipFile.asRequestBody("application/zip".toMediaType())
                 )
+            if (gsZipFile != null) {
+                multipartBuilder.addFormDataPart(
+                    SERVER_UPLOAD_PART_GS,
+                    SERVER_UPLOAD_FILENAME_GS,
+                    gsZipFile.asRequestBody("application/zip".toMediaType())
+                )
+            }
             if (prompt.isNotBlank()) {
                 multipartBuilder.addFormDataPart("text_prompt", prompt)
-                multipartBuilder.addFormDataPart("prompt", prompt)
             }
             val requestBody = multipartBuilder.build()
 
@@ -3975,11 +4075,7 @@ internal suspend fun fetchServerResultsJson(context: Context, taskId: String): J
             val serverAddress = getServerAddress(context)
             val serverPort = getServerPort(context)
             val useHttps = getUseHttps(context)
-            val client = createOkHttpClient(useHttps).newBuilder()
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(120, TimeUnit.SECONDS)
-                .callTimeout(150, TimeUnit.SECONDS)
-                .build()
+            val client = getServerDownloadOkHttpClient(useHttps)
             val protocol = if (useHttps) "https" else "http"
             val url = "$protocol://$serverAddress:$serverPort$RESULTS_ENDPOINT/$taskId"
             val request = Request.Builder().url(url).get().build()
@@ -3996,27 +4092,60 @@ internal suspend fun fetchServerResultsJson(context: Context, taskId: String): J
     }
 }
 
-internal suspend fun downloadHttpUrlToFile(context: Context, absoluteUrl: String, outFile: File): Boolean {
+internal suspend fun downloadHttpUrlToFile(
+    context: Context,
+    absoluteUrl: String,
+    outFile: File,
+    onStreamProgress: ((bytesRead: Long, contentLength: Long) -> Unit)? = null,
+): Boolean {
     return withContext(Dispatchers.IO) {
         try {
             val useHttps = getUseHttps(context)
-            val client = buildServerDownloadOkHttpClient(useHttps)
-            val request = Request.Builder().url(absoluteUrl).get().build()
+            val client = getServerDownloadOkHttpClient(useHttps)
+            val request = Request.Builder()
+                .url(absoluteUrl)
+                .get()
+                .header("Connection", "keep-alive")
+                .cacheControl(okhttp3.CacheControl.Builder().noStore().build())
+                .build()
             client.newCall(request).execute().use { response ->
                 val body = response.body
                 if (!response.isSuccessful || body == null) {
                     return@withContext false
                 }
+                val contentLength = body.contentLength()
                 outFile.parentFile?.mkdirs()
+                var lastProgressAt = 0L
+                val progressMinIntervalMs = 1600L
                 body.byteStream().use { input ->
                     BufferedOutputStream(FileOutputStream(outFile), SERVER_DOWNLOAD_BUFFER_BYTES).use { output ->
-                        input.copyTo(output, SERVER_DOWNLOAD_BUFFER_BYTES)
+                        val buf = ByteArray(SERVER_DOWNLOAD_BUFFER_BYTES)
+                        var total = 0L
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n <= 0) break
+                            output.write(buf, 0, n)
+                            total += n.toLong()
+                            if (onStreamProgress != null) {
+                                val now = System.currentTimeMillis()
+                                val done = contentLength > 0 && total >= contentLength
+                                if (done || now - lastProgressAt >= progressMinIntervalMs) {
+                                    lastProgressAt = now
+                                    onStreamProgress(total, contentLength)
+                                }
+                            }
+                        }
+                        output.flush()
                     }
                 }
                 outFile.exists() && outFile.length() > 0L
             }
         } catch (e: Exception) {
             android.util.Log.w("downloadHttpUrlToFile", absoluteUrl, e)
+            try {
+                outFile.delete()
+            } catch (_: Exception) {
+            }
             false
         }
     }
@@ -4025,41 +4154,88 @@ internal suspend fun downloadHttpUrlToFile(context: Context, absoluteUrl: String
 /**
  * `GET /results/{task_id}`로 목록을 받아 각 파일을 내려받습니다.
  * 엔드포인트가 없거나 실패하면 PLY 단일 다운로드로 폴백합니다.
+ *
+ * - HTTP 클라이언트·TCP 연결은 [getServerDownloadOkHttpClient]로 재사용합니다.
+ * - 여러 파일은 [SERVER_DOWNLOAD_MAX_PARALLEL]개까지 병렬로 받아 총 소요 시간을 줄입니다.
+ * - 단일 대용량 파일은 Content-Length 기반으로 진행 알림을 갱신합니다(포그라운드 유지·절전 완화).
  */
 internal suspend fun downloadServerPipelineArtifacts(
     context: Context,
     taskId: String,
-    onProgress: suspend (Int, String) -> Unit,
+    onProgress: (Int, String) -> Unit,
 ): ServerPipelineResultBundle? {
     val plyDir = ModelLibraryPaths.plyDir(context)
     val outDir = File(plyDir, "server_task_$taskId").apply { mkdirs() }
     val json = fetchServerResultsJson(context, taskId)
     val filesArr: JSONArray? = json?.optJSONArray("files")
-    val map = mutableMapOf<String, File>()
+    val map = ConcurrentHashMap<String, File>()
+    val progressLock = Any()
+    fun safeProgress(p: Int, msg: String) {
+        synchronized(progressLock) {
+            onProgress(p.coerceIn(0, 100), msg)
+        }
+    }
+
+    data class FileEntry(val key: String, val url: String, val filename: String)
+
     if (filesArr != null && filesArr.length() > 0) {
-        val total = filesArr.length()
-        for (i in 0 until total) {
-            val o = filesArr.optJSONObject(i) ?: continue
-            val key = o.optString("key")
-            val url = o.optString("url")
-            val filename = o.optString("filename").ifBlank { "file_$i" }
-            if (key.isBlank() || url.isBlank()) continue
-            val pct = 95 + ((i + 1) * 4 / maxOf(total, 1)).coerceIn(0, 4)
-            onProgress(pct.coerceAtMost(99), "결과 파일 다운로드 (${i + 1}/$total)...")
-            val dest = File(outDir, filename)
-            if (downloadHttpUrlToFile(context, url, dest)) {
-                map[key] = dest
+        val entries = buildList {
+            for (i in 0 until filesArr.length()) {
+                val o = filesArr.optJSONObject(i) ?: continue
+                val key = o.optString("key")
+                val url = o.optString("url")
+                val filename = o.optString("filename").ifBlank { "file_$i" }
+                if (key.isBlank() || url.isBlank()) continue
+                add(FileEntry(key, url, filename))
+            }
+        }
+        val total = entries.size
+        if (total == 1) {
+            val e = entries.first()
+            safeProgress(95, "다운로드: ${e.filename}")
+            val dest = File(outDir, e.filename)
+            val ok = downloadHttpUrlToFile(context, e.url, dest) { read, cl ->
+                val pct = if (cl > 0L) {
+                    (95 + (read * 4.0 / cl).toInt().coerceIn(0, 4))
+                } else {
+                    97
+                }
+                val mbRead = read / (1024L * 1024L)
+                val detail = if (cl > 0L) {
+                    val mbTotal = cl / (1024L * 1024L)
+                    "${mbRead} / ${mbTotal} MB"
+                } else {
+                    "${mbRead} MB"
+                }
+                safeProgress(pct.coerceAtMost(99), "${e.filename} · $detail")
+            }
+            if (ok) map[e.key] = dest
+        } else if (total > 1) {
+            coroutineScope {
+                val sem = Semaphore(SERVER_DOWNLOAD_MAX_PARALLEL)
+                entries.mapIndexed { idx, e ->
+                    async(Dispatchers.IO) {
+                        sem.withPermit {
+                            val basePct = 95 + (idx * 3 / maxOf(total, 1)).coerceIn(0, 3)
+                            safeProgress(basePct, "다운로드 (${idx + 1}/$total): ${e.filename}")
+                            val dest = File(outDir, e.filename)
+                            if (downloadHttpUrlToFile(context, e.url, dest)) {
+                                map[e.key] = dest
+                            }
+                        }
+                    }
+                }.awaitAll()
             }
         }
     }
     if (map["ply"] == null) {
-        onProgress(99, "PLY 다운로드 중...")
-        val ply = downloadPlyResult(context, taskId)
+        safeProgress(99, "PLY 다운로드 중...")
+        val ply = downloadPlyResult(context, taskId) { p, msg -> safeProgress(p, msg) }
         if (ply != null && ply.exists()) map["ply"] = ply
     }
     val plyFile = map["ply"] ?: return null
     writeServerTaskArtifactManifest(outDir, taskId, map.toMap())
-    JsonLibrary.ingestFromPipelineOutputDir(context, outDir, taskId)
+    JsonLibrary.ingestFromPipelineOutputDir(context, outDir, taskId, map.toMap())
     return ServerPipelineResultBundle(
         taskId = taskId,
         plyFile = plyFile,
@@ -4293,46 +4469,37 @@ internal suspend fun sam2RemoveBackground(
     }
 }
 
-internal suspend fun downloadPlyResult(context: Context, taskId: String): File? {
-    // 큰 PLY 파일 다운로드 — 타임아웃을 길게 설정하고 최대 3회 재시도
+internal suspend fun downloadPlyResult(
+    context: Context,
+    taskId: String,
+    onDownloadProgress: ((progressPercent: Int, message: String) -> Unit)? = null,
+): File? {
+    val serverAddress = getServerAddress(context)
+    val serverPort = getServerPort(context)
+    val useHttps = getUseHttps(context)
+    val protocol = if (useHttps) "https" else "http"
+    val url = "$protocol://$serverAddress:$serverPort$DOWNLOAD_ENDPOINT/$taskId?format=ply"
+    val modelsDir = ModelLibraryPaths.plyDir(context)
+    val outFile = File(modelsDir, "3d_model_$taskId.ply")
+
     val maxAttempts = 3
     repeat(maxAttempts) { attempt ->
-        val result = withContext(Dispatchers.IO) {
-            try {
-                val serverAddress = getServerAddress(context)
-                val serverPort = getServerPort(context)
-                val useHttps = getUseHttps(context)
-                val client = buildServerDownloadOkHttpClient(useHttps)
-
-                val protocol = if (useHttps) "https" else "http"
-                val url = "$protocol://$serverAddress:$serverPort$DOWNLOAD_ENDPOINT/$taskId?format=ply"
-                val request = Request.Builder()
-                    .url(url)
-                    .get()
-                    .header("Connection", "keep-alive")
-                    .build()
-                client.newCall(request).execute().use { response ->
-                    val body = response.body
-                    if (!response.isSuccessful || body == null) {
-                        return@withContext null
-                    }
-
-                    val modelsDir = ModelLibraryPaths.plyDir(context)
-                    val outFile = File(modelsDir, "3d_model_$taskId.ply")
-                    body.byteStream().use { input ->
-                        BufferedOutputStream(FileOutputStream(outFile), SERVER_DOWNLOAD_BUFFER_BYTES).use { output ->
-                            input.copyTo(output, SERVER_DOWNLOAD_BUFFER_BYTES)
-                        }
-                    }
-                    outFile
-                }
-            } catch (e: Exception) {
-                android.util.Log.w("downloadPlyResult", "다운로드 시도 ${attempt + 1}/$maxAttempts 실패", e)
-                null
+        try {
+            outFile.delete()
+        } catch (_: Exception) {
+        }
+        val ok = downloadHttpUrlToFile(context, url, outFile) { read, cl ->
+            if (cl > 0L) {
+                val pct = (95 + (read * 4.0 / cl).toInt().coerceIn(0, 4)).coerceAtMost(99)
+                val mbRead = read / (1024L * 1024L)
+                val mbTotal = cl / (1024L * 1024L)
+                onDownloadProgress?.invoke(pct, "PLY · $mbRead / $mbTotal MB")
+            } else {
+                val mbRead = read / (1024L * 1024L)
+                onDownloadProgress?.invoke(97, "PLY · ${mbRead} MB 수신 중…")
             }
         }
-        if (result != null) return result
-        // 마지막 시도가 아니면 지수 백오프 후 재시도 (5초, 10초)
+        if (ok && outFile.exists() && outFile.length() > 0L) return outFile
         if (attempt < maxAttempts - 1) delay(5_000L * (attempt + 1))
     }
     return null
@@ -4341,39 +4508,49 @@ internal suspend fun downloadPlyResult(context: Context, taskId: String): File? 
 internal suspend fun uploadZipAndRunPipeline(
     context: Context,
     zipFile: File,
+    gsZipFile: File? = null,
     prompt: String = "",
-    onProgress: suspend (progress: Int, message: String) -> Unit
+    onProgress: (progress: Int, message: String) -> Unit
 ): ServerPipelineResultBundle? {
     val taskTitle = "3D 모델 생성 중"
     val uploadStartMs = System.currentTimeMillis()
+    /** UI는 post만 하고 IO 코루틴은 대기하지 않음(백그라운드에서 메인 지연 시 폴링이 멈추지 않도록). */
+    val mainHandler = Handler(Looper.getMainLooper())
     // 마지막으로 표시한 퍼센트 — 표시 값이 역행하지 않도록 추적
     var lastShownProgress = 0
 
-    // 공통 헬퍼: UI 콜백 + 포그라운드 서비스 알림 동시 업데이트
-    // 항상 lastShownProgress 이상의 값만 표시해 퍼센트 역행을 방지
-    suspend fun updateNotification(p: Int, msg: String) {
+    // 공통 헬퍼: 알림 즉시 갱신 + UI는 메인 큐에 비동기 전달
+    fun emitProgress(p: Int, msg: String) {
         val safeP = p.coerceAtLeast(lastShownProgress).coerceIn(0, 100)
         lastShownProgress = safeP
-        onProgress(safeP, msg)
         startOrUpdateForegroundService(context, taskTitle, safeP, msg, uploadStartMs)
+        mainHandler.post { onProgress(safeP, msg) }
     }
 
     // 서비스 시작
     startOrUpdateForegroundService(context, taskTitle, 0, "업로드 준비 중...", uploadStartMs)
 
+    val appCtx = context.applicationContext
+    val pm = appCtx.getSystemService(Context.POWER_SERVICE) as PowerManager
+    val wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "${appCtx.packageName}:server_pipeline").apply {
+        setReferenceCounted(false)
+    }
+    wakeLock.acquire(SERVER_PIPELINE_WAKE_MAX_MS)
+
     try {
         // 1) 업로드 -> task_id 확보
-        updateNotification(5, "파일 업로드 중...")
+        emitProgress(5, "파일 업로드 중...")
         val noResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
-        val taskId = startServerTaskWithZip(context, zipFile, prompt)
+        val taskId = startServerTaskWithZip(context, zipFile, prompt, gsZipFile)
         if (taskId.isNullOrBlank()) {
-            onProgress(0, noResponseMsg)
+            mainHandler.post { onProgress(0, noResponseMsg) }
             context.stopService(Intent(context, AppForegroundService::class.java))
             return null
         }
 
         // 로컬 ZIP은 서버에 올라갔으면 삭제(저장공간 확보)
         try { zipFile.delete() } catch (_: Exception) {}
+        try { gsZipFile?.delete() } catch (_: Exception) {}
 
         // 2) 상태 폴링 — 처음 2분은 2초 간격, 이후 5초 간격
         val start = System.currentTimeMillis()
@@ -4386,7 +4563,7 @@ internal suspend fun uploadZipAndRunPipeline(
                 lastServerResponseAt = System.currentTimeMillis()
                 // 서버 STATUS_PROGRESS(5~100) 그대로 반영 — 잘못된 키 파싱 시 0만 오므로 역행 방지는 updateNotification 내부
                 val serverPct = st.progressPercent.coerceIn(0, 100)
-                updateNotification(serverPct, st.message)
+                emitProgress(serverPct, st.message)
                 when (st.status) {
                     "COMPLETED" -> break
                     "FAILED" -> {
@@ -4397,7 +4574,7 @@ internal suspend fun uploadZipAndRunPipeline(
             } else {
                 // 90초 이상 서버 응답이 없으면 중단 (일시적 네트워크 지연 허용)
                 if (System.currentTimeMillis() - lastServerResponseAt >= 90_000L) {
-                    onProgress(lastShownProgress, noResponseMsg)
+                    mainHandler.post { onProgress(lastShownProgress, noResponseMsg) }
                     context.stopService(Intent(context, AppForegroundService::class.java))
                     return null
                 }
@@ -4409,26 +4586,33 @@ internal suspend fun uploadZipAndRunPipeline(
 
         val finalStatus = fetchServerTaskStatus(context, taskId)
         if (finalStatus?.status != "COMPLETED") {
-            onProgress(lastShownProgress, "처리 시간이 초과되었거나 완료되지 않았습니다.")
+            mainHandler.post {
+                onProgress(lastShownProgress, "처리 시간이 초과되었거나 완료되지 않았습니다.")
+            }
             context.stopService(Intent(context, AppForegroundService::class.java))
             return null
         }
 
         // 3) 결과 다운로드 (.ply)
         // lastShownProgress 이상 값으로 고정(역행 방지): 서버가 99%를 줬다면 다운로드도 99%에서 시작
-        updateNotification(lastShownProgress.coerceAtLeast(95), "결과 다운로드 중...")
-        val bundle = downloadServerPipelineArtifacts(context, taskId, ::updateNotification) ?: run {
+        emitProgress(lastShownProgress.coerceAtLeast(95), "결과 다운로드 중...")
+        val bundle = downloadServerPipelineArtifacts(context, taskId, ::emitProgress) ?: run {
             context.stopService(Intent(context, AppForegroundService::class.java))
             return null
         }
 
-        updateNotification(100, "완료되었습니다!")
+        emitProgress(100, "완료되었습니다!")
         stopForegroundService(context, "3D 모델 생성 완료", "완료되었습니다!")
         return bundle
     } catch (e: Exception) {
         e.printStackTrace()
         context.stopService(Intent(context, AppForegroundService::class.java))
         return null
+    } finally {
+        try {
+            if (wakeLock.isHeld) wakeLock.release()
+        } catch (_: Exception) {
+        }
     }
 }
 

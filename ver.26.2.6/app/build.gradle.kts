@@ -113,6 +113,9 @@ dependencies {
     val sceneViewVer = "2.3.0"
     implementation("io.github.sceneview:sceneview:$sceneViewVer")
 
+    // ARCore — 사진 촬영 시 포즈·카메라 Intrinsics 메타데이터 수집
+    implementation("com.google.ar:core:1.48.0")
+
     // EXIF (이미지 회전/방향 보정)
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
