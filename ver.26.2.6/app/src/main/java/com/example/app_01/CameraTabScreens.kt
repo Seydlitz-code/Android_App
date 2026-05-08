@@ -30,6 +30,7 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import androidx.compose.foundation.Canvas
@@ -45,6 +46,7 @@ import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
@@ -120,6 +122,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraFront
 import androidx.compose.material.icons.filled.CameraRear
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
@@ -134,6 +137,7 @@ import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.ScreenRotation
 import androidx.compose.material.icons.outlined.Speed
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Add
@@ -295,7 +299,6 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.sqrt
-import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -318,10 +321,11 @@ private const val CONTINUOUS_CAPTURE_INTERVAL_MS = 3_000L
 private const val CAMERA_REBIND_WAIT_AFTER_ARCORE_MS = 550L
 
 /**
- * CameraX 언바인드 뒤 한 번의 ARCore 구간에서 여러 장의 포즈 메타를 채우고 JSON·ZIP을 저장한다.
- * 연속 촬영은 샷마다 세션을 열지 않고 종료 시 한 번만 호출해 카메라 재바인드 횟수를 줄인다.
+ * CameraX 언바인드 뒤 한 번의 ARCore 구간에서 여러 장의 포즈 메타를 채운 뒤 저장한다.
+ * - **1장**: `images/img_000000.jpg` + 루트 `poses.json`(서버 main.py와 동일).
+ * - **2장 이상(연속 촬영)**: `images/img_######.jpg` + 루트 병합 `poses.json` 단일 ZIP.
  *
- * @return 메타 누락 또는 저장 IO 실패한 파일 수
+ * @return 메타 누락 또는 저장 IO 실패로 집계된 횟수(연속 촬영 배치는 저장 실패 시 +1)
  */
 private suspend fun runBatchedArcoreMetadataSave(
     context: Context,
@@ -347,16 +351,50 @@ private suspend fun runBatchedArcoreMetadataSave(
             }
         }
         withContext(Dispatchers.IO) {
-            for (f in photoFiles) {
+            if (photoFiles.size == 1) {
+                val f = photoFiles[0]
                 val frameJo = map[f.name]
                 if (frameJo == null) {
                     failures++
-                    continue
+                } else {
+                    val frameAligned = JSONObject(frameJo.toString()).apply {
+                        put("filename", "img_000000.jpg")
+                    }
+                    val rootJson = JSONObject().put("frames", JSONArray().put(frameAligned))
+                    runCatching {
+                        JsonLibrary.saveArCoreFramesJson(context, rootJson)
+                        ArcoreLibrary.savePhotoAndPosesZip(context, f, rootJson.toString())
+                    }.onFailure { failures++ }
                 }
-                val rootJson = JSONObject().put("frames", JSONArray().put(frameJo))
+            } else {
+                val successfulFrames = linkedMapOf<String, JSONObject>()
+                for (f in photoFiles) {
+                    val frameJo = map[f.name]
+                    if (frameJo == null) failures++
+                    else successfulFrames[f.name] = frameJo
+                }
                 runCatching {
-                    JsonLibrary.saveArCoreFramesJson(context, rootJson)
-                    ArcoreLibrary.savePhotoAndPosesZip(context, f, rootJson.toString())
+                    val filesInZip = photoFiles.filter { it.isFile }
+                    val allFrames = JSONArray()
+                    var imgIdx = 0
+                    for (f in filesInZip) {
+                        val zipBase = "img_${imgIdx.toString().padStart(6, '0')}.jpg"
+                        successfulFrames[f.name]?.let { jo ->
+                            val c = JSONObject(jo.toString())
+                            c.put("filename", zipBase)
+                            allFrames.put(c)
+                        }
+                        imgIdx++
+                    }
+                    val rootJson = JSONObject().put("frames", allFrames)
+                    if (allFrames.length() > 0) {
+                        JsonLibrary.saveArCoreFramesJson(context, rootJson)
+                    }
+                    ArcoreLibrary.saveContinuousBurstArcoreZip(
+                        context,
+                        filesInZip,
+                        rootJson.toString(),
+                    )
                 }.onFailure { failures++ }
             }
         }
@@ -421,6 +459,8 @@ fun CameraScreen(
     var camera: Camera? by remember { mutableStateOf(null) }
     var isCameraReady by remember { mutableStateOf(false) }
     var isFlashOn by remember { mutableStateOf(false) }
+    /** true: 탭 초점 후 AF/AE 자동 해제 비활성화(고정). false일 때 cancel로 연속 AF 복귀 */
+    var isFocusLockEnabled by remember { mutableStateOf(false) }
     var previewOriginInRoot by remember { mutableStateOf<Offset?>(null) }
     var datasetDir by remember { mutableStateOf<File?>(null) }
     var isDatasetCollectionEnabled by remember { mutableStateOf(true) }
@@ -557,6 +597,9 @@ fun CameraScreen(
     val scanCoverage = remember { MobileSpaceScanCoverage() }
     val meshAnalysisExecutor = remember { Executors.newSingleThreadExecutor() }
     val cameraEntryModeState = rememberUpdatedState(cameraEntryMode)
+    val mobileSpaceRecordingState = rememberUpdatedState(isRecording)
+    val mobileSpaceCaptureModeState = rememberUpdatedState(captureMode)
+    val mobileSpaceBurstActiveState = rememberUpdatedState(isContinuousBurstActive)
     DisposableEffect(Unit) {
         onDispose { meshAnalysisExecutor.shutdown() }
     }
@@ -576,6 +619,15 @@ fun CameraScreen(
             camera?.cameraControl?.enableTorch(isFlashOn)
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    LaunchedEffect(isFocusLockEnabled, camera) {
+        if (!isFocusLockEnabled) {
+            try {
+                camera?.cameraControl?.cancelFocusAndMetering()
+            } catch (_: Exception) {
+            }
         }
     }
     var baseAzimuthDegrees by remember { mutableStateOf<Float?>(null) }
@@ -711,13 +763,12 @@ fun CameraScreen(
                 if (nextGridAz >= 360f) nextGridAz -= 360f
                 azimuthForGrid = nextGridAz
 
-                val rawPitch = Math.toDegrees(orientation[1].toDouble()).toFloat()
-                
-                // [개선] 중력 벡터를 이용한 절대 기울기 계산 (수직=90도)
-                // rotationMatrix[7]: Y축 성분, rotationMatrix[8]: Z축 성분
-                val worldZInPhoneY = rotationMatrix[7]
-                val worldZInPhoneZ = rotationMatrix[8]
-                val angleDeg = Math.toDegrees(Math.atan2(worldZInPhoneZ.toDouble(), worldZInPhoneY.toDouble())).toFloat()
+                // [수정] 미리보기/방위와 동일하게 remap된 행렬로 피치 계산 (수직=90도 기준)
+                val worldZInPhoneY = adjustedRotationMatrix[7]
+                val worldZInPhoneZ = adjustedRotationMatrix[8]
+                val angleDeg = Math.toDegrees(
+                    Math.atan2(worldZInPhoneZ.toDouble(), worldZInPhoneY.toDouble()),
+                ).toFloat()
                 
                 // 앞으로 숙이면 90도 미만, 뒤로 젖히면 90도 초과가 되도록 설정
                 pitchDegrees = 90f + angleDeg
@@ -840,13 +891,26 @@ fun CameraScreen(
                         val sectorIndex =
                             ((displayAzimuthDegrees / sectorSize).toInt()).coerceIn(0, sectorCount - 1)
                         if (!capturedSectors.contains(sectorIndex)) {
-                            // [수정] 선명도 보정(초점 재조정) 로직 제거됨 - 사용자 요청
-                            // Joint Reflection Removal and Depth Estimation 준비 단계
-                            
                             capturedSectors = capturedSectors + sectorIndex
                             val dir = datasetDir
                             val capture = imageCapture
-                            if (dir != null && capture != null && targetPitch != null) {
+                            val pv = previewView
+                            val cam = camera
+                            if (dir != null && capture != null) {
+                                // 화면 중심으로 AF/AE 후 셔터(데이터셋 스틸 선명도 향상)
+                                if (pv != null && cam != null && pv.width > 1 && pv.height > 1) {
+                                    runCatching {
+                                        val factory = pv.meteringPointFactory
+                                        val cx = pv.width * 0.5f
+                                        val cy = pv.height * 0.5f
+                                        val point = factory.createPoint(cx, cy)
+                                        val action = FocusMeteringAction.Builder(point)
+                                            .setAutoCancelDuration(2, TimeUnit.SECONDS)
+                                            .build()
+                                        cam.cameraControl.startFocusAndMetering(action)
+                                    }
+                                    delay(280)
+                                }
                                 captureDatasetImageAndAwait(
                                     context,
                                     sectorIndex,
@@ -855,7 +919,7 @@ fun CameraScreen(
                                     capture,
                                 )
                             }
-                            
+
                             // 연속 촬영 방지를 위해 잠시 대기
                             delay(300)
                         }
@@ -1000,10 +1064,16 @@ fun CameraScreen(
                                 if (!bmp.isRecycled) bmp.recycle()
                                 if (changed) {
                                     Handler(Looper.getMainLooper()).post {
-                                        // 새로운 물리적 구역(방)으로 진입한 경우 커버리지 초기화
-                                        // → 새 구역 전체가 빨간 그리드로 다시 표시됨
+                                        // 새로운 물리적 구역(방)으로 진입: 기본은 커버리지 초기화.
+                                        // 단, 사고 현장에서 **한 번의** 동영상·연속 촬영 세션 안에서는 격자를 공유하므로 리셋하지 않음.
                                         if (newRegionCreated) {
-                                            scanCoverage.reset()
+                                            val shareGridInVideoSession =
+                                                mobileSpaceCaptureModeState.value == CaptureMode.VIDEO &&
+                                                    mobileSpaceRecordingState.value
+                                            val shareGridInBurstSession = mobileSpaceBurstActiveState.value
+                                            if (!shareGridInVideoSession && !shareGridInBurstSession) {
+                                                scanCoverage.reset()
+                                            }
                                         }
                                         mobileSpaceUiRev++
                                     }
@@ -1122,6 +1192,28 @@ fun CameraScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                 }
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .pointerInput(camera, previewView, isCameraReady, isFocusLockEnabled) {
+                            detectTapGestures { offset ->
+                                val pv = previewView ?: return@detectTapGestures
+                                val cam = camera ?: return@detectTapGestures
+                                if (!isCameraReady || pv.width < 2 || pv.height < 2) return@detectTapGestures
+                                runCatching {
+                                    val point = pv.meteringPointFactory.createPoint(offset.x, offset.y)
+                                    val builder = FocusMeteringAction.Builder(point)
+                                    if (isFocusLockEnabled) {
+                                        // CameraX 1.4: 장시간 유지로 AF/AE 고정에 준함(무제한 API는 기기별 상이)
+                                        builder.setAutoCancelDuration(30, TimeUnit.MINUTES)
+                                    } else {
+                                        builder.setAutoCancelDuration(5, TimeUnit.SECONDS)
+                                    }
+                                    cam.cameraControl.startFocusAndMetering(builder.build())
+                                }
+                            }
+                        }
+                )
             }
         }
 
@@ -1232,6 +1324,17 @@ fun CameraScreen(
                             imageVector = if (isFlashOn) Icons.Filled.FlashOn else Icons.Filled.FlashOff,
                             contentDescription = "Flash",
                             tint = Color.White,
+                        )
+                    }
+                    IconButton(onClick = { isFocusLockEnabled = !isFocusLockEnabled }) {
+                        Icon(
+                            imageVector = if (isFocusLockEnabled) Icons.Filled.Lock else Icons.Filled.CenterFocusStrong,
+                            contentDescription = if (isFocusLockEnabled) {
+                                "초점·노출 고정(탭한 지점 유지). 다시 누르면 해제"
+                            } else {
+                                "탭 초점. 고정 모드 켜면 탭 후 AF/AE 유지"
+                            },
+                            tint = if (isFocusLockEnabled) Color(0xFFFFAB40) else Color.White,
                         )
                     }
                 }
@@ -1448,10 +1551,24 @@ fun CameraScreen(
                                     imageCapture?.let { capture ->
                                         val useArcoreMeta = arcoreMetaEnabled &&
                                             lensFacing == CameraSelector.LENS_FACING_BACK
+                                        // 사고 현장: 단일 촬영마다 격자(커버리지) 세션을 새로 시작
+                                        if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
+                                            scanCoverage.reset()
+                                            mobileSpaceUiRev++
+                                        }
                                         // 셔터 소리를 약 30% 수준으로 낮춤 (MediaActionSound는 볼륨 조절 불가)
                                         SoftShutterSound.play(volume = 0.3f)
                                         takePhoto(context, capture) { uri, file ->
                                             onImageCaptured(uri)
+                                            if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
+                                                mobileSpaceSession.recordAcceptedSample(
+                                                    azimuthForGrid,
+                                                    effectivePitchDegrees,
+                                                    rollDegrees,
+                                                )
+                                                scanCoverage.recordFov(azimuthForGrid, effectivePitchDegrees)
+                                                mobileSpaceUiRev++
+                                            }
                                             if (useArcoreMeta) {
                                                 scope.launch(Dispatchers.Default) {
                                                     try {
@@ -1525,6 +1642,11 @@ fun CameraScreen(
                                             }
                                             continuousBurstJob?.cancel()
                                             continuousArcorePending.clear()
+                                            // 사고 현장: 한 번의 연속 촬영 세션 동안만 격자 공유 → 세션 시작 시 초기화
+                                            if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
+                                                scanCoverage.reset()
+                                                mobileSpaceUiRev++
+                                            }
                                             isContinuousBurstActive = true
                                             continuousCapturedCount = 0
                                             val useArcoreMeta = arcoreMetaEnabled &&
@@ -1563,6 +1685,18 @@ fun CameraScreen(
                                                         val (uri, file) = shot
                                                         withContext(Dispatchers.Main) {
                                                             onImageCaptured(uri)
+                                                            if (cameraEntryModeState.value == CameraEntryMode.MOBILE_SPACE) {
+                                                                mobileSpaceSession.recordAcceptedSample(
+                                                                    azimuthForGrid,
+                                                                    effectivePitchDegrees,
+                                                                    rollDegrees,
+                                                                )
+                                                                scanCoverage.recordFov(
+                                                                    azimuthForGrid,
+                                                                    effectivePitchDegrees,
+                                                                )
+                                                                mobileSpaceUiRev++
+                                                            }
                                                         }
 
                                                         if (useArcoreMeta) {
@@ -1685,6 +1819,11 @@ fun CameraScreen(
                                                     datasetDir = sessionFolder
                                                     pendingVideoDatasetDirForArcore = sessionFolder
                                                     pendingVideoDatasetPathForArcore = sessionFolder.absolutePath
+                                                    // 사고 현장: 한 번의 동영상 녹화 동안만 격자 공유 → 녹화 시작 시 초기화
+                                                    if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
+                                                        scanCoverage.reset()
+                                                        mobileSpaceUiRev++
+                                                    }
                                                     // 동영상 촬영 시작 시 방위각 기준 설정
                                                     baseAzimuthDegrees = azimuthDegrees
                                                     capturedSectors = emptySet()
