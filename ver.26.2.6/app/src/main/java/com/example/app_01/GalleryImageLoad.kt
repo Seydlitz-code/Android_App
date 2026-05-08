@@ -11,6 +11,8 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
+import coil.imageLoader
+import coil.request.CachePolicy
 import coil.request.ImageRequest
 import coil.size.Precision
 import coil.size.Scale
@@ -27,7 +29,8 @@ fun rememberGalleryGridThumbEdgePx(columns: Int): Int {
     return remember(cfg.screenWidthDp, cfg.densityDpi, columns) {
         val gutterApprox = 24f
         val cellDp = ((cfg.screenWidthDp - gutterApprox) / columns.toFloat()).coerceAtLeast(40f)
-        (cellDp * cfg.densityDpi / 160f).toInt().coerceIn(120, 720)
+        // 상한을 낮춰 그리드 셀에 맞는 해상도만 디코딩 — 첫 표시·스크롤 부담 감소
+        (cellDp * cfg.densityDpi / 160f).toInt().coerceIn(120, 480)
     }
 }
 
@@ -42,9 +45,46 @@ fun rememberGalleryGridPhotoPainter(uri: Uri, thumbEdgePx: Int): AsyncImagePaint
             .precision(Precision.INEXACT)
             .scale(Scale.FILL)
             .crossfade(false)
+            .allowHardware(true)
+            .memoryCachePolicy(CachePolicy.ENABLED)
+            .diskCachePolicy(CachePolicy.ENABLED)
             .build()
     }
     return rememberAsyncImagePainter(request)
+}
+
+/**
+ * 그리드 진입 직후 앞쪽 셀 썸네일을 백그라운드에서 미리 요청해 체감 로딩을 줄입니다.
+ */
+suspend fun prefetchGalleryGridThumbnails(
+    context: Context,
+    uris: List<Uri>,
+    thumbEdgePx: Int,
+    maxCount: Int = 36,
+) {
+    if (uris.isEmpty()) return
+    val loader = context.imageLoader
+    val appCtx = context.applicationContext
+    val reqBuilder: (Uri) -> ImageRequest = { uri ->
+        ImageRequest.Builder(appCtx)
+            .data(uri)
+            .size(thumbEdgePx, thumbEdgePx)
+            .precision(Precision.INEXACT)
+            .scale(Scale.FILL)
+            .allowHardware(true)
+            .memoryCachePolicy(CachePolicy.ENABLED)
+            .diskCachePolicy(CachePolicy.ENABLED)
+            .build()
+    }
+    withContext(Dispatchers.IO) {
+        uris.asSequence()
+            .filter { uri ->
+                val scheme = uri.scheme?.lowercase() ?: ""
+                scheme != "http" && scheme != "https"
+            }
+            .take(maxCount)
+            .forEach { loader.enqueue(reqBuilder(it)) }
+    }
 }
 
 private fun downscaleBitmapIfNeeded(bitmap: Bitmap, maxEdge: Int): Bitmap {

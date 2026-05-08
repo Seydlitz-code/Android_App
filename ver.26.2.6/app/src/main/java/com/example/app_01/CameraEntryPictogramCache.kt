@@ -12,7 +12,11 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /** 카메라 허브 2×2 타일에서 쓰는 픽토그램 리소스 ID (프리로드·캐시 키용) */
 val CAMERA_ENTRY_PICTOGRAM_RES_IDS: IntArray = intArrayOf(
@@ -27,7 +31,7 @@ private fun cacheKey(resId: Int, ink: Color): String = "${resId}_${ink.toArgb()}
 /**
  * 화면에 작게 보이므로 긴 변 기준 다운샘플 후 마스킹·틴트 — 픽셀 수를 줄여 첫 표시를 단축한다.
  */
-private fun decodeResourceScaledForCameraPictogram(context: Context, resId: Int, maxSide: Int = 384): Bitmap? {
+private fun decodeResourceScaledForCameraPictogram(context: Context, resId: Int, maxSide: Int = 256): Bitmap? {
     val res = context.resources
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeResource(res, resId, bounds)
@@ -155,39 +159,45 @@ private fun processCameraEntryPictogramBitmap(source: Bitmap, ink: Color): Bitma
  */
 object CameraEntryPictogramCache {
     private val cache = ConcurrentHashMap<String, ImageBitmap>()
-    private val buildLock = Any()
+    private val buildMutexes = ConcurrentHashMap<String, Mutex>()
+
+    private fun mutexFor(key: String): Mutex =
+        buildMutexes.computeIfAbsent(key) { Mutex() }
 
     fun peek(resId: Int, ink: Color): ImageBitmap? = cache[cacheKey(resId, ink)]
 
     suspend fun ensureLoaded(context: Context, resId: Int, ink: Color): ImageBitmap {
         peek(resId, ink)?.let { return it }
-        return withContext(Dispatchers.Default) {
-            synchronized(buildLock) {
-                peek(resId, ink)?.let { return@withContext it }
-                val raw = decodeResourceScaledForCameraPictogram(context, resId)
-                    ?: BitmapFactory.decodeResource(context.resources, resId)
-                val image = if (raw == null) {
+        val key = cacheKey(resId, ink)
+        val mutex = mutexFor(key)
+        return mutex.withLock {
+            peek(resId, ink)?.let { return@withLock it }
+            val appCtx = context.applicationContext
+            val raw = decodeResourceScaledForCameraPictogram(appCtx, resId)
+                ?: BitmapFactory.decodeResource(appCtx.resources, resId)
+            val image = if (raw == null) {
+                solidColorBitmap(ink)
+            } else {
+                try {
+                    processCameraEntryPictogramBitmap(raw, ink).asImageBitmap()
+                } catch (_: Throwable) {
+                    raw.recycle()
                     solidColorBitmap(ink)
-                } else {
-                    try {
-                        processCameraEntryPictogramBitmap(raw, ink).asImageBitmap()
-                    } catch (_: Throwable) {
-                        raw.recycle()
-                        solidColorBitmap(ink)
-                    }
                 }
-                cache[cacheKey(resId, ink)] = image
-                image
             }
+            cache[key] = image
+            image
         }
     }
 
     suspend fun warmup(context: Context, ink: Color) {
-        withContext(Dispatchers.Default) {
-            for (id in CAMERA_ENTRY_PICTOGRAM_RES_IDS) {
-                if (peek(id, ink) != null) continue
-                ensureLoaded(context, id, ink)
-            }
+        val appCtx = context.applicationContext
+        coroutineScope {
+            CAMERA_ENTRY_PICTOGRAM_RES_IDS.map { id ->
+                async(Dispatchers.Default) {
+                    ensureLoaded(appCtx, id, ink)
+                }
+            }.awaitAll()
         }
     }
 

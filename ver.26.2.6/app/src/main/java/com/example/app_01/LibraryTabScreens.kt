@@ -1150,6 +1150,15 @@ fun GalleryScreen(
     val themeMode = LocalAppUiThemeMode.current
     /** 그리드 셀에 맞춘 디코딩 크기 — 사진(Coil)·동영상 첫 프레임 공통 */
     val gridThumbPx = rememberGalleryGridThumbEdgePx(columns = 4)
+    LaunchedEffect(images, gridThumbPx, libraryTab, showLibraryHub) {
+        if (!showLibraryHub && libraryTab == LibraryTab.GALLERY && images.isNotEmpty()) {
+            prefetchGalleryGridThumbnails(
+                context.applicationContext,
+                images,
+                gridThumbPx,
+            )
+        }
+    }
     var serverTaskManifestInfos by remember { mutableStateOf<List<ServerTaskManifestInfo>>(emptyList()) }
     var jsonLibraryFiles by remember { mutableStateOf<List<File>>(emptyList()) }
     var jsonLibraryDetailFile by remember { mutableStateOf<File?>(null) }

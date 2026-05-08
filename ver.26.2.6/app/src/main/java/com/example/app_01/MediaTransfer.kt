@@ -9,7 +9,10 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.graphics.Bitmap
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 data class MediaTransferResult(
@@ -185,6 +188,69 @@ suspend fun copyImagesToDatasetFolder(
         ok > 0 && fail > 0 -> "데이터셋폴더에 ${ok}장을 저장했습니다. (동영상·실패 ${fail}건 제외)"
         ok > 0 -> "데이터셋폴더「$safeFolder」에 ${ok}장을 저장했습니다."
         else -> "이미지를 복사하지 못했습니다."
+    }
+    return MediaTransferResult(ok, fail, msg)
+}
+
+/**
+ * 연속 촬영 세션에서 저장된 **이미지 파일만** `datasets/연속촬영_yyyy-MM-dd_HHmmss[_n]/`에 촬영 순서대로 복사합니다.
+ * JSON은 넣지 않으며, ARCore ZIP·poses.json·갤러리 원본과 별도입니다.
+ */
+suspend fun copyContinuousBurstImageFilesToDatasetFolder(
+    context: Context,
+    imageFiles: List<File>,
+): MediaTransferResult {
+    val ordered = imageFiles.filter { it.isFile }
+    if (ordered.isEmpty()) {
+        return MediaTransferResult(0, 0, "복사할 이미지가 없습니다.")
+    }
+    val root = File(context.getExternalFilesDir(null), "datasets")
+    root.mkdirs()
+    val ts = SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.US).format(Date())
+    val base = "연속촬영_$ts"
+    var dir = File(root, base)
+    var dup = 0
+    while (dir.exists()) {
+        dup++
+        dir = File(root, "${base}_$dup")
+    }
+    if (!dir.mkdirs()) {
+        return MediaTransferResult(0, ordered.size, "데이터셋 폴더를 만들 수 없습니다.")
+    }
+    var ok = 0
+    var fail = 0
+    var index = 0
+    for (f in ordered) {
+        try {
+            index++
+            val rawExt = f.extension.lowercase(Locale.ROOT).ifBlank { "jpg" }
+            val ext = when (rawExt) {
+                "jpeg" -> "jpg"
+                else -> rawExt
+            }
+            val outFile = File(dir, String.format(Locale.US, "%04d.%s", index, ext))
+            FileInputStream(f).use { input ->
+                FileOutputStream(outFile).use { output -> input.copyTo(output) }
+            }
+            ok++
+        } catch (_: Exception) {
+            fail++
+        }
+    }
+    if (ok == 0) {
+        try {
+            dir.deleteRecursively()
+        } catch (_: Exception) {
+        }
+        return MediaTransferResult(0, ordered.size, "데이터셋 폴더에 복사하지 못했습니다.")
+    }
+    val folderLabel = dir.name
+    val msg = when {
+        ok > 0 && fail > 0 ->
+            "연속 촬영 ${ok}장을 데이터셋「$folderLabel」에 저장했습니다. (실패 $fail)"
+        ok > 0 ->
+            "연속 촬영 ${ok}장을 데이터셋「$folderLabel」에 저장했습니다."
+        else -> "데이터셋 폴더에 복사하지 못했습니다."
     }
     return MediaTransferResult(ok, fail, msg)
 }

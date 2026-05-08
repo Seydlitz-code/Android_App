@@ -1539,6 +1539,7 @@ private fun ChatPickMediaThumbnail(
     onToggle: () -> Unit,
 ) {
     val context = LocalContext.current
+    val thumbPx = rememberGalleryGridThumbEdgePx(columns = 3)
     val isVid = remember(uri) { uri.isChatPickVideoUri() }
     Box(
         modifier = Modifier
@@ -1577,7 +1578,7 @@ private fun ChatPickMediaThumbnail(
             }
         } else {
             Image(
-                painter = rememberAsyncImagePainter(uri),
+                painter = rememberGalleryGridPhotoPainter(uri, thumbPx),
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,

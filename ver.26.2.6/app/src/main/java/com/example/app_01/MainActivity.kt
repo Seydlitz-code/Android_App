@@ -650,10 +650,17 @@ fun CameraApp(modifier: Modifier = Modifier) {
 
     val rootPalette = LocalAppUiPalette.current
 
-    // 카메라 허브 픽토그램: 테마별로 백그라운드에서 미리 캐시에 올려 탭 진입 시 바로 표시
-    LaunchedEffect(rootPalette.isDark) {
-        val ink = if (rootPalette.isDark) Color.White else Color.Black
-        CameraEntryPictogramCache.warmup(context, ink)
+    // 카메라 허브 픽토그램: 밝은/어두운 테마용 잉크를 모두 미리 빌드해 전환·진입 시 딜레이 완화
+    LaunchedEffect(Unit) {
+        val appCtx = context.applicationContext
+        coroutineScope {
+            launch(Dispatchers.Default) {
+                CameraEntryPictogramCache.warmup(appCtx, Color.White)
+            }
+            launch(Dispatchers.Default) {
+                CameraEntryPictogramCache.warmup(appCtx, Color.Black)
+            }
+        }
     }
 
     Column(

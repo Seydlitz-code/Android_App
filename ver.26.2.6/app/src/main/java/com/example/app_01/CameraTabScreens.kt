@@ -324,6 +324,7 @@ private const val CAMERA_REBIND_WAIT_AFTER_ARCORE_MS = 550L
  * CameraX 언바인드 뒤 한 번의 ARCore 구간에서 여러 장의 포즈 메타를 채운 뒤 저장한다.
  * - **1장**: `images/img_000000.jpg` + 루트 `poses.json`(서버 main.py와 동일).
  * - **2장 이상(연속 촬영)**: `images/img_######.jpg` + 루트 병합 `poses.json` 단일 ZIP.
+ * 연속 촬영 이미지의 데이터셋 폴더 복사는 [copyContinuousBurstImageFilesToDatasetFolder]에서 별도 수행.
  *
  * @return 메타 누락 또는 저장 IO 실패로 집계된 횟수(연속 촬영 배치는 저장 실패 시 +1)
  */
@@ -451,8 +452,8 @@ fun CameraScreen(
     val continuousBurstSilentCancel = remember { AtomicBoolean(false) }
     /** 단일·연속·동영상 ARCore 후처리가 동시에 카메라를 잡지 않도록 직렬화 */
     val arcoreExclusiveMutex = remember { Mutex() }
-    /** 연속 촬영: 샷 루프에서는 쌓아두고 종료 시 한 번에 배치 저장 */
-    val continuousArcorePending = remember {
+    /** 연속 촬영: 종료 시 ARCore 배치·데이터셋 폴더 복사에 사용 (촬영 순서 유지) */
+    val continuousBurstSessionFiles = remember {
         Collections.synchronizedList(ArrayList<File>(32))
     }
     var previewView: PreviewView? by remember { mutableStateOf(null) }
@@ -1641,7 +1642,7 @@ fun CameraScreen(
                                                 return@let
                                             }
                                             continuousBurstJob?.cancel()
-                                            continuousArcorePending.clear()
+                                            continuousBurstSessionFiles.clear()
                                             // 사고 현장: 한 번의 연속 촬영 세션 동안만 격자 공유 → 세션 시작 시 초기화
                                             if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
                                                 scanCoverage.reset()
@@ -1699,9 +1700,7 @@ fun CameraScreen(
                                                             }
                                                         }
 
-                                                        if (useArcoreMeta) {
-                                                            continuousArcorePending.add(file)
-                                                        }
+                                                        continuousBurstSessionFiles.add(file)
 
                                                         n++
                                                         withContext(Dispatchers.Main) {
@@ -1735,40 +1734,73 @@ fun CameraScreen(
                                                     }
                                                     throw e
                                                 } finally {
-                                                    if (useArcoreMeta) {
-                                                        val batch = synchronized(continuousArcorePending) {
-                                                            ArrayList(continuousArcorePending).also {
-                                                                continuousArcorePending.clear()
-                                                            }
+                                                    val batch = synchronized(continuousBurstSessionFiles) {
+                                                        ArrayList(continuousBurstSessionFiles).also {
+                                                            continuousBurstSessionFiles.clear()
                                                         }
-                                                        if (batch.isNotEmpty()) {
-                                                            withContext(NonCancellable) {
-                                                                try {
-                                                                    val extraFails = arcoreExclusiveMutex.withLock {
-                                                                        runBatchedArcoreMetadataSave(
-                                                                            context,
-                                                                            batch,
-                                                                            prepareExclusiveCamera = {
-                                                                                withContext(Dispatchers.Main) {
-                                                                                    ProcessCameraProvider
-                                                                                        .getInstance(context)
-                                                                                        .get()
-                                                                                        .unbindAll()
-                                                                                    isCameraReady = false
-                                                                                }
-                                                                            },
-                                                                            requestCameraRebind = {
-                                                                                withContext(Dispatchers.Main) {
-                                                                                    cameraRebindNonce++
-                                                                                }
-                                                                            },
-                                                                        )
-                                                                    }
+                                                    }
+                                                    if (batch.isNotEmpty()) {
+                                                        withContext(NonCancellable) {
+                                                            try {
+                                                                if (useArcoreMeta) {
+                                                                    val extraFails =
+                                                                        arcoreExclusiveMutex.withLock {
+                                                                            runBatchedArcoreMetadataSave(
+                                                                                context,
+                                                                                batch,
+                                                                                prepareExclusiveCamera = {
+                                                                                    withContext(Dispatchers.Main) {
+                                                                                        ProcessCameraProvider
+                                                                                            .getInstance(context)
+                                                                                            .get()
+                                                                                            .unbindAll()
+                                                                                        isCameraReady = false
+                                                                                    }
+                                                                                },
+                                                                                requestCameraRebind = {
+                                                                                    withContext(Dispatchers.Main) {
+                                                                                        cameraRebindNonce++
+                                                                                    }
+                                                                                },
+                                                                            )
+                                                                        }
                                                                     arcoreFailAccum += extraFails
                                                                     delay(CAMERA_REBIND_WAIT_AFTER_ARCORE_MS)
-                                                                } catch (e: Exception) {
-                                                                    e.printStackTrace()
+                                                                }
+                                                            } catch (e: Exception) {
+                                                                e.printStackTrace()
+                                                                if (useArcoreMeta) {
                                                                     arcoreFailAccum += batch.size
+                                                                }
+                                                            }
+                                                            try {
+                                                                val ds = copyContinuousBurstImageFilesToDatasetFolder(
+                                                                    context.applicationContext,
+                                                                    batch,
+                                                                )
+                                                                withContext(Dispatchers.Main) {
+                                                                    if (ds.successCount > 0) {
+                                                                        Toast.makeText(
+                                                                            context.applicationContext,
+                                                                            ds.message,
+                                                                            Toast.LENGTH_SHORT,
+                                                                        ).show()
+                                                                    } else {
+                                                                        Toast.makeText(
+                                                                            context.applicationContext,
+                                                                            ds.message,
+                                                                            Toast.LENGTH_LONG,
+                                                                        ).show()
+                                                                    }
+                                                                }
+                                                            } catch (e: Exception) {
+                                                                e.printStackTrace()
+                                                                withContext(Dispatchers.Main) {
+                                                                    Toast.makeText(
+                                                                        context.applicationContext,
+                                                                        "연속 촬영: 데이터셋 저장 오류",
+                                                                        Toast.LENGTH_SHORT,
+                                                                    ).show()
                                                                 }
                                                             }
                                                         }
