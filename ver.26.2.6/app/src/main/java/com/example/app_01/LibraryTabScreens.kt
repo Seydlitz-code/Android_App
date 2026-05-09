@@ -3,6 +3,7 @@ package com.example.app_01
 import android.Manifest
 import android.app.PendingIntent
 import android.content.Context
+import android.content.ContentResolver
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.hardware.Sensor
@@ -1385,6 +1386,18 @@ fun GalleryScreen(
     var pending3DSourceTab by remember { mutableStateOf<LibraryTab?>(null) }
     var pending3DGalleryUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var pending3DDatasetFolders by remember { mutableStateOf<List<String>>(emptyList()) }
+    /** ARCore 라이브러리 ZIP 선택 시 서버 전송용 절대 경로 목록 */
+    var pending3DArcoreZipPaths by remember { mutableStateOf<List<String>>(emptyList()) }
+    /** 데이터셋 폴더 업로드 시 추가로 보낼 ARCore ZIP(content Uri, 선택) */
+    var pending3DArcoreZipUriForDataset by remember { mutableStateOf<Uri?>(null) }
+    /** 3D 모델링 다이얼로그에서 ARCore ZIP을 앱 ARCore 라이브러리에서 고를 때 */
+    var showDatasetArcoreLibraryPicker by remember { mutableStateOf(false) }
+    LaunchedEffect(show3DModelingDialog) {
+        if (!show3DModelingDialog) showDatasetArcoreLibraryPicker = false
+    }
+    val datasetArcoreZipChoices = remember(arcoreLibraryFiles) {
+        arcoreLibraryFiles.filter { it.isFile && it.name.endsWith(".zip", ignoreCase = true) }
+    }
     var sam3ProgressPercent by remember { mutableStateOf(0) }
     var sam3ProgressMessage by remember { mutableStateOf("") }
     var sam3ResultMessage by remember { mutableStateOf<String?>(null) }
@@ -1790,6 +1803,43 @@ fun GalleryScreen(
                                 libraryTab == LibraryTab.JSON_LIBRARY ||
                                 libraryTab == LibraryTab.AR_CORE_LIBRARY)
                     if (showLibraryItemDeleteAction) {
+                        if (libraryTab == LibraryTab.AR_CORE_LIBRARY) {
+                            IconButton(
+                                onClick = {
+                                    if (isUploading || isTransferring) {
+                                        Toast.makeText(
+                                            context,
+                                            "이미 업로드 중입니다.",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                        return@IconButton
+                                    }
+                                    val zips = selectedLibraryDeletePaths.map { File(it) }
+                                        .filter { it.isFile && it.name.endsWith(".zip", ignoreCase = true) }
+                                    if (zips.isEmpty()) {
+                                        Toast.makeText(
+                                            context,
+                                            "서버 전송은 압축(ZIP) 파일만 가능합니다.",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                        return@IconButton
+                                    }
+                                    pending3DArcoreZipPaths = zips.map { f ->
+                                        runCatching { f.canonicalPath }.getOrDefault(f.absolutePath)
+                                    }
+                                    pending3DSourceTab = LibraryTab.AR_CORE_LIBRARY
+                                    modelingPromptText = ""
+                                    modelingPromptError = false
+                                    show3DModelingDialog = true
+                                },
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.CloudUpload,
+                                    contentDescription = "서버로 전송",
+                                    tint = palette.onBackground,
+                                )
+                            }
+                        }
                         IconButton(onClick = { showDeleteLibraryItemsConfirm = true }) {
                             Icon(
                                 imageVector = Icons.Filled.Delete,
@@ -3079,6 +3129,7 @@ fun GalleryScreen(
                                                     // 3D 모델링 프롬프트 팝업을 먼저 표시
                                                     pending3DSourceTab = LibraryTab.DATASET
                                                     pending3DDatasetFolders = selectedDatasetFolders.toList()
+                                                    pending3DArcoreZipUriForDataset = null
                                                     modelingPromptText = ""
                                                     modelingPromptError = false
                                                     show3DModelingDialog = true
@@ -3628,7 +3679,7 @@ fun GalleryScreen(
                     Icon(
                         imageVector = Icons.Filled.CloudUpload,
                         contentDescription = "업로드",
-                        tint = if (selectedItems.isNotEmpty()) Color(0xFF9CD83B) else Color(0xFF9CD83B).copy(alpha = 0.4f),
+                        tint = if (selectedItems.isNotEmpty()) palette.onBackground else palette.onBackground.copy(alpha = 0.35f),
                         modifier = Modifier
                             .size(32.dp)
                             .clickable {
@@ -3644,6 +3695,7 @@ fun GalleryScreen(
                                         // 3D 모델링 프롬프트 팝업을 먼저 표시
                                         pending3DSourceTab = LibraryTab.GALLERY
                                         pending3DGalleryUris = selectedItems.toList()
+                                        pending3DArcoreZipUriForDataset = null
                                         modelingPromptText = ""
                                         modelingPromptError = false
                                         show3DModelingDialog = true
@@ -4922,6 +4974,8 @@ fun GalleryScreen(
         if (show3DModelingDialog) {
             val isValid3DPrompt = modelingPromptText.isNotEmpty() && !modelingPromptError
             val noServerResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
+            val modelingPromptFieldBg =
+                if (palette.isDark) Color(0xFF1E1E1E) else palette.surfaceCardAlt
 
             Dialog(onDismissRequest = { show3DModelingDialog = false }) {
                 Box(
@@ -4967,10 +5021,10 @@ fun GalleryScreen(
                                 focusedBorderColor = if (modelingPromptError) Color(0xFFFF5252) else Color(0xFF9CD83B),
                                 unfocusedBorderColor = if (modelingPromptError) Color(0xFFFF5252) else palette.onBackground.copy(alpha = 0.4f),
                                 cursorColor = Color(0xFF9CD83B),
-                                focusedContainerColor = Color(0xFF1E1E1E),
-                                unfocusedContainerColor = Color(0xFF1E1E1E),
+                                focusedContainerColor = modelingPromptFieldBg,
+                                unfocusedContainerColor = modelingPromptFieldBg,
                                 errorBorderColor = Color(0xFFFF5252),
-                                errorContainerColor = Color(0xFF1E1E1E),
+                                errorContainerColor = modelingPromptFieldBg,
                                 errorTextColor = palette.onBackground,
                                 errorCursorColor = Color(0xFFFF5252)
                             ),
@@ -4985,6 +5039,66 @@ fun GalleryScreen(
                             )
                         } else {
                             Spacer(modifier = Modifier.height(6.dp + 18.sp.value.dp))
+                        }
+                        if (pending3DSourceTab == LibraryTab.DATASET) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "ARCore ZIP (선택) · poses.json 등이 포함된 ZIP",
+                                color = palette.onBackground.copy(alpha = 0.85f),
+                                fontSize = 13.sp,
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            val arcoreZipLabel = pending3DArcoreZipUriForDataset?.let { u ->
+                                if (u.scheme == ContentResolver.SCHEME_FILE || u.scheme.isNullOrEmpty()) {
+                                    u.path?.let { p -> File(p).name }
+                                } else {
+                                    context.contentResolver.query(
+                                        u,
+                                        arrayOf(OpenableColumns.DISPLAY_NAME),
+                                        null,
+                                        null,
+                                        null,
+                                    )?.use { c ->
+                                        if (c.moveToFirst()) c.getString(0) else null
+                                    } ?: u.lastPathSegment
+                                }
+                            } ?: "선택 안 됨"
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = arcoreZipLabel ?: "ZIP",
+                                    color = palette.onBackground.copy(alpha = 0.7f),
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "선택",
+                                    color = palette.brand,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { showDatasetArcoreLibraryPicker = true }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                )
+                                if (pending3DArcoreZipUriForDataset != null) {
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "지우기",
+                                        color = palette.onBackground.copy(alpha = 0.75f),
+                                        fontSize = 13.sp,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .clickable { pending3DArcoreZipUriForDataset = null }
+                                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    )
+                                }
+                            }
                         }
                         Spacer(modifier = Modifier.height(16.dp))
                         Row(
@@ -5083,6 +5197,21 @@ fun GalleryScreen(
                                                             zipPrefix = "dataset"
                                                         )
                                                         val bundle = if (zipFile != null) {
+                                                            val arcoreUri = pending3DArcoreZipUriForDataset
+                                                            var gsFile: File? = null
+                                                            if (arcoreUri != null) {
+                                                                gsFile =
+                                                                    copyContentUriToTempZipFile(context, arcoreUri)
+                                                                if (gsFile == null) {
+                                                                    mainHandler.post {
+                                                                        Toast.makeText(
+                                                                            context,
+                                                                            "ARCore ZIP 복사에 실패했습니다. 데이터셋만 전송합니다.",
+                                                                            Toast.LENGTH_LONG,
+                                                                        ).show()
+                                                                    }
+                                                                }
+                                                            }
                                                             uploadZipAndRunPipeline(
                                                                 context = context,
                                                                 zipFile = zipFile,
@@ -5090,12 +5219,16 @@ fun GalleryScreen(
                                                                 onProgress = { p, msg ->
                                                                     uploadProgress = p to 100
                                                                     uploadMessage = msg
-                                                                }
+                                                                },
+                                                                gsZipFile = gsFile,
+                                                                contentDispositionFilename = SERVER_PIPELINE_ZIP_NAME_DATASET,
+                                                                contentDispositionGsFilename = SERVER_PIPELINE_ZIP_NAME_ARCORE,
                                                             )
                                                         } else null
                                                         mainHandler.post {
                                                             isUploading = false
                                                             if (bundle != null) {
+                                                                pending3DArcoreZipUriForDataset = null
                                                                 onServerPipelineCompleteBundleChange(bundle)
                                                                 libraryModelThumbRefresh++
                                                                 selectedDatasetFolders = emptySet()
@@ -5116,11 +5249,154 @@ fun GalleryScreen(
                                                     }
                                                 }
                                             }
+                                            LibraryTab.AR_CORE_LIBRARY -> {
+                                                val pathsSnapshot = pending3DArcoreZipPaths
+                                                isUploading = true
+                                                uploadProgress = 0 to 100
+                                                uploadMessage = "업로드 준비 중..."
+                                                CoroutineScope(Dispatchers.IO).launch {
+                                                    val mainHandler = Handler(Looper.getMainLooper())
+                                                    try {
+                                                        var lastBundle: ServerPipelineResultBundle? = null
+                                                        var anyFail = false
+                                                        for ((idx, pathStr) in pathsSnapshot.withIndex()) {
+                                                            val src = File(pathStr)
+                                                            if (!src.isFile || !src.name.endsWith(".zip", ignoreCase = true)) {
+                                                                anyFail = true
+                                                                continue
+                                                            }
+                                                            val tmp = File(
+                                                                context.cacheDir,
+                                                                "arcore_upload_${System.currentTimeMillis()}_${idx}_${src.name}",
+                                                            )
+                                                            src.copyTo(tmp, overwrite = true)
+                                                            val bundle = uploadZipAndRunPipeline(
+                                                                context = context,
+                                                                zipFile = tmp,
+                                                                prompt = promptSnapshot,
+                                                                onProgress = { p, msg ->
+                                                                    mainHandler.post {
+                                                                        uploadProgress = p to 100
+                                                                        uploadMessage = msg
+                                                                    }
+                                                                },
+                                                                contentDispositionFilename = SERVER_PIPELINE_ZIP_NAME_ARCORE,
+                                                            )
+                                                            if (bundle != null) {
+                                                                lastBundle = bundle
+                                                            } else {
+                                                                anyFail = true
+                                                            }
+                                                        }
+                                                        mainHandler.post {
+                                                            isUploading = false
+                                                            if (lastBundle != null) {
+                                                                onServerPipelineCompleteBundleChange(lastBundle)
+                                                                libraryModelThumbRefresh++
+                                                                selectedLibraryDeletePaths = emptySet()
+                                                                if (anyFail) {
+                                                                    Toast.makeText(
+                                                                        context,
+                                                                        "일부 ZIP 전송에 실패했습니다.",
+                                                                        Toast.LENGTH_LONG,
+                                                                    ).show()
+                                                                }
+                                                            } else {
+                                                                uploadResultPopupMessage =
+                                                                    if (uploadMessage == noServerResponseMsg) noServerResponseMsg else "업로드 실패"
+                                                                showUploadResultPopup = true
+                                                                if (uploadMessage != noServerResponseMsg) {
+                                                                    uploadMessage = "업로드 실패"
+                                                                }
+                                                            }
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        e.printStackTrace()
+                                                        mainHandler.post {
+                                                            isUploading = false
+                                                            uploadMessage = "업로드 실패"
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             else -> {}
                                         }
                                     }
                                     .padding(horizontal = 16.dp, vertical = 8.dp)
                             )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showDatasetArcoreLibraryPicker) {
+            Dialog(onDismissRequest = { showDatasetArcoreLibraryPicker = false }) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(palette.dialogSurface, RoundedCornerShape(16.dp))
+                        .padding(20.dp),
+                ) {
+                    Column {
+                        Text(
+                            text = "ARCore 라이브러리",
+                            color = palette.onBackground,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "전송에 사용할 ZIP을 선택하세요.",
+                            color = palette.onBackgroundMuted,
+                            fontSize = 14.sp,
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        if (datasetArcoreZipChoices.isEmpty()) {
+                            Text(
+                                text = "ARCore 라이브러리에 ZIP이 없습니다.\n라이브러리 탭에서 파일을 추가한 뒤 다시 시도하세요.",
+                                color = palette.onBackgroundMuted,
+                                fontSize = 14.sp,
+                                lineHeight = 20.sp,
+                            )
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 360.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                items(datasetArcoreZipChoices, key = { it.absolutePath }) { f ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .clickable {
+                                                pending3DArcoreZipUriForDataset = Uri.fromFile(f)
+                                                showDatasetArcoreLibraryPicker = false
+                                            }
+                                            .padding(horizontal = 12.dp, vertical = 14.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(
+                                            text = f.name,
+                                            color = palette.onBackground,
+                                            fontSize = 14.sp,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            TextButton(onClick = { showDatasetArcoreLibraryPicker = false }) {
+                                Text(text = "닫기", color = palette.brand)
+                            }
                         }
                     }
                 }

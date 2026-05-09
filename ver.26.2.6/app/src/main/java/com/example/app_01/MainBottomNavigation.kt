@@ -39,7 +39,7 @@ fun BottomNavigationBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(1.dp)
-                .background(Color.Black)
+                .background(palette.divider)
         )
         Row(
             modifier = Modifier

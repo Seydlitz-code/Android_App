@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import org.json.JSONObject
 import java.io.File
+import java.util.LinkedHashMap
 
 /**
  * 서버 파이프라인 결과 폴더 `models/ply/server_task_{taskId}/` 인덱싱.
@@ -14,6 +15,51 @@ data class ServerTaskManifestInfo(
     val directory: File,
     val filesByKey: Map<String, File>,
 )
+
+internal fun preferredServerPushArtifactName(taskId: String, key: String, original: String): String {
+    return when (key) {
+        "ply" -> "result_${taskId}.ply"
+        "glb" -> "result_${taskId}.glb"
+        "quality_txt" -> "quality_report.txt"
+        "quality_png" -> "quality_report.png"
+        "analysis_json" -> "analysis_result.json"
+        "vehicle_csv" -> "vehicle_analysis.csv"
+        "contact_csv" -> "contact_analysis.csv"
+        "contact_points_csv" -> "contact_candidate_points.csv"
+        "topview" -> "topview.png"
+        "sideview" -> "sideview.png"
+        else -> original.ifBlank { "$key.bin" }
+    }
+}
+
+/**
+ * 서버가 [callback_url]로 multipart POST 한 결과 파일을 `server_task_{taskId}` 아래로 복사해 번들을 만듭니다.
+ */
+internal fun buildServerPipelineBundleFromPushedFiles(
+    context: Context,
+    taskId: String,
+    partFiles: Map<String, File>,
+): ServerPipelineResultBundle? {
+    if (partFiles.isEmpty()) return null
+    val plyDir = ModelLibraryPaths.plyDir(context)
+    val outDir = File(plyDir, "server_task_$taskId").apply { mkdirs() }
+    val map = LinkedHashMap<String, File>()
+    for ((key, src) in partFiles) {
+        if (!src.exists() || !src.isFile) continue
+        val destName = preferredServerPushArtifactName(taskId, key, src.name)
+        val dest = File(outDir, destName)
+        try {
+            src.copyTo(dest, overwrite = true)
+        } catch (_: Exception) {
+            continue
+        }
+        if (dest.exists() && dest.length() > 0L) map[key] = dest
+    }
+    val plyFile = map["ply"] ?: return null
+    writeServerTaskArtifactManifest(outDir, taskId, map)
+    JsonLibrary.ingestFromPipelineOutputDir(context, outDir, taskId, map)
+    return ServerPipelineResultBundle(taskId, plyFile, outDir, map)
+}
 
 internal fun writeServerTaskArtifactManifest(outDir: File, taskId: String, filesByKey: Map<String, File>) {
     try {

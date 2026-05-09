@@ -21,6 +21,7 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.view.Surface
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
@@ -286,6 +287,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
@@ -300,11 +302,16 @@ import java.io.FileOutputStream
 import java.util.TimeZone
 import java.io.IOException
 import java.io.SyncFailedException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.text.SimpleDateFormat
+import java.util.Collections
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.sqrt
+import java.util.zip.ZipFile
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -319,6 +326,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLException
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 import javax.net.ssl.HostnameVerifier
@@ -326,15 +334,30 @@ import java.security.cert.X509Certificate
 
 // 서버 설정
 private const val UPLOAD_ENDPOINT = "/upload"
+/** FastAPI 기본 문서 — 연결 테스트용 GET(가벼움). `/upload`는 POST만 있어 HEAD/GET이 405여도 “테스트 성공”으로 오해할 수 있음 */
+private const val SERVER_CONNECTIVITY_GET_PATH = "/docs"
 private const val STATUS_ENDPOINT = "/status"
 private const val DOWNLOAD_ENDPOINT = "/download"
 /** FastAPI `GET /results/{task_id}` — 결과 파일 목록 + 개별 다운로드 URL */
 private const val RESULTS_ENDPOINT = "/results"
-/** DA3/3DGS API (mobile_api_guide) — `POST /upload` multipart 파트 이름·Content-Disposition 파일명 */
-private const val SERVER_UPLOAD_PART_PC = "file_pc"
-private const val SERVER_UPLOAD_PART_GS = "file_gs"
-private const val SERVER_UPLOAD_FILENAME_PC = "pc.zip"
-private const val SERVER_UPLOAD_FILENAME_GS = "gs.zip"
+/** FastAPI `POST /upload` 의 `file_pc: UploadFile = File(...)` 필드명 */
+internal const val SERVER_PIPELINE_PART_PC = "file_pc"
+/** FastAPI `file_gs: Optional[UploadFile] = File(None)` — 3DGS·보조 ZIP(선택) */
+internal const val SERVER_PIPELINE_PART_GS = "file_gs"
+/**
+ * `POST /upload` 시 각 파일 파트의 Content-Disposition `filename=` 값.
+ * FastAPI `UploadFile.filename`은 이 이름과 동일하며, 로컬 [File.name]과 달라도 됨.
+ * [main.py] 는 `.zip` 확장자만 검사하지만, 로그·문서와 맞추기 위해 고정명을 씀.
+ */
+internal const val SERVER_PIPELINE_ZIP_NAME_DATASET = "dataset.zip"
+internal const val SERVER_PIPELINE_ZIP_NAME_ARCORE = "arcore.zip"
+
+/** multipart `filename=` — 경로 제거·빈 값은 fallback·`.zip` 보장. */
+private fun multipartZipFilenameForServer(raw: String, fallback: String): String {
+    val leaf = raw.trim().substringAfterLast('/').substringAfterLast('\\').trim()
+    val base = leaf.ifBlank { fallback }
+    return if (base.endsWith(".zip", ignoreCase = true)) base else "$base.zip"
+}
 /**
  * 네트워크→파일 스트리밍 시 한 번에 읽는 크기.
  * 과대(예: 8MB)는 읽기 버퍼 + [BufferedOutputStream] 버퍼와 겹쳐 저메모리 기기에서 OOM을 유발할 수 있음.
@@ -3955,52 +3978,214 @@ internal suspend fun createZipFromFolders(
 }
 
 /**
- * 미디어 파일을 서버에 업로드하는 함수 (`mobile_api_guide` DA3 API).
- * @param zipFile DA3용 ZIP → 폼 필드 [SERVER_UPLOAD_PART_PC], 전송 파일명 [SERVER_UPLOAD_FILENAME_PC]
- * @param gsZipFile 선택: 3DGS용 ZIP → [SERVER_UPLOAD_PART_GS] / [SERVER_UPLOAD_FILENAME_GS]. null이면 미전송(서버에서 3DGS 스킵)
- * @param prompt 서버 `text_prompt` (선택)
+ * ARCore ZIP 등을 캐시로 복사합니다. `content://`·`file://`([Uri.fromFile]) 모두 지원합니다.
+ *
+ * 이전에는 [ContentResolver.openInputStream] 만 사용해 **`file` 스킴에서 null** 이 되는 경우가 많아
+ * 서버로 `file_gs` 가 빠지고 ARCore ZIP이 전송되지 않을 수 있었습니다.
+ */
+internal fun copyContentUriToTempZipFile(context: Context, uri: Uri): File? {
+    val tmp = File(context.cacheDir, "picked_arcore_${System.currentTimeMillis()}.zip")
+    return try {
+        when (uri.scheme?.lowercase(Locale.US)) {
+            null, "", "file" -> {
+                val path = uri.path ?: return null
+                val src = File(path)
+                if (!src.isFile || !src.canRead() || src.length() <= 0L) return null
+                src.copyTo(tmp, overwrite = true)
+            }
+            else -> {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(tmp).use { output -> input.copyTo(output) }
+                } ?: return null
+            }
+        }
+        if (tmp.isFile && tmp.length() > 0L) tmp else {
+            tmp.delete()
+            null
+        }
+    } catch (_: Exception) {
+        try {
+            tmp.delete()
+        } catch (_: Exception) {
+        }
+        null
+    }
+}
+
+private fun zipEntryPathIsPosesJson(entryName: String): Boolean {
+    val n = entryName.replace('\\', '/').trimStart('/')
+    return n.equals(ArcoreServerZipLayout.POSES_JSON, ignoreCase = true) ||
+        n.endsWith("/${ArcoreServerZipLayout.POSES_JSON}", ignoreCase = true)
+}
+
+/**
+ * 서버가 `file_pc`만 전처리하고 `file_gs`의 poses를 **별도 병합**하지 않을 때만 쓰는 클라이언트 병합용.
+ * 일반적으로는 `file_pc`=데이터셋, `file_gs`=ARCore 로 각각 전송하는 편이 안전합니다.
+ */
+internal suspend fun mergeArcorePosesIntoDatasetZip(
+    datasetZip: File,
+    arcoreZip: File,
+    context: Context,
+): File? = withContext(Dispatchers.IO) {
+    if (!datasetZip.isFile || !arcoreZip.isFile) return@withContext null
+    var outFile: File? = null
+    try {
+        val posesEntryName = ZipFile(arcoreZip).use { zf ->
+            Collections.list(zf.entries())
+                .filter { !it.isDirectory && zipEntryPathIsPosesJson(it.name) }
+                .minByOrNull { it.name.replace('\\', '/').count { ch -> ch == '/' } }
+                ?.name
+        } ?: return@withContext null
+
+        outFile = File(
+            context.getExternalFilesDir(null),
+            "dataset_arcore_merged_${
+                SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US).format(System.currentTimeMillis())
+            }.zip",
+        )
+
+        ZipOutputStream(FileOutputStream(outFile)).use { zos ->
+            ZipFile(datasetZip).use { dzf ->
+                Collections.list(dzf.entries()).forEach { e ->
+                    if (e.isDirectory) return@forEach
+                    val name = e.name.replace('\\', '/')
+                    if (zipEntryPathIsPosesJson(name)) return@forEach
+                    zos.putNextEntry(ZipEntry(name))
+                    dzf.getInputStream(e).use { ins -> ins.copyTo(zos) }
+                    zos.closeEntry()
+                }
+            }
+            ZipFile(arcoreZip).use { azf ->
+                val e = azf.getEntry(posesEntryName) ?: return@use
+                zos.putNextEntry(ZipEntry(ArcoreServerZipLayout.POSES_JSON))
+                azf.getInputStream(e).use { ins -> ins.copyTo(zos) }
+                zos.closeEntry()
+            }
+        }
+        outFile
+    } catch (e: Exception) {
+        e.printStackTrace()
+        try {
+            outFile?.delete()
+        } catch (_: Exception) {
+        }
+        null
+    }
+}
+
+/**
+ * ZIP 업로드(POST /upload) 직후 서버가 돌려준 task_id 또는 실패 사유.
+ */
+internal data class ServerUploadStartResult(
+    val taskId: String?,
+    val errorDetail: String?,
+)
+
+private fun parseFastApiErrorDetail(body: String?): String? {
+    if (body.isNullOrBlank()) return null
+    return try {
+        val o = JSONObject(body)
+        if (!o.has("detail")) return null
+        when (val d = o.get("detail")) {
+            is String -> d
+            is JSONArray -> {
+                val sb = StringBuilder()
+                for (i in 0 until d.length()) {
+                    val item = d.optJSONObject(i)
+                    val msg = item?.optString("msg")
+                        ?.takeIf { it.isNotBlank() }
+                        ?: item?.toString()
+                    if (!msg.isNullOrBlank()) {
+                        if (sb.isNotEmpty()) sb.append("; ")
+                        sb.append(msg.trim())
+                    }
+                }
+                sb.toString().takeIf { it.isNotEmpty() }
+            }
+            else -> d.toString().trim().takeIf { it.isNotEmpty() }
+        }
+    } catch (_: JSONException) {
+        null
+    }
+}
+
+/**
+ * 미디어 ZIP을 서버 `POST /upload` 로 전송 (`file_pc` 필수, `file_gs` 선택).
+ *
+ * @param zipPcFile DA3 파이프라인용 메인 ZIP → `file_pc`
+ * @param gsZipFile 선택. 서버가 `file_gs`에 ARCore ZIP을 받아 `poses.json`을 병합하는 경우 여기에 전달 (`file_pc`는 데이터셋만).
+ * @param contentDispositionPcFilename `file_pc` Content-Disposition 파일명
+ * @param contentDispositionGsFilename `file_gs` Content-Disposition 파일명
  */
 internal suspend fun startServerTaskWithZip(
     context: Context,
-    zipFile: File,
+    zipPcFile: File,
     prompt: String = "",
+    contentDispositionPcFilename: String = SERVER_PIPELINE_ZIP_NAME_DATASET,
     gsZipFile: File? = null,
-): String? {
+    contentDispositionGsFilename: String = SERVER_PIPELINE_ZIP_NAME_ARCORE,
+    callbackUrl: String? = null,
+): ServerUploadStartResult {
     return withContext(Dispatchers.IO) {
         try {
             val serverAddress = getServerAddress(context)
             val serverPort = getServerPort(context)
             val useHttps = getUseHttps(context)
+            // 대용량 multipart: 전체 callTimeout·write 제한이 짧으면 업로드 중간에 끊길 수 있음
             val client = createOkHttpClient(useHttps).newBuilder()
-                .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(120, TimeUnit.SECONDS)
-                .writeTimeout(300, TimeUnit.SECONDS)
-                .callTimeout(900, TimeUnit.SECONDS)
+                .connectTimeout(60, TimeUnit.SECONDS)
+                .writeTimeout(0, TimeUnit.SECONDS)
+                .readTimeout(10, TimeUnit.MINUTES)
+                .callTimeout(0, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
                 .build()
 
-            if (!zipFile.name.endsWith(".zip", ignoreCase = true)) {
-                return@withContext null
+            if (!zipPcFile.name.endsWith(".zip", ignoreCase = true)) {
+                return@withContext ServerUploadStartResult(null, "ZIP 파일만 업로드할 수 있습니다.")
             }
-            if (gsZipFile != null && !gsZipFile.name.endsWith(".zip", ignoreCase = true)) {
-                return@withContext null
+            if (!zipPcFile.isFile || !zipPcFile.canRead()) {
+                return@withContext ServerUploadStartResult(null, "업로드할 파일을 읽을 수 없습니다.")
             }
+            val gs = gsZipFile
+            if (gs != null) {
+                if (!gs.name.endsWith(".zip", ignoreCase = true)) {
+                    return@withContext ServerUploadStartResult(null, "file_gs 는 ZIP 파일만 허용됩니다.")
+                }
+                if (!gs.isFile || !gs.canRead() || gs.length() <= 0L) {
+                    return@withContext ServerUploadStartResult(null, "file_gs 파일을 읽을 수 없습니다.")
+                }
+            }
+
+            val pcPartName = multipartZipFilenameForServer(
+                contentDispositionPcFilename,
+                SERVER_PIPELINE_ZIP_NAME_DATASET,
+            )
+            val gsPartName = multipartZipFilenameForServer(
+                contentDispositionGsFilename,
+                SERVER_PIPELINE_ZIP_NAME_ARCORE,
+            )
 
             val multipartBuilder = MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
                 .addFormDataPart(
-                    SERVER_UPLOAD_PART_PC,
-                    SERVER_UPLOAD_FILENAME_PC,
-                    zipFile.asRequestBody("application/zip".toMediaType())
+                    SERVER_PIPELINE_PART_PC,
+                    pcPartName,
+                    zipPcFile.asRequestBody("application/zip".toMediaType())
                 )
-            if (gsZipFile != null) {
+            if (gs != null) {
                 multipartBuilder.addFormDataPart(
-                    SERVER_UPLOAD_PART_GS,
-                    SERVER_UPLOAD_FILENAME_GS,
-                    gsZipFile.asRequestBody("application/zip".toMediaType())
+                    SERVER_PIPELINE_PART_GS,
+                    gsPartName,
+                    gs.asRequestBody("application/zip".toMediaType())
                 )
             }
-            if (prompt.isNotBlank()) {
-                multipartBuilder.addFormDataPart("text_prompt", prompt)
+            val p = prompt.trim()
+            if (p.isNotEmpty()) {
+                multipartBuilder.addFormDataPart("text_prompt", p)
+            }
+            val cu = callbackUrl?.trim().orEmpty()
+            if (cu.isNotEmpty()) {
+                multipartBuilder.addFormDataPart("callback_url", cu)
             }
             val requestBody = multipartBuilder.build()
 
@@ -4012,19 +4197,69 @@ internal suspend fun startServerTaskWithZip(
                 .build()
 
             val response = client.newCall(request).execute()
-            val body = response.body?.string()
-            val success = response.isSuccessful && body != null
-            response.close()
+            val body = try {
+                response.body?.string()
+            } finally {
+                response.close()
+            }
 
-            if (!success) return@withContext null
-            val json = JSONObject(body)
-            json.optString("task_id").takeIf { it.isNotBlank() }
+            if (response.isSuccessful && body != null) {
+                try {
+                    val json = JSONObject(body)
+                    val tid = json.optString("task_id").takeIf { it.isNotBlank() }
+                    if (tid != null) return@withContext ServerUploadStartResult(tid, null)
+                    return@withContext ServerUploadStartResult(
+                        null,
+                        "서버 응답에 task_id가 없습니다.",
+                    )
+                } catch (e: JSONException) {
+                    return@withContext ServerUploadStartResult(
+                        null,
+                        "서버 응답(JSON)을 해석할 수 없습니다: ${body.take(160)}",
+                    )
+                }
+            }
+
+            val apiDetail = parseFastApiErrorDetail(body)
+            val suffix = when {
+                !apiDetail.isNullOrBlank() -> ": $apiDetail"
+                !body.isNullOrBlank() -> ": ${body.trim().take(200)}"
+                else -> ""
+            }
+            return@withContext ServerUploadStartResult(
+                null,
+                "업로드 실패 (HTTP ${response.code})$suffix",
+            )
+        } catch (e: SocketTimeoutException) {
+            ServerUploadStartResult(
+                null,
+                "연결 시간 초과입니다. ZIP 용량·Wi-Fi 상태·서버 부하를 확인하세요. (${e.message})",
+            )
+        } catch (e: UnknownHostException) {
+            ServerUploadStartResult(
+                null,
+                "서버 주소를 찾을 수 없습니다(DNS). 주소·HTTPS 여부를 확인하세요. (${e.message})",
+            )
+        } catch (e: ConnectException) {
+            ServerUploadStartResult(
+                null,
+                "서버에 연결할 수 없습니다(연결 거부·방화벽·포트). (${e.message})",
+            )
+        } catch (e: SSLException) {
+            ServerUploadStartResult(
+                null,
+                "SSL/TLS 오류입니다. HTTPS 설정·인증서를 확인하세요. (${e.message})",
+            )
         } catch (e: IOException) {
-            e.printStackTrace()
-            null
+            ServerUploadStartResult(
+                null,
+                "네트워크 오류: ${e.message ?: e.javaClass.simpleName}",
+            )
         } catch (e: Exception) {
-            e.printStackTrace()
-            null
+            ServerUploadStartResult(
+                null,
+                "오류: ${e.message ?: e.javaClass.simpleName}",
+            )
         }
     }
 }
@@ -4527,9 +4762,11 @@ internal suspend fun downloadPlyResult(
 internal suspend fun uploadZipAndRunPipeline(
     context: Context,
     zipFile: File,
-    gsZipFile: File? = null,
     prompt: String = "",
-    onProgress: (progress: Int, message: String) -> Unit
+    onProgress: (progress: Int, message: String) -> Unit,
+    gsZipFile: File? = null,
+    contentDispositionFilename: String = SERVER_PIPELINE_ZIP_NAME_DATASET,
+    contentDispositionGsFilename: String = SERVER_PIPELINE_ZIP_NAME_ARCORE,
 ): ServerPipelineResultBundle? {
     val taskTitle = "3D 모델 생성 중"
     val uploadStartMs = System.currentTimeMillis()
@@ -4556,31 +4793,109 @@ internal suspend fun uploadZipAndRunPipeline(
     }
     wakeLock.acquire(SERVER_PIPELINE_WAKE_MAX_MS)
 
+    val pushChannel = Channel<PipelineCallbackEvent>(Channel.UNLIMITED)
+    var pushServer: PipelineCallbackHttpServer? = null
+
     try {
-        // 1) 업로드 -> task_id 확보
-        emitProgress(5, "파일 업로드 중...")
+        // 1) 로컬 콜백 서버 (서버가 POST로 결과를 여러 번 보낼 수 있음)
+        val lanIp = getDeviceLanIpv4OrNull()
+        val starter = startPipelineCallbackServer(pushChannel)
+        pushServer = starter?.first
+        val cbPort = starter?.second
+        val callbackUrl = if (!lanIp.isNullOrBlank() && cbPort != null) {
+            "http://$lanIp:$cbPort/pipeline/callback"
+        } else {
+            null
+        }
+
+        // 2) 업로드 -> task_id 확보
+        emitProgress(
+            5,
+            if (callbackUrl != null && cbPort != null && lanIp != null) {
+                "파일 업로드 중… (${formatPipelineCallbackHint(lanIp, cbPort)})"
+            } else {
+                "파일 업로드 중… (콜백 없음 — 동일 Wi-Fi IPv4·포트 확보 시 자동 사용)"
+            },
+        )
         val noResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
-        val taskId = startServerTaskWithZip(context, zipFile, prompt, gsZipFile)
+        val startResult = startServerTaskWithZip(
+            context,
+            zipPcFile = zipFile,
+            prompt = prompt,
+            contentDispositionPcFilename = contentDispositionFilename,
+            gsZipFile = gsZipFile,
+            contentDispositionGsFilename = contentDispositionGsFilename,
+            callbackUrl = callbackUrl,
+        )
+        val taskId = startResult.taskId
         if (taskId.isNullOrBlank()) {
-            mainHandler.post { onProgress(0, noResponseMsg) }
+            val detail = startResult.errorDetail?.trim().takeUnless { it.isNullOrBlank() } ?: noResponseMsg
+            mainHandler.post { onProgress(0, detail) }
             context.stopService(Intent(context, AppForegroundService::class.java))
             return null
+        }
+
+        var pushFailureMessage: String? = null
+        var pushBundle: ServerPipelineResultBundle? = null
+
+        fun drainPushEvents() {
+            while (true) {
+                val ev = pushChannel.tryReceive().getOrNull() ?: break
+                if (ev.taskId != taskId) continue
+                val statusUpper = ev.status.uppercase(Locale.US)
+                val line = buildString {
+                    append("서버 콜백 #").append(ev.ordinal)
+                    append(" · [").append(ev.event).append("] ")
+                    append(ev.status)
+                    ev.failureMessage?.let { append(" — ").append(it) }
+                }
+                emitProgress(lastShownProgress.coerceAtLeast(25).coerceAtMost(94), line)
+                when (ev.event) {
+                    PipelineCallbackEvents.PIPELINE_FAILED -> {
+                        pushFailureMessage = ev.failureMessage ?: "서버 처리 실패"
+                    }
+                    PipelineCallbackEvents.PIPELINE_RESULT_FILES -> {
+                        if (ev.partFiles.isNotEmpty()) {
+                            buildServerPipelineBundleFromPushedFiles(context, taskId, ev.partFiles)?.let {
+                                pushBundle = it
+                            }
+                        }
+                    }
+                    else -> {
+                        when (statusUpper) {
+                            "FAILED" -> pushFailureMessage = ev.failureMessage ?: "서버 처리 실패"
+                            "COMPLETED" -> {
+                                if (ev.partFiles.isNotEmpty()) {
+                                    buildServerPipelineBundleFromPushedFiles(context, taskId, ev.partFiles)?.let {
+                                        pushBundle = it
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // 로컬 ZIP은 서버에 올라갔으면 삭제(저장공간 확보)
         try { zipFile.delete() } catch (_: Exception) {}
         try { gsZipFile?.delete() } catch (_: Exception) {}
 
-        // 2) 상태 폴링 — 처음 2분은 2초 간격, 이후 5초 간격
+        // 3) 상태 폴링 + 콜백 큐 비우기(동시에 여러 번의 POST 수신 가능)
         val start = System.currentTimeMillis()
         val timeoutMs = 30L * 60L * 1000L // 30분
         var lastServerResponseAt = System.currentTimeMillis()
         var pollCount = 0
         while (System.currentTimeMillis() - start < timeoutMs) {
+            drainPushEvents()
+            if (pushFailureMessage != null) {
+                mainHandler.post { onProgress(0, pushFailureMessage!!) }
+                context.stopService(Intent(context, AppForegroundService::class.java))
+                return null
+            }
             val st = fetchServerTaskStatus(context, taskId)
             if (st != null) {
                 lastServerResponseAt = System.currentTimeMillis()
-                // 서버 STATUS_PROGRESS(5~100) 그대로 반영 — 잘못된 키 파싱 시 0만 오므로 역행 방지는 updateNotification 내부
                 val serverPct = st.progressPercent.coerceIn(0, 100)
                 emitProgress(serverPct, st.message)
                 when (st.status) {
@@ -4591,7 +4906,6 @@ internal suspend fun uploadZipAndRunPipeline(
                     }
                 }
             } else {
-                // 90초 이상 서버 응답이 없으면 중단 (일시적 네트워크 지연 허용)
                 if (System.currentTimeMillis() - lastServerResponseAt >= 90_000L) {
                     mainHandler.post { onProgress(lastShownProgress, noResponseMsg) }
                     context.stopService(Intent(context, AppForegroundService::class.java))
@@ -4599,8 +4913,14 @@ internal suspend fun uploadZipAndRunPipeline(
                 }
             }
             pollCount++
-            // 처음 60회(2초 간격 = 2분)는 빠르게, 이후 5초 간격
             delay(if (pollCount <= 60) 2_000L else 5_000L)
+        }
+
+        drainPushEvents()
+        if (pushFailureMessage != null) {
+            mainHandler.post { onProgress(0, pushFailureMessage!!) }
+            context.stopService(Intent(context, AppForegroundService::class.java))
+            return null
         }
 
         val finalStatus = fetchServerTaskStatus(context, taskId)
@@ -4612,10 +4932,9 @@ internal suspend fun uploadZipAndRunPipeline(
             return null
         }
 
-        // 3) 결과 다운로드 (.ply)
-        // lastShownProgress 이상 값으로 고정(역행 방지): 서버가 99%를 줬다면 다운로드도 99%에서 시작
-        emitProgress(lastShownProgress.coerceAtLeast(95), "결과 다운로드 중...")
-        val bundle = downloadServerPipelineArtifacts(context, taskId, ::emitProgress) ?: run {
+        // 4) 콜백으로 PLY 등을 이미 받았으면 HTTP 재다운로드 생략
+        emitProgress(lastShownProgress.coerceAtLeast(95), "결과 정리 중…")
+        val bundle = pushBundle ?: downloadServerPipelineArtifacts(context, taskId, ::emitProgress) ?: run {
             context.stopService(Intent(context, AppForegroundService::class.java))
             return null
         }
@@ -4629,10 +4948,76 @@ internal suspend fun uploadZipAndRunPipeline(
         return null
     } finally {
         try {
+            pushServer?.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            pushChannel.close()
+        } catch (_: Exception) {
+        }
+        try {
             if (wakeLock.isHeld) wakeLock.release()
         } catch (_: Exception) {
         }
     }
+}
+
+/**
+ * 여러 ZIP을 서버 규약에 맞게 전송합니다.
+ * - **2개**: `file_pc`(데이터셋) + `file_gs`(ARCore 등) — 서버가 보조 ZIP에서 poses 병합을 지원할 때.
+ * - **3개 이상**: 호환을 위해 `file_pc` 만 있는 요청을 순차 반복(작업 여러 개).
+ */
+internal suspend fun uploadZipAndRunPipelineSequential(
+    context: Context,
+    zipJobs: List<Pair<File, String>>,
+    prompt: String = "",
+    onProgress: (progress: Int, message: String) -> Unit,
+): ServerPipelineResultBundle? {
+    if (zipJobs.isEmpty()) return null
+    if (zipJobs.size == 2) {
+        val (pc, pcName) = zipJobs[0]
+        val (gs, gsName) = zipJobs[1]
+        return uploadZipAndRunPipeline(
+            context = context,
+            zipFile = pc,
+            prompt = prompt,
+            onProgress = onProgress,
+            gsZipFile = gs,
+            contentDispositionFilename = pcName,
+            contentDispositionGsFilename = gsName,
+        )
+    }
+    if (zipJobs.size == 1) {
+        val (pc, pcName) = zipJobs[0]
+        return uploadZipAndRunPipeline(
+            context = context,
+            zipFile = pc,
+            prompt = prompt,
+            onProgress = onProgress,
+            gsZipFile = null,
+            contentDispositionFilename = pcName,
+        )
+    }
+    val n = zipJobs.size
+    var last: ServerPipelineResultBundle? = null
+    zipJobs.forEachIndexed { index, (file, dispositionName) ->
+        val sliceStart = index * 100 / n
+        val sliceEnd = (index + 1) * 100 / n
+        val sliceSpan = (sliceEnd - sliceStart).coerceAtLeast(1)
+        last = uploadZipAndRunPipeline(
+            context = context,
+            zipFile = file,
+            prompt = prompt,
+            onProgress = { p, msg ->
+                val mapped = (sliceStart + p * sliceSpan / 100).coerceIn(sliceStart, sliceEnd)
+                onProgress(mapped.coerceIn(0, 100), msg)
+            },
+            gsZipFile = null,
+            contentDispositionFilename = dispositionName,
+        )
+        if (last == null) return null
+    }
+    return last
 }
 
 internal fun listImageFiles(dir: File): List<File> {
@@ -5087,7 +5472,9 @@ private class PlySurfaceView(context: Context) : GLSurfaceView(context) {
 }
 
 /**
- * 서버 연결 테스트 함수
+ * 서버 연결 테스트 함수 (호스트·포트·프로토콜 도달 여부).
+ * [SERVER_CONNECTIVITY_GET_PATH] 로 GET 요청 — `/upload`는 POST 전용이라 이전 HEAD 방식과 결과가 어긋날 수 있음.
+ *
  * @param context 컨텍스트
  * @param serverAddress 테스트할 서버 주소 (IP 또는 도메인)
  * @param serverPort 테스트할 서버 포트
@@ -5107,16 +5494,18 @@ internal suspend fun testServerConnection(
                 .readTimeout(10, TimeUnit.SECONDS)
                 .build()
 
-            // 간단한 HEAD 요청으로 서버 연결 테스트
+            // GET으로 동일 호스트·포트에 실제 응답이 오는지 확인
             val protocol = if (useHttps) "https" else "http"
-            val url = "$protocol://$serverAddress:$serverPort$UPLOAD_ENDPOINT"
+            // 서버 도달 여부: 실제 GET(문서). `/upload` POST와 동일 호스트로 확인
+            val url = "$protocol://$serverAddress:$serverPort$SERVER_CONNECTIVITY_GET_PATH"
             val request = Request.Builder()
                 .url(url)
-                .head() // HEAD 요청으로 서버 응답 확인
+                .get()
                 .build()
 
             val response = client.newCall(request).execute()
-            val success = response.code in 200..499 // 4xx는 서버가 응답했다는 의미
+            // 연결·TLS·HTTP 응답이 오면 성공(404는 docs 비활성화 등일 수 있음)
+            val success = response.code in 200..499
             response.close()
             
             success
@@ -5398,6 +5787,11 @@ fun ServerSettingsScreen(
         Text(
             text = "업로드: $UPLOAD_ENDPOINT",
             fontSize = 14.sp,
+            color = palette.onBackgroundMuted
+        )
+        Text(
+            text = "연결 테스트: GET $SERVER_CONNECTIVITY_GET_PATH",
+            fontSize = 12.sp,
             color = palette.onBackgroundMuted
         )
         Text(

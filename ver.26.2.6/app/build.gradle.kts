@@ -102,6 +102,9 @@ dependencies {
     // Material Icons Extended
     implementation("androidx.compose.material:material-icons-extended")
     
+    // 로컬 HTTP — 서버(main.py)가 POST하는 pipeline callback_url 수신
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
+
     // OkHttp + Retrofit + Gson (AI CAD 파이프라인: API 클라이언트)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     val retrofitVer = "2.11.0"
