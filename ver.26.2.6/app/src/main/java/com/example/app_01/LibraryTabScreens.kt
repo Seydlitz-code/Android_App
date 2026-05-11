@@ -621,6 +621,8 @@ data class ServerPipelineResultBundle(
     val plyFile: File,
     val directory: File,
     val filesByKey: Map<String, File>,
+    /** 서버 3DGS 파이프라인 완료 후 뷰어 URL (폴링·콜백으로 나중에 채워질 수 있음) */
+    val gsViewerUrl: String? = null,
 )
 
 

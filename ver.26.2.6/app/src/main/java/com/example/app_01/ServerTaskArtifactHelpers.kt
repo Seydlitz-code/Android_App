@@ -61,7 +61,12 @@ internal fun buildServerPipelineBundleFromPushedFiles(
     return ServerPipelineResultBundle(taskId, plyFile, outDir, map)
 }
 
-internal fun writeServerTaskArtifactManifest(outDir: File, taskId: String, filesByKey: Map<String, File>) {
+internal fun writeServerTaskArtifactManifest(
+    outDir: File,
+    taskId: String,
+    filesByKey: Map<String, File>,
+    gsViewerUrl: String? = null,
+) {
     try {
         val o = JSONObject()
         o.put("taskId", taskId)
@@ -69,6 +74,7 @@ internal fun writeServerTaskArtifactManifest(outDir: File, taskId: String, files
         val keys = JSONObject()
         filesByKey.forEach { (k, f) -> keys.put(k, f.absolutePath) }
         o.put("filesByKey", keys)
+        if (!gsViewerUrl.isNullOrBlank()) o.put("gsViewerUrl", gsViewerUrl)
         File(outDir, ".server_artifacts.json").writeText(o.toString())
     } catch (_: Exception) {
     }

@@ -18,6 +18,10 @@ object PipelineCallbackEvents {
     const val PIPELINE_RESULT_FILES = "pipeline_result_files"
     /** 파이프라인 실패 알림 (task_id, status, message 등 텍스트만) */
     const val PIPELINE_FAILED = "pipeline_failed"
+    /** [main.py] 3DGS 완료 시 모바일 콜백 (gs_viewer_url 등 텍스트 필드) */
+    const val THREE_DGS_COMPLETED = "3DGS_COMPLETED"
+    /** [main.py] 3DGS 실패 시 모바일 콜백 */
+    const val THREE_DGS_FAILED = "3DGS_FAILED"
     /** 서버가 아직 event를 안 보낸 경우(하위 호환) */
     const val LEGACY_UNKNOWN = "legacy_unknown"
 }
@@ -34,6 +38,8 @@ data class PipelineCallbackEvent(
     val status: String,
     val summaryJson: String?,
     val failureMessage: String?,
+    /** [main.py] 3DGS 완료 콜백의 `gs_viewer_url` (텍스트 필드) */
+    val gsViewerUrl: String?,
     val partFiles: Map<String, File>,
 )
 
@@ -96,6 +102,7 @@ internal class PipelineCallbackHttpServer(
             val summary = parms["summary"]?.trim()?.takeIf { it.isNotEmpty() }
             val failureMessage = parms["message"]?.trim()?.takeIf { it.isNotEmpty() }
             val eventRaw = parms["event"]?.trim().orEmpty()
+            val gsViewerUrl = parms["gs_viewer_url"]?.trim()?.takeIf { it.isNotEmpty() }
 
             // ── 임시 파일 즉시 영속 복사 ──────────────────────────────────────
             // serve() 리턴 직후 NanoHTTPD 가 tmpPaths 의 파일을 삭제합니다.
@@ -130,6 +137,7 @@ internal class PipelineCallbackHttpServer(
                 status = status,
                 summaryJson = summary,
                 failureMessage = failureMessage,
+                gsViewerUrl = gsViewerUrl,
                 partFiles = partFiles,
             )
             outbound.trySend(ev)
@@ -168,7 +176,10 @@ internal class PipelineCallbackHttpServer(
          */
         const val MAX_PUSH_BODY_BYTES = 20L * 1024L * 1024L  // 20 MB
 
-        private val SKIP_FIELDS = setOf("task_id", "status", "summary", "message", "event")
+        private val SKIP_FIELDS = setOf(
+            "task_id", "status", "summary", "message", "event",
+            "gs_viewer_url", "gs_status", "gs_error",
+        )
     }
 }
 

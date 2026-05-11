@@ -4268,7 +4268,10 @@ internal data class ServerTaskStatus(
     val status: String,
     val progressPercent: Int,
     val message: String,
-    val downloadUrl: String?
+    val downloadUrl: String?,
+    /** 서버 [main.py] `GET /status/{task_id}` 의 3DGS 진행 상태 */
+    val gsStatus: String? = null,
+    val gsViewerUrl: String? = null,
 )
 
 internal suspend fun fetchServerTaskStatus(context: Context, taskId: String): ServerTaskStatus? {
@@ -4304,7 +4307,9 @@ internal suspend fun fetchServerTaskStatus(context: Context, taskId: String): Se
                 status = json.optString("status"),
                 progressPercent = pct,
                 message = json.optString("message", "처리 중..."),
-                downloadUrl = json.optString("download_url").takeIf { it.isNotBlank() }
+                downloadUrl = json.optString("download_url").takeIf { it.isNotBlank() },
+                gsStatus = json.optString("gs_status").takeIf { it.isNotBlank() },
+                gsViewerUrl = json.optString("gs_viewer_url").takeIf { it.isNotBlank() },
             )
         } catch (e: Exception) {
             e.printStackTrace()
@@ -4839,41 +4844,53 @@ internal suspend fun uploadZipAndRunPipeline(
 
         var pushFailureMessage: String? = null
         var pushBundle: ServerPipelineResultBundle? = null
+        var pendingGsViewerUrl: String? = null
+        var gsPushTerminal = false
 
         fun drainPushEvents() {
             while (true) {
                 val ev = pushChannel.tryReceive().getOrNull() ?: break
                 if (ev.taskId != taskId) continue
-                val statusUpper = ev.status.uppercase(Locale.US)
-                val line = buildString {
-                    append("서버 콜백 #").append(ev.ordinal)
-                    append(" · [").append(ev.event).append("] ")
-                    append(ev.status)
-                    ev.failureMessage?.let { append(" — ").append(it) }
-                }
-                emitProgress(lastShownProgress.coerceAtLeast(25).coerceAtMost(94), line)
-                when (ev.event) {
-                    PipelineCallbackEvents.PIPELINE_FAILED -> {
-                        pushFailureMessage = ev.failureMessage ?: "서버 처리 실패"
+                when {
+                    ev.event.equals(PipelineCallbackEvents.THREE_DGS_COMPLETED, ignoreCase = true) -> {
+                        ev.gsViewerUrl?.takeIf { it.isNotBlank() }?.let { pendingGsViewerUrl = it }
+                        gsPushTerminal = true
                     }
-                    PipelineCallbackEvents.PIPELINE_RESULT_FILES -> {
-                        if (ev.partFiles.isNotEmpty()) {
-                            buildServerPipelineBundleFromPushedFiles(context, taskId, ev.partFiles)?.let {
-                                pushBundle = it
-                            }
-                            // 콜백 수신 시 persist 디렉터리에 복사해 둔 임시 파일 정리
-                            ev.partFiles.values.forEach { f -> try { f.delete() } catch (_: Exception) {} }
-                        }
+                    ev.event.equals(PipelineCallbackEvents.THREE_DGS_FAILED, ignoreCase = true) -> {
+                        gsPushTerminal = true
                     }
                     else -> {
-                        when (statusUpper) {
-                            "FAILED" -> pushFailureMessage = ev.failureMessage ?: "서버 처리 실패"
-                            "COMPLETED" -> {
+                        val statusUpper = ev.status.uppercase(Locale.US)
+                        val line = buildString {
+                            append("서버 콜백 #").append(ev.ordinal)
+                            append(" · [").append(ev.event).append("] ")
+                            append(ev.status)
+                            ev.failureMessage?.let { append(" — ").append(it) }
+                        }
+                        emitProgress(lastShownProgress.coerceAtLeast(25).coerceAtMost(94), line)
+                        when (ev.event) {
+                            PipelineCallbackEvents.PIPELINE_FAILED -> {
+                                pushFailureMessage = ev.failureMessage ?: "서버 처리 실패"
+                            }
+                            PipelineCallbackEvents.PIPELINE_RESULT_FILES -> {
                                 if (ev.partFiles.isNotEmpty()) {
                                     buildServerPipelineBundleFromPushedFiles(context, taskId, ev.partFiles)?.let {
                                         pushBundle = it
                                     }
                                     ev.partFiles.values.forEach { f -> try { f.delete() } catch (_: Exception) {} }
+                                }
+                            }
+                            else -> {
+                                when (statusUpper) {
+                                    "FAILED" -> pushFailureMessage = ev.failureMessage ?: "서버 처리 실패"
+                                    "COMPLETED" -> {
+                                        if (ev.partFiles.isNotEmpty()) {
+                                            buildServerPipelineBundleFromPushedFiles(context, taskId, ev.partFiles)?.let {
+                                                pushBundle = it
+                                            }
+                                            ev.partFiles.values.forEach { f -> try { f.delete() } catch (_: Exception) {} }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -4901,6 +4918,7 @@ internal suspend fun uploadZipAndRunPipeline(
             val st = fetchServerTaskStatus(context, taskId)
             if (st != null) {
                 lastServerResponseAt = System.currentTimeMillis()
+                st.gsViewerUrl?.takeIf { it.isNotBlank() }?.let { pendingGsViewerUrl = it }
                 val serverPct = st.progressPercent.coerceIn(0, 100)
                 emitProgress(serverPct, st.message)
                 when (st.status) {
@@ -4936,15 +4954,58 @@ internal suspend fun uploadZipAndRunPipeline(
             context.stopService(Intent(context, AppForegroundService::class.java))
             return null
         }
+        finalStatus.gsViewerUrl?.takeIf { it.isNotBlank() }?.let { pendingGsViewerUrl = it }
 
         // 4) 콜백으로 PLY 등을 이미 받았으면 HTTP 재다운로드 생략
         emitProgress(lastShownProgress.coerceAtLeast(95), "결과 정리 중…")
-        val bundle = pushBundle ?: downloadServerPipelineArtifacts(context, taskId, ::emitProgress) ?: run {
+        var bundle = pushBundle ?: downloadServerPipelineArtifacts(context, taskId, ::emitProgress) ?: run {
             context.stopService(Intent(context, AppForegroundService::class.java))
             return null
         }
 
-        emitProgress(100, "완료되었습니다!")
+        // 5) DA3 결과 파일은 모두 저장했어도 3DGS 뷰어 URL은 비동기로 도착할 수 있음.
+        // 로컬 콜백 서버·주기적 GET /status 를 종료 직전까지 유지한다.
+        emitProgress(lastShownProgress.coerceAtLeast(96), "3DGS 뷰어 URL 수신 대기 (서버와 통신 유지)…")
+        val gsWaitStart = System.currentTimeMillis()
+        val gsWaitTimeoutMs = 45L * 60L * 1000L
+        var gsPollN = 0
+        while (System.currentTimeMillis() - gsWaitStart < gsWaitTimeoutMs) {
+            drainPushEvents()
+            if (gsPushTerminal) break
+            if (!pendingGsViewerUrl.isNullOrBlank()) break
+            val gst = fetchServerTaskStatus(context, taskId)
+            if (gst != null) {
+                gst.gsViewerUrl?.takeIf { it.isNotBlank() }?.let { pendingGsViewerUrl = it }
+                val gsu = gst.gsStatus?.trim().orEmpty().uppercase(Locale.US)
+                emitProgress(
+                    lastShownProgress.coerceAtLeast(96).coerceAtMost(99),
+                    buildString {
+                        append("3DGS: ")
+                        append(if (gst.gsStatus.isNullOrBlank()) "—" else gst.gsStatus)
+                        if (!pendingGsViewerUrl.isNullOrBlank()) append(" · 뷰어 링크 수신")
+                    },
+                )
+                when {
+                    !pendingGsViewerUrl.isNullOrBlank() -> break
+                    gsu.isEmpty() -> break
+                    gsu in setOf("DISABLED", "FAILED", "SEND_FAILED", "COMPLETED") -> break
+                }
+            }
+            gsPollN++
+            delay(if (gsPollN <= 40) 3_000L else 5_000L)
+        }
+        drainPushEvents()
+        bundle = bundle.copy(gsViewerUrl = pendingGsViewerUrl)
+        writeServerTaskArtifactManifest(bundle.directory, taskId, bundle.filesByKey, bundle.gsViewerUrl)
+
+        emitProgress(
+            100,
+            if (!pendingGsViewerUrl.isNullOrBlank()) {
+                "완료 (3DGS 뷰어 링크 수신)"
+            } else {
+                "완료되었습니다!"
+            },
+        )
         stopForegroundService(context, "3D 모델 생성 완료", "완료되었습니다!")
         return bundle
     } catch (e: Exception) {
