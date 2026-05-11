@@ -21,13 +21,10 @@ import kotlinx.coroutines.withContext
  * 3. **실행** — [runFromSelectedInputs]가 위 URI들을 받아 분기:
  *    - COLMAP 3개가 있으면 **points3D** 기반 씬 생성(선택된 사진 장수는 로그·추후 확장 참고용).
  *    - COLMAP 없이 사진만 있으면 **이미지 전용** 깊이·역투영 파이프라인([runPipeline]).
- * 4. **출력** — 메모리상 [MobileSplatScene] → [MobileGaussianSplatGlView] 전용 뷰어.  
- *    PC용 학습·압축(comp.xz 등)은 `assets/mobile_gs_ref/upstream/` 의 `train.py`·`render.py` 참고만 (앱 내 미실행).
+ * 4. **출력** — 메모리상 [MobileSplatScene] → [MobileGaussianSplatGlView] 전용 뷰어.
  *
- * ## 업스트림 참조 (Mobile-GS 저장소)
- *
- * APK 에셋 `mobile_gs_ref/upstream/` 에 COLMAP 로더·`graphics_utils`·`gaussian_model`·학습 엔트리 등 원본 Python을 포함합니다.
- * 매핑 표는 `mobile_gs_ref/ANDROID_UPSTREAM_MAP.md` 를 참고합니다.
+ * PC용 Mobile-GS 업스트림 Python(학습·렌더 등)은 APK에 포함하지 않습니다. 필요 시 저장소 또는
+ * `scripts/fetch_mobile_gs_reference.ps1` 로 별도 내려받아 참고하세요.
  *
  * ## 처리 단계 (이미지만 입력, [runPipeline])
  *  1. EXIF 파싱 — 이미지별 초점거리(35mm 환산) 및 방향 추출
@@ -37,12 +34,6 @@ import kotlinx.coroutines.withContext
  *  5. 씬 정규화 (getNerfppNorm 개념)
  */
 object MobileGaussianSplattingScript {
-
-    /**
-     * APK 에셋 내 업스트림 Python 참조 디렉터리 (`assets/mobile_gs_ref/upstream/`).
-     * 필요 시 `AssetManager`으로 목록을 열거나 특정 파일을 스트림으로 읽을 수 있습니다.
-     */
-    const val ASSET_UPSTREAM_DIR = "mobile_gs_ref/upstream"
 
     /** 갤러리·데이터셋 폴더에서 허용하는 최대 이미지 장수 (UI와 동일). */
     const val MAX_DATASET_IMAGES = 100

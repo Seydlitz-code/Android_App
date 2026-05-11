@@ -4554,10 +4554,12 @@ internal suspend fun runServer3dgsAnalysisInBackground(
 }
 
 /** 경찰·보험 조사용 3DGS 분석 탭: 프롬프트 + 서버에서 내려받은 텍스트/JSON/CSV 본문 + 이미지(가능한 모든 PNG·JPG) URI */
-internal fun buildPoliceInsurance3dgsPayload(context: Context, bundle: ServerPipelineResultBundle): Pair<String, List<Uri>> {
-    val base =
-        "해당 파일을 바탕으로 PLY, 3DGS 파일을 분석해 경찰, 보험사에서 사용가능한 텍스트 형식으로 분석 출력해줘"
-    val sb = StringBuilder(base)
+internal fun buildPoliceInsurance3dgsPayload(
+    context: Context,
+    bundle: ServerPipelineResultBundle,
+    basePrompt: String = "해당 파일을 바탕으로 PLY, 3DGS 파일을 분석해 경찰, 보험사에서 사용가능한 텍스트 형식으로 분석 출력해줘",
+): Pair<String, List<Uri>> {
+    val sb = StringBuilder(basePrompt)
     sb.append("\n\n--- 서버 결과 메타 ---\n")
     sb.append("task_id: ").append(bundle.taskId).append('\n')
     sb.append("다운로드된 파일 키: ").append(bundle.filesByKey.keys.sorted().joinToString(", ")).append('\n')
@@ -4859,6 +4861,8 @@ internal suspend fun uploadZipAndRunPipeline(
                             buildServerPipelineBundleFromPushedFiles(context, taskId, ev.partFiles)?.let {
                                 pushBundle = it
                             }
+                            // 콜백 수신 시 persist 디렉터리에 복사해 둔 임시 파일 정리
+                            ev.partFiles.values.forEach { f -> try { f.delete() } catch (_: Exception) {} }
                         }
                     }
                     else -> {
@@ -4869,6 +4873,7 @@ internal suspend fun uploadZipAndRunPipeline(
                                     buildServerPipelineBundleFromPushedFiles(context, taskId, ev.partFiles)?.let {
                                         pushBundle = it
                                     }
+                                    ev.partFiles.values.forEach { f -> try { f.delete() } catch (_: Exception) {} }
                                 }
                             }
                         }

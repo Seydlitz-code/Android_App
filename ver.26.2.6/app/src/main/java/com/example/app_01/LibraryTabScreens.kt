@@ -4127,33 +4127,24 @@ fun GalleryScreen(
                                             .clip(RoundedCornerShape(8.dp))
                                             .background(completionBtnBg)
                                             .clickable {
-                                                val b = spb
-                                                transferScope.launch {
-                                                    val result = withContext(Dispatchers.IO) {
-                                                        PoliceInsuranceDocxWriter.writeReports(
-                                                            context,
-                                                            b,
-                                                        )
-                                                    }
-                                                    if (result == null) {
-                                                        android.widget.Toast.makeText(
-                                                            context,
-                                                            "Word 보고서 생성에 실패했습니다.",
-                                                            android.widget.Toast.LENGTH_SHORT,
-                                                        ).show()
-                                                    } else {
-                                                        android.widget.Toast.makeText(
-                                                            context,
-                                                            "Word 및 Python 스크립트 저장:\n" +
-                                                                result.docxFile.parentFile?.absolutePath,
-                                                            android.widget.Toast.LENGTH_LONG,
-                                                        ).show()
-                                                        PoliceInsuranceDocxWriter.openDocx(
-                                                            context,
-                                                            result.docxFile,
-                                                        )
-                                                    }
-                                                }
+                                                // AI 탭 3DGS 분석 모드로 전환해 LLM에 자동 전송.
+                                                // LLM 응답 후 메시지 버블에 "Word 저장·열기" 버튼이 나타납니다.
+                                                val payload = buildPoliceInsurance3dgsPayload(
+                                                    context,
+                                                    spb,
+                                                    basePrompt = "위 입력 파일을 기반으로 사고현장 분석 보고서를 작성하라",
+                                                )
+                                                onServerPipelineStart3dgsAi(
+                                                    Pending3dgsServerAutoSend(
+                                                        nonce = System.nanoTime(),
+                                                        promptText = payload.first,
+                                                        imageUris = payload.second,
+                                                        switchToAiTab = true,
+                                                        sourceServerTaskId = spb.taskId,
+                                                    )
+                                                )
+                                                // 다이얼로그 닫기
+                                                onServerPipelineCompleteBundleChange(null)
                                             },
                                         contentAlignment = Alignment.Center
                                     ) {
@@ -5182,6 +5173,9 @@ fun GalleryScreen(
                                             }
                                             LibraryTab.DATASET -> {
                                                 val foldersSnapshot = pending3DDatasetFolders
+                                                // Compose 상태는 메인 스레드에서만 안전하게 읽을 수 있으므로
+                                                // IO 코루틴 진입 전에 스냅샷으로 캡처합니다.
+                                                val arcoreUriSnapshot = pending3DArcoreZipUriForDataset
                                                 isUploading = true
                                                 uploadProgress = 0 to 100
                                                 uploadMessage = "업로드 준비 중..."
@@ -5191,18 +5185,46 @@ fun GalleryScreen(
                                                         val folderFiles = foldersSnapshot
                                                             .map { File(it) }
                                                             .filter { it.exists() && it.isDirectory }
-                                                        val zipFile = createZipFromFolders(
+                                                        val rawDatasetZip = createZipFromFolders(
                                                             context = context,
                                                             folders = folderFiles,
                                                             zipPrefix = "dataset"
                                                         )
-                                                        val bundle = if (zipFile != null) {
-                                                            val arcoreUri = pending3DArcoreZipUriForDataset
-                                                            var gsFile: File? = null
+                                                        val bundle = if (rawDatasetZip != null) {
+                                                            // ── ARCore ZIP 처리 ──────────────────────────────
+                                                            // 서버(main.py)는 file_pc 안의 poses.json만 ARCore로 사용.
+                                                            // → poses.json 을 file_pc(데이터셋 ZIP)에 병합.
+                                                            // → ARCore ZIP 원본은 file_gs 로도 전달(GS_ENABLE 시 3DGS 서버용).
+                                                            val arcoreZipForGs: File?
+                                                            val fileForPc: File
+                                                            val arcoreUri = arcoreUriSnapshot
                                                             if (arcoreUri != null) {
-                                                                gsFile =
+                                                                val arcoreTmp =
                                                                     copyContentUriToTempZipFile(context, arcoreUri)
-                                                                if (gsFile == null) {
+                                                                if (arcoreTmp != null) {
+                                                                    // poses.json 을 데이터셋 ZIP에 병합 → file_pc
+                                                                    val merged = mergeArcorePosesIntoDatasetZip(
+                                                                        datasetZip = rawDatasetZip,
+                                                                        arcoreZip  = arcoreTmp,
+                                                                        context    = context,
+                                                                    )
+                                                                    if (merged != null) {
+                                                                        // 병합 성공 — 원본 데이터셋 ZIP 삭제
+                                                                        try { rawDatasetZip.delete() } catch (_: Exception) {}
+                                                                        fileForPc = merged
+                                                                    } else {
+                                                                        // poses.json 없음 — 데이터셋 ZIP 그대로 사용
+                                                                        mainHandler.post {
+                                                                            Toast.makeText(
+                                                                                context,
+                                                                                "ARCore ZIP에서 poses.json을 찾지 못했습니다.\n데이터셋만 file_pc로 전송합니다.",
+                                                                                Toast.LENGTH_LONG,
+                                                                            ).show()
+                                                                        }
+                                                                        fileForPc = rawDatasetZip
+                                                                    }
+                                                                    arcoreZipForGs = arcoreTmp  // file_gs: 3DGS 서버용
+                                                                } else {
                                                                     mainHandler.post {
                                                                         Toast.makeText(
                                                                             context,
@@ -5210,18 +5232,24 @@ fun GalleryScreen(
                                                                             Toast.LENGTH_LONG,
                                                                         ).show()
                                                                     }
+                                                                    fileForPc      = rawDatasetZip
+                                                                    arcoreZipForGs = null
                                                                 }
+                                                            } else {
+                                                                fileForPc      = rawDatasetZip
+                                                                arcoreZipForGs = null
                                                             }
+
                                                             uploadZipAndRunPipeline(
                                                                 context = context,
-                                                                zipFile = zipFile,
-                                                                prompt = promptSnapshot,
+                                                                zipFile = fileForPc,
+                                                                prompt  = promptSnapshot,
                                                                 onProgress = { p, msg ->
                                                                     uploadProgress = p to 100
                                                                     uploadMessage = msg
                                                                 },
-                                                                gsZipFile = gsFile,
-                                                                contentDispositionFilename = SERVER_PIPELINE_ZIP_NAME_DATASET,
+                                                                gsZipFile                  = arcoreZipForGs,
+                                                                contentDispositionFilename   = SERVER_PIPELINE_ZIP_NAME_DATASET,
                                                                 contentDispositionGsFilename = SERVER_PIPELINE_ZIP_NAME_ARCORE,
                                                             )
                                                         } else null

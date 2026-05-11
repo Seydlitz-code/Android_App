@@ -14,7 +14,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.PhotoLibrary
-import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material.icons.outlined.ViewInAr
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -68,8 +68,8 @@ fun BottomNavigationBar(
                 onClick = { onTabSelected(MainTab.CAMERA) }
             )
             BottomNavItem(
-                label = "창작마당",
-                icon = Icons.Outlined.Public,
+                label = "3DGS",
+                icon = Icons.Outlined.ViewInAr,
                 isSelected = selectedTab == MainTab.CREATE,
                 onClick = { onTabSelected(MainTab.CREATE) }
             )
