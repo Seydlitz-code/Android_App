@@ -2,6 +2,7 @@ package com.example.app_01
 
 import android.Manifest
 import android.app.PendingIntent
+import android.app.Service
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
@@ -169,7 +170,6 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -194,9 +194,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.toMutableStateList
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.Service
 import android.content.ClipData
 import android.content.Intent
 import android.os.IBinder
@@ -209,6 +209,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
+import androidx.core.app.NotificationManagerCompat
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
@@ -302,9 +303,6 @@ import java.io.FileOutputStream
 import java.util.TimeZone
 import java.io.IOException
 import java.io.SyncFailedException
-import java.net.ConnectException
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
 import java.text.SimpleDateFormat
 import java.util.Collections
 import java.util.Locale
@@ -317,97 +315,6 @@ import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.delay
 import kotlin.coroutines.resume
-import kotlin.coroutines.resume
-import okhttp3.ConnectionPool
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.MultipartBody
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.asRequestBody
-import okhttp3.RequestBody.Companion.toRequestBody
-import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLException
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
-import javax.net.ssl.HostnameVerifier
-import java.security.cert.X509Certificate
-
-// 서버 설정
-private const val UPLOAD_ENDPOINT = "/upload"
-/** FastAPI 기본 문서 — 연결 테스트용 GET(가벼움). `/upload`는 POST만 있어 HEAD/GET이 405여도 “테스트 성공”으로 오해할 수 있음 */
-private const val SERVER_CONNECTIVITY_GET_PATH = "/docs"
-private const val STATUS_ENDPOINT = "/status"
-private const val DOWNLOAD_ENDPOINT = "/download"
-/** FastAPI `GET /results/{task_id}` — 결과 파일 목록 + 개별 다운로드 URL */
-private const val RESULTS_ENDPOINT = "/results"
-/** FastAPI `POST /upload` 의 `file_pc: UploadFile = File(...)` 필드명 */
-internal const val SERVER_PIPELINE_PART_PC = "file_pc"
-/** FastAPI `file_gs: Optional[UploadFile] = File(None)` — 3DGS·보조 ZIP(선택) */
-internal const val SERVER_PIPELINE_PART_GS = "file_gs"
-/**
- * `POST /upload` 시 각 파일 파트의 Content-Disposition `filename=` 값.
- * FastAPI `UploadFile.filename`은 이 이름과 동일하며, 로컬 [File.name]과 달라도 됨.
- * [main.py] 는 `.zip` 확장자만 검사하지만, 로그·문서와 맞추기 위해 고정명을 씀.
- */
-internal const val SERVER_PIPELINE_ZIP_NAME_DATASET = "dataset.zip"
-internal const val SERVER_PIPELINE_ZIP_NAME_ARCORE = "arcore.zip"
-
-/** multipart `filename=` — 경로 제거·빈 값은 fallback·`.zip` 보장. */
-private fun multipartZipFilenameForServer(raw: String, fallback: String): String {
-    val leaf = raw.trim().substringAfterLast('/').substringAfterLast('\\').trim()
-    val base = leaf.ifBlank { fallback }
-    return if (base.endsWith(".zip", ignoreCase = true)) base else "$base.zip"
-}
-/**
- * 네트워크→파일 스트리밍 시 한 번에 읽는 크기.
- * 과대(예: 8MB)는 읽기 버퍼 + [BufferedOutputStream] 버퍼와 겹쳐 저메모리 기기에서 OOM을 유발할 수 있음.
- */
-private const val SERVER_DOWNLOAD_STREAM_BUFFER_BYTES = 256 * 1024
-
-/** 디스크 출력 버퍼. 힙 점유를 줄이기 위해 읽기 버퍼보다 작게 둠. */
-private const val SERVER_DOWNLOAD_FILE_OUT_BUFFER_BYTES = 64 * 1024
-
-/** 장시간 다운로드 루프에서 협력 양보(스레드·다른 코루틴 기아 완화) */
-private const val SERVER_DOWNLOAD_YIELD_INTERVAL_BYTES = 16 * 1024 * 1024
-
-/**
- * 동시에 여러 결과 파일을 받을 때의 병렬度.
- * 병렬 2 + 대형 버퍼는 힙 피크가 커져 크래시가 날 수 있어 기본은 순차(1).
- */
-private const val SERVER_DOWNLOAD_MAX_PARALLEL = 1
-
-private const val SERVER_PIPELINE_WAKE_MAX_MS = 4 * 60 * 60 * 1000L // 최대 4시간
-private const val DEFAULT_SERVER_ADDRESS = "192.168.0.88"
-private const val DEFAULT_SERVER_PORT = 8000
-private const val DEFAULT_USE_HTTPS = false // HTTP 기본값
-
-// SAM3 배경제거 서버 (sam3_server.py, 기본 포트 8001)
-private const val SAM3_BG_REMOVE_ENDPOINT = "/bg-remove"
-private const val SAM3_DEFAULT_PORT = 8001
-
-
-// SharedPreferences 키
-private const val PREF_SERVER_ADDRESS = "server_address"
-private const val PREF_SERVER_PORT = "server_port"
-private const val PREF_USE_HTTPS = "use_https"
-
-// SharedPreferences에서 서버 주소 가져오기
-internal fun getServerAddress(context: Context): String {
-    val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
-    return prefs.getString(PREF_SERVER_ADDRESS, DEFAULT_SERVER_ADDRESS) ?: DEFAULT_SERVER_ADDRESS
-}
-
-// SharedPreferences에서 서버 포트 가져오기
-internal fun getServerPort(context: Context): Int {
-    val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
-    return prefs.getInt(PREF_SERVER_PORT, DEFAULT_SERVER_PORT)
-}
-
-// SharedPreferences에서 HTTPS 사용 여부 가져오기
-internal fun getUseHttps(context: Context): Boolean {
-    val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
-    return prefs.getBoolean(PREF_USE_HTTPS, DEFAULT_USE_HTTPS)
-}
 
 /** 이미지 URI의 가로·세로 픽셀 크기 반환 (inJustDecodeBounds) */
 internal fun getImageDimensions(context: Context, uri: Uri): Pair<Int, Int>? {
@@ -511,17 +418,6 @@ internal fun decodeBitmapWithMaxDimension(context: Context, uri: Uri, maxDim: In
     }
 }
 
-// SharedPreferences에 서버 설정 저장하기
-internal fun saveServerSettings(context: Context, address: String, port: Int, useHttps: Boolean) {
-    val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
-    prefs.edit()
-        .putString(PREF_SERVER_ADDRESS, address)
-        .putInt(PREF_SERVER_PORT, port)
-        .putBoolean(PREF_USE_HTTPS, useHttps)
-        .apply()
-}
-
-
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -587,6 +483,7 @@ fun CameraApp(modifier: Modifier = Modifier) {
     var showServerSettings by remember { mutableStateOf(false) }
     var showArCoreSettings by remember { mutableStateOf(false) }
     var showSensorCheck by remember { mutableStateOf(false) }
+    var showWarningLog by remember { mutableStateOf(false) }
     var showPermissions by remember { mutableStateOf(false) }
     var selectedTab by remember { mutableStateOf(MainTab.CAMERA) }
     var selectedLibraryTab by remember { mutableStateOf(LibraryTab.GALLERY) }
@@ -736,6 +633,10 @@ fun CameraApp(modifier: Modifier = Modifier) {
             SensorCheckScreen(
                 onBack = { showSensorCheck = false }
             )
+        } else if (showWarningLog) {
+            WarningLogScreen(
+                onBack = { showWarningLog = false }
+            )
         } else if (showPermissions) {
             PermissionManagementScreen(
                 onBack = { showPermissions = false }
@@ -781,7 +682,12 @@ fun CameraApp(modifier: Modifier = Modifier) {
                             serverPipelineCompleteBundle = serverPipelineCompleteBundle,
                             onServerPipelineCompleteBundleChange = { bundle ->
                                 serverPipelineCompleteBundle = bundle
-                                if (bundle != null) serverArtifactLibraryVersion++
+                                if (bundle != null) {
+                                    galleryScope.launch {
+                                        delay(1_500L)
+                                        serverArtifactLibraryVersion++
+                                    }
+                                }
                             },
                             serverArtifactLibraryVersion = serverArtifactLibraryVersion,
                             onEnqueueBackground3dgsFromBundle = { bundle ->
@@ -829,7 +735,7 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                 }
                                 pending3dgsServerAutoSend = pending
                                 selectedTab = MainTab.CLAUDE
-                            }
+                            },
                         )
                     }
                     MainTab.CLAUDE -> {
@@ -923,6 +829,7 @@ fun CameraApp(modifier: Modifier = Modifier) {
                             onServerSettingsClick = { showServerSettings = true },
                             onArCoreSettingsClick = { showArCoreSettings = true },
                             onSensorCheckClick = { showSensorCheck = true },
+                            onWarningLogClick = { showWarningLog = true },
                             onPermissionsClick = { showPermissions = true }
                         )
                     }
@@ -3798,85 +3705,6 @@ internal fun loadCapturedImageUrisOnlySync(context: Context): List<Uri> {
     }
 }
 
-/**
- * HTTPS를 지원하는 OkHttpClient 베이스 인스턴스.
- * 호출부에서 [OkHttpClient.newBuilder]로 타임아웃만 조정하므로, SSL 초기화 비용은 모드별 1회로 캐시합니다.
- */
-private val okHttpBaseLock = Any()
-@Volatile
-private var okHttpBasePlain: OkHttpClient? = null
-@Volatile
-private var okHttpBaseTrustAll: OkHttpClient? = null
-
-/**
- * HTTPS를 지원하는 OkHttpClient 생성
- */
-internal fun createOkHttpClient(useHttps: Boolean = DEFAULT_USE_HTTPS): OkHttpClient {
-    if (useHttps) {
-        okHttpBaseTrustAll?.let { return it }
-        synchronized(okHttpBaseLock) {
-            okHttpBaseTrustAll?.let { return it }
-            return buildOkHttpClientBase(useHttps).also { okHttpBaseTrustAll = it }
-        }
-    }
-    okHttpBasePlain?.let { return it }
-    synchronized(okHttpBaseLock) {
-        okHttpBasePlain?.let { return it }
-        return buildOkHttpClientBase(useHttps).also { okHttpBasePlain = it }
-    }
-}
-
-internal fun buildOkHttpClientBase(useHttps: Boolean): OkHttpClient {
-    val builder = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-
-    // HTTPS 사용 시 SSL 인증서 검증 우회 (개발/테스트 환경)
-    if (useHttps) {
-        val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-        })
-
-        val sslContext = SSLContext.getInstance("TLS")
-        sslContext.init(null, trustAllCerts, java.security.SecureRandom())
-        val sslSocketFactory = sslContext.socketFactory
-
-        builder.sslSocketFactory(sslSocketFactory, trustAllCerts[0] as X509TrustManager)
-        builder.hostnameVerifier(HostnameVerifier { _, _ -> true })
-    }
-
-    return builder.build()
-}
-
-/**
- * 서버 결과 파일 다운로드 전용 OkHttp 클라이언트 — **모드(HTTP/HTTPS)당 싱글톤**.
- * 매 다운로드마다 새 클라이언트를 만들면 TCP·TLS 핸드셰이크가 반복되어 PLY/GLB가 비정상적으로 느려질 수 있음.
- */
-private val serverDownloadClientLock = Any()
-private val serverDownloadClientPlainCache = AtomicReference<OkHttpClient?>(null)
-private val serverDownloadClientHttpsCache = AtomicReference<OkHttpClient?>(null)
-
-internal fun getServerDownloadOkHttpClient(useHttps: Boolean): OkHttpClient {
-    val cache = if (useHttps) serverDownloadClientHttpsCache else serverDownloadClientPlainCache
-    cache.get()?.let { return it }
-    synchronized(serverDownloadClientLock) {
-        cache.get()?.let { return it }
-        val c = createOkHttpClient(useHttps).newBuilder()
-            .connectTimeout(10, TimeUnit.MINUTES)
-            .readTimeout(0, TimeUnit.SECONDS)
-            .writeTimeout(0, TimeUnit.SECONDS)
-            .callTimeout(0, TimeUnit.SECONDS)
-            .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
-            .retryOnConnectionFailure(true)
-            .build()
-        cache.set(c)
-        return c
-    }
-}
-
 internal fun resolveDisplayName(context: Context, uri: Uri): String? {
     return try {
         if (uri.scheme == "content") {
@@ -4003,7 +3831,7 @@ internal fun copyContentUriToTempZipFile(context: Context, uri: Uri): File? {
             tmp.delete()
             null
         }
-    } catch (_: Exception) {
+    } catch (_: Throwable) {
         try {
             tmp.delete()
         } catch (_: Exception) {
@@ -4063,8 +3891,9 @@ internal suspend fun mergeArcorePosesIntoDatasetZip(
             }
         }
         outFile
-    } catch (e: Exception) {
-        e.printStackTrace()
+    } catch (t: Throwable) {
+        if (t is kotlinx.coroutines.CancellationException) throw t
+        t.printStackTrace()
         try {
             outFile?.delete()
         } catch (_: Exception) {
@@ -4073,698 +3902,6 @@ internal suspend fun mergeArcorePosesIntoDatasetZip(
     }
 }
 
-/**
- * ZIP 업로드(POST /upload) 직후 서버가 돌려준 task_id 또는 실패 사유.
- */
-internal data class ServerUploadStartResult(
-    val taskId: String?,
-    val errorDetail: String?,
-)
-
-private fun parseFastApiErrorDetail(body: String?): String? {
-    if (body.isNullOrBlank()) return null
-    return try {
-        val o = JSONObject(body)
-        if (!o.has("detail")) return null
-        when (val d = o.get("detail")) {
-            is String -> d
-            is JSONArray -> {
-                val sb = StringBuilder()
-                for (i in 0 until d.length()) {
-                    val item = d.optJSONObject(i)
-                    val msg = item?.optString("msg")
-                        ?.takeIf { it.isNotBlank() }
-                        ?: item?.toString()
-                    if (!msg.isNullOrBlank()) {
-                        if (sb.isNotEmpty()) sb.append("; ")
-                        sb.append(msg.trim())
-                    }
-                }
-                sb.toString().takeIf { it.isNotEmpty() }
-            }
-            else -> d.toString().trim().takeIf { it.isNotEmpty() }
-        }
-    } catch (_: JSONException) {
-        null
-    }
-}
-
-/**
- * 미디어 ZIP을 서버 `POST /upload` 로 전송 (`file_pc` 필수, `file_gs` 선택).
- *
- * @param zipPcFile DA3 파이프라인용 메인 ZIP → `file_pc`
- * @param gsZipFile 선택. 서버가 `file_gs`에 ARCore ZIP을 받아 `poses.json`을 병합하는 경우 여기에 전달 (`file_pc`는 데이터셋만).
- * @param contentDispositionPcFilename `file_pc` Content-Disposition 파일명
- * @param contentDispositionGsFilename `file_gs` Content-Disposition 파일명
- */
-internal suspend fun startServerTaskWithZip(
-    context: Context,
-    zipPcFile: File,
-    prompt: String = "",
-    contentDispositionPcFilename: String = SERVER_PIPELINE_ZIP_NAME_DATASET,
-    gsZipFile: File? = null,
-    contentDispositionGsFilename: String = SERVER_PIPELINE_ZIP_NAME_ARCORE,
-    callbackUrl: String? = null,
-): ServerUploadStartResult {
-    return withContext(Dispatchers.IO) {
-        try {
-            val serverAddress = getServerAddress(context)
-            val serverPort = getServerPort(context)
-            val useHttps = getUseHttps(context)
-            // 대용량 multipart: 전체 callTimeout·write 제한이 짧으면 업로드 중간에 끊길 수 있음
-            val client = createOkHttpClient(useHttps).newBuilder()
-                .connectTimeout(60, TimeUnit.SECONDS)
-                .writeTimeout(0, TimeUnit.SECONDS)
-                .readTimeout(10, TimeUnit.MINUTES)
-                .callTimeout(0, TimeUnit.SECONDS)
-                .retryOnConnectionFailure(true)
-                .build()
-
-            if (!zipPcFile.name.endsWith(".zip", ignoreCase = true)) {
-                return@withContext ServerUploadStartResult(null, "ZIP 파일만 업로드할 수 있습니다.")
-            }
-            if (!zipPcFile.isFile || !zipPcFile.canRead()) {
-                return@withContext ServerUploadStartResult(null, "업로드할 파일을 읽을 수 없습니다.")
-            }
-            val gs = gsZipFile
-            if (gs != null) {
-                if (!gs.name.endsWith(".zip", ignoreCase = true)) {
-                    return@withContext ServerUploadStartResult(null, "file_gs 는 ZIP 파일만 허용됩니다.")
-                }
-                if (!gs.isFile || !gs.canRead() || gs.length() <= 0L) {
-                    return@withContext ServerUploadStartResult(null, "file_gs 파일을 읽을 수 없습니다.")
-                }
-            }
-
-            val pcPartName = multipartZipFilenameForServer(
-                contentDispositionPcFilename,
-                SERVER_PIPELINE_ZIP_NAME_DATASET,
-            )
-            val gsPartName = multipartZipFilenameForServer(
-                contentDispositionGsFilename,
-                SERVER_PIPELINE_ZIP_NAME_ARCORE,
-            )
-
-            val multipartBuilder = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart(
-                    SERVER_PIPELINE_PART_PC,
-                    pcPartName,
-                    zipPcFile.asRequestBody("application/zip".toMediaType())
-                )
-            if (gs != null) {
-                multipartBuilder.addFormDataPart(
-                    SERVER_PIPELINE_PART_GS,
-                    gsPartName,
-                    gs.asRequestBody("application/zip".toMediaType())
-                )
-            }
-            val p = prompt.trim()
-            if (p.isNotEmpty()) {
-                multipartBuilder.addFormDataPart("text_prompt", p)
-            }
-            val cu = callbackUrl?.trim().orEmpty()
-            if (cu.isNotEmpty()) {
-                multipartBuilder.addFormDataPart("callback_url", cu)
-            }
-            val requestBody = multipartBuilder.build()
-
-            val protocol = if (useHttps) "https" else "http"
-            val url = "$protocol://$serverAddress:$serverPort$UPLOAD_ENDPOINT"
-            val request = Request.Builder()
-                .url(url)
-                .post(requestBody)
-                .build()
-
-            val response = client.newCall(request).execute()
-            val body = try {
-                response.body?.string()
-            } finally {
-                response.close()
-            }
-
-            if (response.isSuccessful && body != null) {
-                try {
-                    val json = JSONObject(body)
-                    val tid = json.optString("task_id").takeIf { it.isNotBlank() }
-                    if (tid != null) return@withContext ServerUploadStartResult(tid, null)
-                    return@withContext ServerUploadStartResult(
-                        null,
-                        "서버 응답에 task_id가 없습니다.",
-                    )
-                } catch (e: JSONException) {
-                    return@withContext ServerUploadStartResult(
-                        null,
-                        "서버 응답(JSON)을 해석할 수 없습니다: ${body.take(160)}",
-                    )
-                }
-            }
-
-            val apiDetail = parseFastApiErrorDetail(body)
-            val suffix = when {
-                !apiDetail.isNullOrBlank() -> ": $apiDetail"
-                !body.isNullOrBlank() -> ": ${body.trim().take(200)}"
-                else -> ""
-            }
-            return@withContext ServerUploadStartResult(
-                null,
-                "업로드 실패 (HTTP ${response.code})$suffix",
-            )
-        } catch (e: SocketTimeoutException) {
-            ServerUploadStartResult(
-                null,
-                "연결 시간 초과입니다. ZIP 용량·Wi-Fi 상태·서버 부하를 확인하세요. (${e.message})",
-            )
-        } catch (e: UnknownHostException) {
-            ServerUploadStartResult(
-                null,
-                "서버 주소를 찾을 수 없습니다(DNS). 주소·HTTPS 여부를 확인하세요. (${e.message})",
-            )
-        } catch (e: ConnectException) {
-            ServerUploadStartResult(
-                null,
-                "서버에 연결할 수 없습니다(연결 거부·방화벽·포트). (${e.message})",
-            )
-        } catch (e: SSLException) {
-            ServerUploadStartResult(
-                null,
-                "SSL/TLS 오류입니다. HTTPS 설정·인증서를 확인하세요. (${e.message})",
-            )
-        } catch (e: IOException) {
-            ServerUploadStartResult(
-                null,
-                "네트워크 오류: ${e.message ?: e.javaClass.simpleName}",
-            )
-        } catch (e: Exception) {
-            ServerUploadStartResult(
-                null,
-                "오류: ${e.message ?: e.javaClass.simpleName}",
-            )
-        }
-    }
-}
-
-internal data class ServerTaskStatus(
-    val status: String,
-    val progressPercent: Int,
-    val message: String,
-    val downloadUrl: String?,
-    /** 서버 [main.py] `GET /status/{task_id}` 의 3DGS 진행 상태 */
-    val gsStatus: String? = null,
-    val gsViewerUrl: String? = null,
-)
-
-internal suspend fun fetchServerTaskStatus(context: Context, taskId: String): ServerTaskStatus? {
-    return withContext(Dispatchers.IO) {
-        try {
-            val serverAddress = getServerAddress(context)
-            val serverPort = getServerPort(context)
-            val useHttps = getUseHttps(context)
-            val client = createOkHttpClient(useHttps).newBuilder()
-                .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(60, TimeUnit.SECONDS)
-                .callTimeout(60, TimeUnit.SECONDS)
-                .build()
-
-            val protocol = if (useHttps) "https" else "http"
-            val url = "$protocol://$serverAddress:$serverPort$STATUS_ENDPOINT/$taskId"
-            val request = Request.Builder().url(url).get().build()
-            val response = client.newCall(request).execute()
-            val body = response.body?.string()
-            val ok = response.isSuccessful && body != null
-            response.close()
-            if (!ok) return@withContext null
-
-            val json = JSONObject(body)
-            // FastAPI 서버(main_0316_postprocess.py)는 "progress" 키를 사용한다.
-            // 레거시 호환: "progress_percent"
-            val pct = when {
-                json.has("progress") -> json.optInt("progress", 0)
-                json.has("progress_percent") -> json.optInt("progress_percent", 0)
-                else -> 0
-            }
-            ServerTaskStatus(
-                status = json.optString("status"),
-                progressPercent = pct,
-                message = json.optString("message", "처리 중..."),
-                downloadUrl = json.optString("download_url").takeIf { it.isNotBlank() },
-                gsStatus = json.optString("gs_status").takeIf { it.isNotBlank() },
-                gsViewerUrl = json.optString("gs_viewer_url").takeIf { it.isNotBlank() },
-            )
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
-        }
-    }
-}
-
-internal suspend fun fetchServerResultsJson(context: Context, taskId: String): JSONObject? {
-    return withContext(Dispatchers.IO) {
-        try {
-            val serverAddress = getServerAddress(context)
-            val serverPort = getServerPort(context)
-            val useHttps = getUseHttps(context)
-            val client = getServerDownloadOkHttpClient(useHttps)
-            val protocol = if (useHttps) "https" else "http"
-            val url = "$protocol://$serverAddress:$serverPort$RESULTS_ENDPOINT/$taskId"
-            val request = Request.Builder().url(url).get().build()
-            val response = client.newCall(request).execute()
-            val body = response.body?.string()
-            val ok = response.isSuccessful && body != null
-            response.close()
-            if (!ok) return@withContext null
-            JSONObject(body)
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
-        }
-    }
-}
-
-internal suspend fun downloadHttpUrlToFile(
-    context: Context,
-    absoluteUrl: String,
-    outFile: File,
-    onStreamProgress: ((bytesRead: Long, contentLength: Long) -> Unit)? = null,
-): Boolean {
-    return withContext(Dispatchers.IO) {
-        try {
-            val useHttps = getUseHttps(context)
-            val client = getServerDownloadOkHttpClient(useHttps)
-            val request = Request.Builder()
-                .url(absoluteUrl)
-                .get()
-                .header("Connection", "keep-alive")
-                .cacheControl(okhttp3.CacheControl.Builder().noStore().build())
-                .build()
-            client.newCall(request).execute().use { response ->
-                val body = response.body
-                if (!response.isSuccessful || body == null) {
-                    return@withContext false
-                }
-                val contentLength = body.contentLength()
-                outFile.parentFile?.mkdirs()
-                var lastProgressAt = 0L
-                val progressMinIntervalMs = 1600L
-                body.byteStream().use { input ->
-                    BufferedOutputStream(
-                        FileOutputStream(outFile),
-                        SERVER_DOWNLOAD_FILE_OUT_BUFFER_BYTES,
-                    ).use { output ->
-                        val buf = ByteArray(SERVER_DOWNLOAD_STREAM_BUFFER_BYTES)
-                        var total = 0L
-                        var sinceYield = 0L
-                        while (true) {
-                            val n = input.read(buf)
-                            if (n <= 0) break
-                            output.write(buf, 0, n)
-                            total += n.toLong()
-                            sinceYield += n.toLong()
-                            if (sinceYield >= SERVER_DOWNLOAD_YIELD_INTERVAL_BYTES) {
-                                sinceYield = 0L
-                                yield()
-                            }
-                            if (onStreamProgress != null) {
-                                val now = System.currentTimeMillis()
-                                val done = contentLength > 0 && total >= contentLength
-                                if (done || now - lastProgressAt >= progressMinIntervalMs) {
-                                    lastProgressAt = now
-                                    onStreamProgress(total, contentLength)
-                                }
-                            }
-                        }
-                        output.flush()
-                    }
-                }
-                outFile.exists() && outFile.length() > 0L
-            }
-        } catch (e: Exception) {
-            android.util.Log.w("downloadHttpUrlToFile", absoluteUrl, e)
-            try {
-                outFile.delete()
-            } catch (_: Exception) {
-            }
-            false
-        }
-    }
-}
-
-/**
- * `GET /results/{task_id}`로 목록을 받아 각 파일을 내려받습니다.
- * 엔드포인트가 없거나 실패하면 PLY 단일 다운로드로 폴백합니다.
- *
- * - HTTP 클라이언트·TCP 연결은 [getServerDownloadOkHttpClient]로 재사용합니다.
- * - 여러 파일은 [SERVER_DOWNLOAD_MAX_PARALLEL]개까지 병렬로 받습니다(기본 1: 메모리·안정성 우선).
- * - 단일 대용량 파일은 Content-Length 기반으로 진행 알림을 갱신합니다(포그라운드 유지·절전 완화).
- */
-internal suspend fun downloadServerPipelineArtifacts(
-    context: Context,
-    taskId: String,
-    onProgress: (Int, String) -> Unit,
-): ServerPipelineResultBundle? {
-    val plyDir = ModelLibraryPaths.plyDir(context)
-    val outDir = File(plyDir, "server_task_$taskId").apply { mkdirs() }
-    val json = fetchServerResultsJson(context, taskId)
-    val filesArr: JSONArray? = json?.optJSONArray("files")
-    val map = ConcurrentHashMap<String, File>()
-    val progressLock = Any()
-    fun safeProgress(p: Int, msg: String) {
-        synchronized(progressLock) {
-            onProgress(p.coerceIn(0, 100), msg)
-        }
-    }
-
-    data class FileEntry(val key: String, val url: String, val filename: String)
-
-    if (filesArr != null && filesArr.length() > 0) {
-        val entries = buildList {
-            for (i in 0 until filesArr.length()) {
-                val o = filesArr.optJSONObject(i) ?: continue
-                val key = o.optString("key")
-                val url = o.optString("url")
-                val filename = o.optString("filename").ifBlank { "file_$i" }
-                if (key.isBlank() || url.isBlank()) continue
-                add(FileEntry(key, url, filename))
-            }
-        }
-        val total = entries.size
-        if (total == 1) {
-            val e = entries.first()
-            safeProgress(95, "다운로드: ${e.filename}")
-            val dest = File(outDir, e.filename)
-            val ok = downloadHttpUrlToFile(context, e.url, dest) { read, cl ->
-                val pct = if (cl > 0L) {
-                    (95 + (read * 4.0 / cl).toInt().coerceIn(0, 4))
-                } else {
-                    97
-                }
-                val mbRead = read / (1024L * 1024L)
-                val detail = if (cl > 0L) {
-                    val mbTotal = cl / (1024L * 1024L)
-                    "${mbRead} / ${mbTotal} MB"
-                } else {
-                    "${mbRead} MB"
-                }
-                safeProgress(pct.coerceAtMost(99), "${e.filename} · $detail")
-            }
-            if (ok) map[e.key] = dest
-        } else if (total > 1) {
-            coroutineScope {
-                val sem = Semaphore(SERVER_DOWNLOAD_MAX_PARALLEL)
-                entries.mapIndexed { idx, e ->
-                    async(Dispatchers.IO) {
-                        sem.withPermit {
-                            val basePct = 95 + (idx * 3 / maxOf(total, 1)).coerceIn(0, 3)
-                            safeProgress(basePct, "다운로드 (${idx + 1}/$total): ${e.filename}")
-                            val dest = File(outDir, e.filename)
-                            if (downloadHttpUrlToFile(context, e.url, dest)) {
-                                map[e.key] = dest
-                            }
-                        }
-                    }
-                }.awaitAll()
-            }
-        }
-    }
-    if (map["ply"] == null) {
-        safeProgress(99, "PLY 다운로드 중...")
-        val ply = downloadPlyResult(context, taskId) { p, msg -> safeProgress(p, msg) }
-        if (ply != null && ply.exists()) map["ply"] = ply
-    }
-    val plyFile = map["ply"] ?: return null
-    writeServerTaskArtifactManifest(outDir, taskId, map.toMap())
-    JsonLibrary.ingestFromPipelineOutputDir(context, outDir, taskId, map.toMap())
-    return ServerPipelineResultBundle(
-        taskId = taskId,
-        plyFile = plyFile,
-        directory = outDir,
-        filesByKey = map.toMap(),
-    )
-}
-
-/**
- * AI 탭 밖에서 호출: 서버 3DGS 분석을 새 MOBILE_3DGS 스레드로 저장한다.
- */
-internal suspend fun runServer3dgsAnalysisInBackground(
-    context: Context,
-    pending: Pending3dgsServerAutoSend
-): Boolean {
-    val imageBase64List = withContext(Dispatchers.IO) {
-        val uris = evenlySampleListForLlm(pending.imageUris)
-        uris.mapNotNull { uri ->
-            try {
-                context.contentResolver.openInputStream(uri)?.use { stream ->
-                    val bitmap = BitmapFactory.decodeStream(stream)
-                    bitmap?.let { ClaudeChatClient.bitmapToBase64ForLlm(it) }
-                }
-            } catch (_: Exception) {
-                null
-            }
-        }
-    }
-    val result = ClaudeChatClient.streamMobile3dGsAnalysisMessage(
-        userText = pending.promptText,
-        imageBase64List = imageBase64List,
-        onDelta = { }
-    )
-    return when (result) {
-        is ClaudeChatClient.ChatResult.Success -> {
-            val threadId = UUID.randomUUID().toString()
-            val title = "서버 3DGS 분석 " + SimpleDateFormat(
-                "MM/dd HH:mm",
-                Locale.getDefault()
-            ).format(Date())
-            ChatThreadStorage.save(
-                context,
-                ConversationThread(
-                    id = threadId,
-                    title = title,
-                    modeName = "MOBILE_3DGS",
-                    messages = listOf(
-                        PersistedMessage(
-                            pending.promptText.take(8000),
-                            true,
-                            pending.imageUris.map { it.toString() },
-                            null
-                        ),
-                        PersistedMessage(result.text, false, emptyList(), null)
-                    ),
-                    updatedAt = System.currentTimeMillis()
-                )
-            )
-            true
-        }
-        is ClaudeChatClient.ChatResult.Error -> false
-    }
-}
-
-/** 경찰·보험 조사용 3DGS 분석 탭: 프롬프트 + 서버에서 내려받은 텍스트/JSON/CSV 본문 + 이미지(가능한 모든 PNG·JPG) URI */
-internal fun buildPoliceInsurance3dgsPayload(
-    context: Context,
-    bundle: ServerPipelineResultBundle,
-    basePrompt: String = "해당 파일을 바탕으로 PLY, 3DGS 파일을 분석해 경찰, 보험사에서 사용가능한 텍스트 형식으로 분석 출력해줘",
-): Pair<String, List<Uri>> {
-    val sb = StringBuilder(basePrompt)
-    sb.append("\n\n--- 서버 결과 메타 ---\n")
-    sb.append("task_id: ").append(bundle.taskId).append('\n')
-    sb.append("다운로드된 파일 키: ").append(bundle.filesByKey.keys.sorted().joinToString(", ")).append('\n')
-
-    val ply = bundle.plyFile
-    if (ply.exists()) {
-        sb.append("\n[PLY] ").append(ply.name).append(" (")
-            .append(ply.length() / 1024).append(" KB)\n")
-            .append(ply.absolutePath).append('\n')
-    }
-    bundle.filesByKey["glb"]?.takeIf { it.exists() }?.let { glb ->
-        sb.append("\n[GLB] ").append(glb.name).append(" (").append(glb.length() / 1024)
-            .append(" KB)\n").append(glb.absolutePath).append('\n')
-    }
-
-    val textKeys = listOf(
-        "analysis_json" to "analysis_result.json",
-        "quality_txt" to "quality_report.txt",
-        "vehicle_csv" to "vehicle_analysis.csv",
-        "contact_csv" to "contact_analysis.csv",
-        "contact_points_csv" to "contact_candidate_points.csv",
-    )
-    val maxPerFile = 24_000
-    val maxTotal = 120_000
-    for ((key, label) in textKeys) {
-        val f = bundle.filesByKey[key] ?: continue
-        if (sb.length >= maxTotal) break
-        val raw = try {
-            f.readText(Charsets.UTF_8)
-        } catch (_: Exception) {
-            continue
-        }
-        val chunk = if (raw.length > maxPerFile) {
-            raw.take(maxPerFile) + "\n...(이하 생략, 원문 ${raw.length}자)..."
-        } else raw
-        sb.append("\n--- ").append(label).append(" (").append(f.name).append(") ---\n")
-            .append(chunk).append('\n')
-    }
-    var text = sb.toString()
-    if (text.length > maxTotal) {
-        text = text.take(maxTotal) + "\n...(전체 본문 길이 제한으로 잘림)"
-    }
-
-    val imageExts = setOf("png", "jpg", "jpeg", "webp")
-    val preferredOrder = listOf("topview", "sideview", "quality_png")
-    val seen = HashSet<String>()
-    val uris = ArrayList<Uri>()
-    fun addFile(f: File) {
-        val path = f.absolutePath
-        if (path in seen || !f.exists() || !f.isFile) return
-        if (f.extension.lowercase() !in imageExts) return
-        uriToShareableContentUri(context, Uri.fromFile(f))?.let {
-            seen.add(path)
-            uris.add(it)
-        }
-    }
-    for (k in preferredOrder) {
-        bundle.filesByKey[k]?.let(::addFile)
-    }
-    for (f in bundle.filesByKey.values) {
-        addFile(f)
-    }
-    return text to uris
-}
-
-/**
- * SAM2 서버(/bg-remove)에 이미지와 텍스트 프롬프트를 전송하여
- * 배경이 제거된 투명 PNG를 받아 앱 라이브러리에 저장합니다.
- *
- * 서버: scripts/sam2_server.py (포트 8001)
- *
- * @param context   앱 컨텍스트
- * @param imageUri  처리할 원본 이미지 URI
- * @param prompt    남길 사물의 영문 텍스트 (예: "cup", "mouse")
- * @param itemIndex 현재 처리 중인 이미지 순번 (0-based)
- * @param itemTotal 처리할 이미지 총 수
- * @param onProgress 진행률 콜백 (percent 0~100, message)
- * @return 앱 라이브러리에 저장된 PNG Uri, 실패 시 null
- */
-internal suspend fun sam2RemoveBackground(
-    context: Context,
-    imageUri: Uri,
-    prompt: String,
-    itemIndex: Int = 0,
-    itemTotal: Int = 1,
-    onProgress: suspend (percent: Int, message: String) -> Unit = { _, _ -> },
-): Uri? = withContext(Dispatchers.IO) {
-    val itemLabel = if (itemTotal > 1) " (${itemIndex + 1}/$itemTotal)" else ""
-    try {
-        onProgress(5, "이미지 로드 중...$itemLabel")
-
-        val serverAddress = getServerAddress(context)
-        val useHttps = getUseHttps(context)
-        val protocol = if (useHttps) "https" else "http"
-        val url = "$protocol://$serverAddress:$SAM3_DEFAULT_PORT$SAM3_BG_REMOVE_ENDPOINT"
-
-        // URI → 바이트 배열 읽기
-        val imageBytes = context.contentResolver.openInputStream(imageUri)?.use { it.readBytes() }
-            ?: return@withContext null
-
-        // MIME 타입 판별
-        val mimeType = context.contentResolver.getType(imageUri) ?: "image/jpeg"
-        val extension = when {
-            mimeType.contains("png")  -> "png"
-            mimeType.contains("webp") -> "webp"
-            else                      -> "jpg"
-        }
-
-        onProgress(20, "SAM2 서버로 전송 중...$itemLabel")
-
-        val client = createOkHttpClient(useHttps).newBuilder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .writeTimeout(60, TimeUnit.SECONDS)
-            .readTimeout(180, TimeUnit.SECONDS) // SAM2 추론 대기
-            .callTimeout(240, TimeUnit.SECONDS)
-            .build()
-
-        val requestBody = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart(
-                "image",
-                "input.$extension",
-                imageBytes.toRequestBody(mimeType.toMediaType())
-            )
-            .addFormDataPart("prompt", prompt)
-            .build()
-
-        val httpRequest = Request.Builder()
-            .url(url)
-            .post(requestBody)
-            .build()
-
-        onProgress(35, "SAM2 객체 감지 및 세그멘테이션 중...$itemLabel")
-
-        val response = client.newCall(httpRequest).execute()
-
-        if (!response.isSuccessful) {
-            val errBody = response.body?.string() ?: ""
-            android.util.Log.e("SAM2", "서버 오류 ${response.code}: $errBody")
-            response.close()
-            return@withContext null
-        }
-
-        onProgress(85, "결과 수신 중...$itemLabel")
-
-        val pngBytes = response.body?.bytes()
-        response.close()
-        if (pngBytes == null || pngBytes.isEmpty()) return@withContext null
-
-        onProgress(93, "앱 라이브러리 저장 중...$itemLabel")
-
-        // 결과 PNG를 앱 라이브러리에 저장
-        val outputDir = context.getExternalFilesDir(null) ?: return@withContext null
-        outputDir.mkdirs()
-        val outFile = File(outputDir, "sam2_bg_removed_${System.currentTimeMillis()}.png")
-        FileOutputStream(outFile).use { it.write(pngBytes) }
-
-        onProgress(98, "완료$itemLabel")
-        Uri.fromFile(outFile)
-    } catch (e: Exception) {
-        android.util.Log.e("SAM2", "SAM2 서버 통신 실패", e)
-        null
-    }
-}
-
-internal suspend fun downloadPlyResult(
-    context: Context,
-    taskId: String,
-    onDownloadProgress: ((progressPercent: Int, message: String) -> Unit)? = null,
-): File? {
-    val serverAddress = getServerAddress(context)
-    val serverPort = getServerPort(context)
-    val useHttps = getUseHttps(context)
-    val protocol = if (useHttps) "https" else "http"
-    val url = "$protocol://$serverAddress:$serverPort$DOWNLOAD_ENDPOINT/$taskId?format=ply"
-    val modelsDir = ModelLibraryPaths.plyDir(context)
-    val outFile = File(modelsDir, "3d_model_$taskId.ply")
-
-    val maxAttempts = 3
-    repeat(maxAttempts) { attempt ->
-        try {
-            outFile.delete()
-        } catch (_: Exception) {
-        }
-        val ok = downloadHttpUrlToFile(context, url, outFile) { read, cl ->
-            if (cl > 0L) {
-                val pct = (95 + (read * 4.0 / cl).toInt().coerceIn(0, 4)).coerceAtMost(99)
-                val mbRead = read / (1024L * 1024L)
-                val mbTotal = cl / (1024L * 1024L)
-                onDownloadProgress?.invoke(pct, "PLY · $mbRead / $mbTotal MB")
-            } else {
-                val mbRead = read / (1024L * 1024L)
-                onDownloadProgress?.invoke(97, "PLY · ${mbRead} MB 수신 중…")
-            }
-        }
-        if (ok && outFile.exists() && outFile.length() > 0L) return outFile
-        if (attempt < maxAttempts - 1) delay(5_000L * (attempt + 1))
-    }
-    return null
-}
 
 internal suspend fun uploadZipAndRunPipeline(
     context: Context,
@@ -4774,11 +3911,17 @@ internal suspend fun uploadZipAndRunPipeline(
     gsZipFile: File? = null,
     contentDispositionFilename: String = SERVER_PIPELINE_ZIP_NAME_DATASET,
     contentDispositionGsFilename: String = SERVER_PIPELINE_ZIP_NAME_ARCORE,
+    /**
+     * DA3 아티팩트 처리(매니페스트·후처리 스케줄) 직후 **[메인 스레드]** 에서 호출됩니다.
+     * UI 상태 갱신은 이 콜백 안에서 바로 수행해도 됩니다.
+     */
+    onDa3Complete: ((ServerPipelineResultBundle) -> Unit)? = null,
 ): ServerPipelineResultBundle? {
     val taskTitle = "3D 모델 생성 중"
     val uploadStartMs = System.currentTimeMillis()
     /** UI는 post만 하고 IO 코루틴은 대기하지 않음(백그라운드에서 메인 지연 시 폴링이 멈추지 않도록). */
     val mainHandler = Handler(Looper.getMainLooper())
+    val appCtx = context.applicationContext
     // 마지막으로 표시한 퍼센트 — 표시 값이 역행하지 않도록 추적
     var lastShownProgress = 0
 
@@ -4786,14 +3929,13 @@ internal suspend fun uploadZipAndRunPipeline(
     fun emitProgress(p: Int, msg: String) {
         val safeP = p.coerceAtLeast(lastShownProgress).coerceIn(0, 100)
         lastShownProgress = safeP
-        startOrUpdateForegroundService(context, taskTitle, safeP, msg, uploadStartMs)
+        startOrUpdateForegroundService(appCtx, taskTitle, safeP, msg, uploadStartMs)
         mainHandler.post { onProgress(safeP, msg) }
     }
 
     // 서비스 시작
-    startOrUpdateForegroundService(context, taskTitle, 0, "업로드 준비 중...", uploadStartMs)
+    startOrUpdateForegroundService(appCtx, taskTitle, 0, "업로드 준비 중...", uploadStartMs)
 
-    val appCtx = context.applicationContext
     val pm = appCtx.getSystemService(Context.POWER_SERVICE) as PowerManager
     val wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "${appCtx.packageName}:server_pipeline").apply {
         setReferenceCounted(false)
@@ -4826,7 +3968,7 @@ internal suspend fun uploadZipAndRunPipeline(
         )
         val noResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
         val startResult = startServerTaskWithZip(
-            context,
+            appCtx,
             zipPcFile = zipFile,
             prompt = prompt,
             contentDispositionPcFilename = contentDispositionFilename,
@@ -4838,14 +3980,12 @@ internal suspend fun uploadZipAndRunPipeline(
         if (taskId.isNullOrBlank()) {
             val detail = startResult.errorDetail?.trim().takeUnless { it.isNullOrBlank() } ?: noResponseMsg
             mainHandler.post { onProgress(0, detail) }
-            context.stopService(Intent(context, AppForegroundService::class.java))
+            appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
             return null
         }
 
         var pushFailureMessage: String? = null
         var pushBundle: ServerPipelineResultBundle? = null
-        var pendingGsViewerUrl: String? = null
-        var gsPushTerminal = false
 
         fun drainPushEvents() {
             while (true) {
@@ -4853,11 +3993,18 @@ internal suspend fun uploadZipAndRunPipeline(
                 if (ev.taskId != taskId) continue
                 when {
                     ev.event.equals(PipelineCallbackEvents.THREE_DGS_COMPLETED, ignoreCase = true) -> {
-                        ev.gsViewerUrl?.takeIf { it.isNotBlank() }?.let { pendingGsViewerUrl = it }
-                        gsPushTerminal = true
+                        emitProgress(
+                            lastShownProgress.coerceAtLeast(50).coerceAtMost(94),
+                            "서버 3DGS 단계 진행 중…",
+                        )
                     }
                     ev.event.equals(PipelineCallbackEvents.THREE_DGS_FAILED, ignoreCase = true) -> {
-                        gsPushTerminal = true
+                        val detail = ev.failureMessage?.trim()?.takeIf { it.isNotEmpty() }
+                            ?: ev.status.trim().ifBlank { "알 수 없음" }
+                        emitProgress(
+                            lastShownProgress.coerceAtLeast(50).coerceAtMost(94),
+                            "3DGS 단계: $detail",
+                        )
                     }
                     else -> {
                         val statusUpper = ev.status.uppercase(Locale.US)
@@ -4874,7 +4021,7 @@ internal suspend fun uploadZipAndRunPipeline(
                             }
                             PipelineCallbackEvents.PIPELINE_RESULT_FILES -> {
                                 if (ev.partFiles.isNotEmpty()) {
-                                    buildServerPipelineBundleFromPushedFiles(context, taskId, ev.partFiles)?.let {
+                                    buildServerPipelineBundleFromPushedFiles(appCtx, taskId, ev.partFiles)?.let {
                                         pushBundle = it
                                     }
                                     ev.partFiles.values.forEach { f -> try { f.delete() } catch (_: Exception) {} }
@@ -4885,7 +4032,7 @@ internal suspend fun uploadZipAndRunPipeline(
                                     "FAILED" -> pushFailureMessage = ev.failureMessage ?: "서버 처리 실패"
                                     "COMPLETED" -> {
                                         if (ev.partFiles.isNotEmpty()) {
-                                            buildServerPipelineBundleFromPushedFiles(context, taskId, ev.partFiles)?.let {
+                                            buildServerPipelineBundleFromPushedFiles(appCtx, taskId, ev.partFiles)?.let {
                                                 pushBundle = it
                                             }
                                             ev.partFiles.values.forEach { f -> try { f.delete() } catch (_: Exception) {} }
@@ -4912,26 +4059,25 @@ internal suspend fun uploadZipAndRunPipeline(
             drainPushEvents()
             if (pushFailureMessage != null) {
                 mainHandler.post { onProgress(0, pushFailureMessage!!) }
-                context.stopService(Intent(context, AppForegroundService::class.java))
+                appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
                 return null
             }
-            val st = fetchServerTaskStatus(context, taskId)
+            val st = fetchServerTaskStatus(appCtx, taskId)
             if (st != null) {
                 lastServerResponseAt = System.currentTimeMillis()
-                st.gsViewerUrl?.takeIf { it.isNotBlank() }?.let { pendingGsViewerUrl = it }
                 val serverPct = st.progressPercent.coerceIn(0, 100)
                 emitProgress(serverPct, st.message)
                 when (st.status) {
                     "COMPLETED" -> break
                     "FAILED" -> {
-                        context.stopService(Intent(context, AppForegroundService::class.java))
+                        appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
                         return null
                     }
                 }
             } else {
-                if (System.currentTimeMillis() - lastServerResponseAt >= 90_000L) {
+                if (System.currentTimeMillis() - lastServerResponseAt >= SERVER_STATUS_POLL_MAX_SILENCE_MS) {
                     mainHandler.post { onProgress(lastShownProgress, noResponseMsg) }
-                    context.stopService(Intent(context, AppForegroundService::class.java))
+                    appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
                     return null
                 }
             }
@@ -4942,75 +4088,53 @@ internal suspend fun uploadZipAndRunPipeline(
         drainPushEvents()
         if (pushFailureMessage != null) {
             mainHandler.post { onProgress(0, pushFailureMessage!!) }
-            context.stopService(Intent(context, AppForegroundService::class.java))
+            appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
             return null
         }
 
-        val finalStatus = fetchServerTaskStatus(context, taskId)
+        val finalStatus = fetchServerTaskStatus(appCtx, taskId)
         if (finalStatus?.status != "COMPLETED") {
             mainHandler.post {
                 onProgress(lastShownProgress, "처리 시간이 초과되었거나 완료되지 않았습니다.")
             }
-            context.stopService(Intent(context, AppForegroundService::class.java))
+            appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
             return null
         }
-        finalStatus.gsViewerUrl?.takeIf { it.isNotBlank() }?.let { pendingGsViewerUrl = it }
 
         // 4) 콜백으로 PLY 등을 이미 받았으면 HTTP 재다운로드 생략
         emitProgress(lastShownProgress.coerceAtLeast(95), "결과 정리 중…")
-        var bundle = pushBundle ?: downloadServerPipelineArtifacts(context, taskId, ::emitProgress) ?: run {
-            context.stopService(Intent(context, AppForegroundService::class.java))
+        val bundle = pushBundle ?: downloadServerPipelineArtifacts(appCtx, taskId, ::emitProgress) ?: run {
+            appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
             return null
         }
 
-        // 5) DA3 결과 파일은 모두 저장했어도 3DGS 뷰어 URL은 비동기로 도착할 수 있음.
-        // 로컬 콜백 서버·주기적 GET /status 를 종료 직전까지 유지한다.
-        emitProgress(lastShownProgress.coerceAtLeast(96), "3DGS 뷰어 URL 수신 대기 (서버와 통신 유지)…")
-        val gsWaitStart = System.currentTimeMillis()
-        val gsWaitTimeoutMs = 45L * 60L * 1000L
-        var gsPollN = 0
-        while (System.currentTimeMillis() - gsWaitStart < gsWaitTimeoutMs) {
-            drainPushEvents()
-            if (gsPushTerminal) break
-            if (!pendingGsViewerUrl.isNullOrBlank()) break
-            val gst = fetchServerTaskStatus(context, taskId)
-            if (gst != null) {
-                gst.gsViewerUrl?.takeIf { it.isNotBlank() }?.let { pendingGsViewerUrl = it }
-                val gsu = gst.gsStatus?.trim().orEmpty().uppercase(Locale.US)
-                emitProgress(
-                    lastShownProgress.coerceAtLeast(96).coerceAtMost(99),
-                    buildString {
-                        append("3DGS: ")
-                        append(if (gst.gsStatus.isNullOrBlank()) "—" else gst.gsStatus)
-                        if (!pendingGsViewerUrl.isNullOrBlank()) append(" · 뷰어 링크 수신")
-                    },
-                )
-                when {
-                    !pendingGsViewerUrl.isNullOrBlank() -> break
-                    gsu.isEmpty() -> break
-                    gsu in setOf("DISABLED", "FAILED", "SEND_FAILED", "COMPLETED") -> break
-                }
-            }
-            gsPollN++
-            delay(if (gsPollN <= 40) 3_000L else 5_000L)
-        }
         drainPushEvents()
-        bundle = bundle.copy(gsViewerUrl = pendingGsViewerUrl)
-        writeServerTaskArtifactManifest(bundle.directory, taskId, bundle.filesByKey, bundle.gsViewerUrl)
-
-        emitProgress(
-            100,
-            if (!pendingGsViewerUrl.isNullOrBlank()) {
-                "완료 (3DGS 뷰어 링크 수신)"
-            } else {
-                "완료되었습니다!"
-            },
-        )
-        stopForegroundService(context, "3D 모델 생성 완료", "완료되었습니다!")
+        ServerPipelinePostDownload.writeManifestIfNeeded(bundle)
+        ServerPipelinePostDownload.scheduleDeferredHeavyWork(appCtx, bundle)
+        emitProgress(100, "완료되었습니다!")
+        /** 짧게 미루어 다운로드 버퍼 해제·FS flush와 완료 다이얼로그 표시 시점 분리 */
+        mainHandler.postDelayed({
+            runCatching {
+                onDa3Complete?.invoke(bundle)
+            }.onFailure { t ->
+                android.util.Log.w("uploadZipAndRunPipeline", "다운로드 완료 UI 콜백 실패", t)
+            }
+        }, 280L)
+        stopForegroundService(appCtx, "3D 모델 생성 완료", "완료되었습니다!")
         return bundle
-    } catch (e: Exception) {
-        e.printStackTrace()
-        context.stopService(Intent(context, AppForegroundService::class.java))
+    } catch (t: Throwable) {
+        // CancellationException은 구조적 동시성을 위해 반드시 재투소
+        if (t is kotlinx.coroutines.CancellationException) throw t
+        t.printStackTrace()
+        runCatching {
+            AppWarningLog.record(
+                appCtx,
+                "uploadZipAndRunPipeline",
+                t.message ?: t.javaClass.simpleName,
+                t,
+            )
+        }
+        appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
         return null
     } finally {
         try {
@@ -5537,50 +4661,6 @@ private class PlySurfaceView(context: Context) : GLSurfaceView(context) {
     }
 }
 
-/**
- * 서버 연결 테스트 함수 (호스트·포트·프로토콜 도달 여부).
- * [SERVER_CONNECTIVITY_GET_PATH] 로 GET 요청 — `/upload`는 POST 전용이라 이전 HEAD 방식과 결과가 어긋날 수 있음.
- *
- * @param context 컨텍스트
- * @param serverAddress 테스트할 서버 주소 (IP 또는 도메인)
- * @param serverPort 테스트할 서버 포트
- * @param useHttps HTTPS 사용 여부
- * @return 연결 성공 여부
- */
-internal suspend fun testServerConnection(
-    context: Context,
-    serverAddress: String,
-    serverPort: Int,
-    useHttps: Boolean
-): Boolean {
-    return withContext(Dispatchers.IO) {
-        try {
-            val client = createOkHttpClient(useHttps).newBuilder()
-                .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(10, TimeUnit.SECONDS)
-                .build()
-
-            // GET으로 동일 호스트·포트에 실제 응답이 오는지 확인
-            val protocol = if (useHttps) "https" else "http"
-            // 서버 도달 여부: 실제 GET(문서). `/upload` POST와 동일 호스트로 확인
-            val url = "$protocol://$serverAddress:$serverPort$SERVER_CONNECTIVITY_GET_PATH"
-            val request = Request.Builder()
-                .url(url)
-                .get()
-                .build()
-
-            val response = client.newCall(request).execute()
-            // 연결·TLS·HTTP 응답이 오면 성공(404는 docs 비활성화 등일 수 있음)
-            val success = response.code in 200..499
-            response.close()
-            
-            success
-        } catch (e: Exception) {
-            e.printStackTrace()
-            false
-        }
-    }
-}
 
 @Composable
 fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
@@ -5991,17 +5071,35 @@ internal fun startOrUpdateForegroundService(
         putExtra(AppForegroundService.EXTRA_MESSAGE, message)
         if (startMs > 0L) putExtra(AppForegroundService.EXTRA_START_MS, startMs)
     }
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        context.startForegroundService(intent)
-    } else {
-        context.startService(intent)
+    try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(intent)
+        } else {
+            context.startService(intent)
+        }
+    } catch (t: Throwable) {
+        // Android 12+: 앱이 백그라운드 상태에서 포그라운드 서비스를 시작할 수 없을 때
+        // (ForegroundServiceStartNotAllowedException 등) — 알림 갱신 실패는 무시하고 계속 진행
+        android.util.Log.w(
+            "ForegroundService",
+            "포그라운드 서비스 시작/갱신 실패 (백그라운드 제한 또는 서비스 중지됨): ${t.message}",
+            t,
+        )
     }
 }
 
 /** 포그라운드 서비스를 완료(100%) 상태로 업데이트하고 종료합니다. */
 internal fun stopForegroundService(context: Context, taskTitle: String, doneMessage: String) {
-    startOrUpdateForegroundService(context, taskTitle, 100, doneMessage)
-    context.stopService(Intent(context, AppForegroundService::class.java))
+    try {
+        startOrUpdateForegroundService(context, taskTitle, 100, doneMessage)
+    } catch (t: Throwable) {
+        android.util.Log.w("ForegroundService", "완료 알림 갱신 실패: ${t.message}", t)
+    }
+    try {
+        context.stopService(Intent(context, AppForegroundService::class.java))
+    } catch (t: Throwable) {
+        android.util.Log.w("ForegroundService", "포그라운드 서비스 종료 실패: ${t.message}", t)
+    }
 }
 
 // [추가] 백그라운드 작업 유지를 위한 포그라운드 서비스
@@ -6020,93 +5118,158 @@ class AppForegroundService : Service() {
 
     private var taskStartMs: Long = 0L
 
+    /**
+     * Android 8+ 에서 채널이 없으면 NotificationCompat 이 실패할 수 있으므로
+     * startForeground 이전에 반드시 존재하도록 보장합니다.
+     */
+    private fun ensureNotificationChannelSync() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val nm = getSystemService(NotificationManager::class.java) ?: return
+        if (nm.getNotificationChannel(CHANNEL_ID) != null) return
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "백그라운드 작업",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "업로드·배경 제거·광택 제거 진행 상황을 표시합니다."
+            setShowBadge(true)
+        }
+        nm.createNotificationChannel(channel)
+    }
+
+    private fun defaultNotificationSmallIcon(): Int {
+        val icon = applicationInfo.icon
+        return if (icon != 0) icon else android.R.drawable.stat_notify_sync
+    }
+
     override fun onCreate() {
         super.onCreate()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "백그라운드 작업",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "업로드·배경 제거·광택 제거 진행 상황을 표시합니다."
-                setShowBadge(true)
-            }
-            getSystemService(NotificationManager::class.java)
-                ?.createNotificationChannel(channel)
-        }
+        ensureNotificationChannelSync()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // startForegroundService() 호출 후 일정 시간 안에 startForeground()가 없으면
+        // ForegroundServiceDidNotStartInTimeException 으로 프로세스가 종료됩니다.
+        // PendingIntent·진행률 UI 등은 예외가 나기 쉬우므로, 먼저 최소 알림으로 FG에 진입합니다.
+        ensureNotificationChannelSync()
+
         val progress  = intent?.getIntExtra(EXTRA_PROGRESS, -1) ?: -1
         val message   = intent?.getStringExtra(EXTRA_MESSAGE) ?: ""
         val taskTitle = intent?.getStringExtra(EXTRA_TASK_TITLE) ?: "백그라운드 작업 중"
         val startMs   = intent?.getLongExtra(EXTRA_START_MS, 0L) ?: 0L
         if (startMs > 0L && taskStartMs == 0L) taskStartMs = startMs
 
-        // ── 예상 잔여 시간 계산 ─────────────────────────────────────────────
-        val etaText = if (progress in 1..99 && taskStartMs > 0L) {
-            val elapsed = System.currentTimeMillis() - taskStartMs
-            val estimated = (elapsed / (progress.toDouble() / 100.0)).toLong()
-            val remaining = ((estimated - elapsed) / 1000L).coerceAtLeast(0L)
-            when {
-                remaining >= 3600 -> " · 약 ${remaining / 3600}시간 ${(remaining % 3600) / 60}분 남음"
-                remaining >= 60   -> " · 약 ${remaining / 60}분 ${remaining % 60}초 남음"
-                remaining > 0     -> " · 약 ${remaining}초 남음"
-                else              -> ""
-            }
-        } else ""
-
-        // ── 앱 복귀 탭 인텐트 ──────────────────────────────────────────────
-        val launchIntent = (
-            packageManager.getLaunchIntentForPackage(packageName)
-                ?: Intent(this, MainActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
-            ).apply {
-                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            }
-        val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        else PendingIntent.FLAG_UPDATE_CURRENT
-        val tapIntent = PendingIntent.getActivity(this, 0, launchIntent, pendingFlags)
-
-        // ── 알림 빌드 ──────────────────────────────────────────────────────
-        val subText = if (progress in 0..100) "$progress%" else null
-        val contentText = when {
-            message.isNotBlank() && etaText.isNotBlank() -> "$message$etaText"
-            message.isNotBlank() -> message
-            etaText.isNotBlank() -> etaText.trimStart(' ', '·', ' ')
-            else -> "백그라운드에서 작업 중입니다."
+        val fgType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        fun promoteForeground(notification: Notification) {
+            ServiceCompat.startForeground(this, NOTIF_ID, notification, fgType)
         }
 
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(taskTitle)
-            .setContentText(contentText)
-            .setSmallIcon(android.R.drawable.stat_sys_upload)
+        val ongoing = progress < 100
+        val minimal = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(taskTitle.take(100))
+            .setContentText(message.ifBlank { "처리 중…" }.take(250))
+            .setSmallIcon(defaultNotificationSmallIcon())
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(ongoing)
             .setOnlyAlertOnce(true)
-            .setOngoing(true)
-            .setContentIntent(tapIntent)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .build()
 
-        if (subText != null) builder.setSubText(subText)
-
-        if (progress in 0..100) {
-            builder.setProgress(100, progress, false)
-        } else {
-            builder.setProgress(0, 0, true) // 불확정 스피너
+        var fgOk = false
+        runCatching { promoteForeground(minimal); fgOk = true }
+        if (!fgOk) {
+            runCatching {
+                promoteForeground(
+                    NotificationCompat.Builder(this, CHANNEL_ID)
+                        .setContentTitle(taskTitle.take(50))
+                        .setContentText("처리 중")
+                        .setSmallIcon(android.R.drawable.stat_notify_sync)
+                        .setPriority(NotificationCompat.PRIORITY_LOW)
+                        .setOngoing(ongoing)
+                        .setOnlyAlertOnce(true)
+                        .build()
+                )
+                fgOk = true
+            }
+        }
+        if (!fgOk) {
+            android.util.Log.e(
+                "AppForegroundService",
+                "startForeground 실패 — 타임아웃으로 앱이 종료될 수 있음",
+            )
+            try { stopSelf() } catch (_: Exception) {}
+            return START_NOT_STICKY
         }
 
-        ServiceCompat.startForeground(
-            this,
-            NOTIF_ID,
-            builder.build(),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-        )
+        try {
+            // ── 예상 잔여 시간 계산 ─────────────────────────────────────────────
+            val etaText = if (progress in 1..99 && taskStartMs > 0L) {
+                val elapsed = System.currentTimeMillis() - taskStartMs
+                val estimated = (elapsed / (progress.toDouble() / 100.0)).toLong()
+                val remaining = ((estimated - elapsed) / 1000L).coerceAtLeast(0L)
+                when {
+                    remaining >= 3600 -> " · 약 ${remaining / 3600}시간 ${(remaining % 3600) / 60}분 남음"
+                    remaining >= 60   -> " · 약 ${remaining / 60}분 ${remaining % 60}초 남음"
+                    remaining > 0     -> " · 약 ${remaining}초 남음"
+                    else              -> ""
+                }
+            } else ""
 
-        // 100% 완료 시 자동 종료
-        if (progress >= 100) {
-            taskStartMs = 0L
-            stopSelf()
+            val launchIntent = (
+                packageManager.getLaunchIntentForPackage(packageName)
+                    ?: Intent(this, MainActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    }
+                ).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+            val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            else PendingIntent.FLAG_UPDATE_CURRENT
+            val tapIntent = PendingIntent.getActivity(this, 0, launchIntent, pendingFlags)
+
+            val subText = if (progress in 0..100) "$progress%" else null
+            val contentText = when {
+                message.isNotBlank() && etaText.isNotBlank() -> "$message$etaText"
+                message.isNotBlank() -> message
+                etaText.isNotBlank() -> etaText.trimStart(' ', '·', ' ')
+                else -> "백그라운드에서 작업 중입니다."
+            }
+
+            val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle(taskTitle)
+                .setContentText(contentText)
+                .setSmallIcon(android.R.drawable.stat_sys_upload)
+                .setOnlyAlertOnce(true)
+                .setOngoing(ongoing)
+                .setContentIntent(tapIntent)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+
+            if (subText != null) builder.setSubText(subText)
+
+            if (progress in 0..100) {
+                builder.setProgress(100, progress, false)
+            } else {
+                builder.setProgress(0, 0, true)
+            }
+
+            NotificationManagerCompat.from(this).notify(NOTIF_ID, builder.build())
+
+            if (progress >= 100) {
+                taskStartMs = 0L
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    stopForeground(Service.STOP_FOREGROUND_REMOVE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    stopForeground(true)
+                }
+                stopSelf()
+            }
+        } catch (t: Throwable) {
+            android.util.Log.w(
+                "AppForegroundService",
+                "알림 상세 갱신 실패(포그라운드는 유지): ${t.message}",
+                t,
+            )
         }
         return START_NOT_STICKY
     }

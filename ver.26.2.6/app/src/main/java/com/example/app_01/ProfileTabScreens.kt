@@ -1,5 +1,6 @@
 package com.example.app_01
 
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -23,10 +25,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,6 +40,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun ProfileScreen(
@@ -42,11 +52,38 @@ fun ProfileScreen(
     onServerSettingsClick: () -> Unit,
     onArCoreSettingsClick: () -> Unit,
     onSensorCheckClick: () -> Unit,
-    onPermissionsClick: () -> Unit = {}
+    onWarningLogClick: () -> Unit,
+    onPermissionsClick: () -> Unit = {},
 ) {
     val palette = LocalAppUiPalette.current
     val mode = LocalAppUiThemeMode.current
     val setMode = LocalSetAppUiThemeMode.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var isClearingAppCache by remember { mutableStateOf(false) }
+
+    fun runClearApplicationCacheJunk() {
+        if (isClearingAppCache) return
+        isClearingAppCache = true
+        scope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    clearApplicationCacheJunk(context.applicationContext)
+                }
+                Toast.makeText(
+                    context,
+                    formatAppCacheCleanResult(result),
+                    Toast.LENGTH_LONG,
+                ).show()
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                Toast.makeText(context, "캐시 삭제 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
+            } finally {
+                isClearingAppCache = false
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -164,6 +201,36 @@ fun ProfileScreen(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
+                .clickable { onWarningLogClick() }
+                .padding(16.dp)
+        ) {
+            Column {
+                Text(
+                    text = "경고 로그",
+                    color = palette.onBackground,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "강제 종료·복구 불가 예외 발생 시 재실행 후 여기에서 마지막 기록을 볼 수 있습니다.",
+                    color = palette.onBackgroundMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(palette.divider)
+        )
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
                 .clickable { onArCoreSettingsClick() }
                 .padding(16.dp)
         ) {
@@ -231,12 +298,136 @@ fun ProfileScreen(
             }
         }
 
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = !isClearingAppCache) { runClearApplicationCacheJunk() }
+                .padding(16.dp)
+        ) {
+            Column {
+                Text(
+                    text = if (isClearingAppCache) "애플리케이션 캐시 삭제 중..." else "애플리케이션 캐시 삭제",
+                    color = palette.onBackground.copy(alpha = if (isClearingAppCache) 0.5f else 1f),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "앱 내부·외부 캐시, Coil(이미지), 웹 저장소, PLY→OBJ 변환 캐시, 세션 임시 폴더, 다운로드 실패 잔여물을 정리합니다. (라이브러리 원본·저장된 모델 결과는 유지)",
+                    color = palette.onBackgroundMuted,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(1.dp)
                 .background(palette.divider)
         )
+    }
+}
+
+@Composable
+fun WarningLogScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val palette = LocalAppUiPalette.current
+    val scroll = rememberScrollState()
+    var logText by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        logText = withContext(Dispatchers.IO) { AppWarningLog.readLogText(context) }
+    }
+
+    LaunchedEffect(logText) {
+        if (!logText.isNullOrEmpty()) {
+            delay(80)
+            scroll.scrollTo(scroll.maxValue)
+        }
+    }
+
+    BackHandler { onBack() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(palette.background)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "뒤로",
+                    tint = palette.onBackground
+                )
+            }
+            Text(
+                text = "경고 로그",
+                color = palette.onBackground,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(palette.divider)
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            TextButton(
+                onClick = {
+                    scope.launch(Dispatchers.IO) {
+                        AppWarningLog.clear(context)
+                        val t = AppWarningLog.readLogText(context)
+                        withContext(Dispatchers.Main) { logText = t }
+                    }
+                }
+            ) {
+                Text("비우기", color = palette.error)
+            }
+            TextButton(
+                onClick = {
+                    scope.launch(Dispatchers.IO) {
+                        val t = AppWarningLog.readLogText(context)
+                        withContext(Dispatchers.Main) { logText = t }
+                    }
+                }
+            ) {
+                Text("새로 고침", color = palette.brand)
+            }
+        }
+
+        SelectionContainer(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(scroll)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        ) {
+            Text(
+                text = logText ?: "불러오는 중…",
+                color = palette.onBackgroundMuted,
+                fontSize = 11.sp,
+                lineHeight = 14.sp,
+            )
+        }
     }
 }
 

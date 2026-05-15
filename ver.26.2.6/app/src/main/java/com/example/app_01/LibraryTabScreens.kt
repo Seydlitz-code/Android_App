@@ -154,7 +154,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -280,8 +279,9 @@ import android.widget.VideoView
 import android.widget.MediaController
 import android.graphics.Bitmap
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.example.app_01.ui.theme.App_01Theme
@@ -597,6 +597,32 @@ internal data class Model3dSplitLibrary(
     val objModels: List<PlyModel>,
 )
 
+private const val LIBRARY_LOAD_LOG_TAG = "GalleryLibraryLoad"
+
+private fun logLibraryLoadFailure(where: String, t: Throwable) {
+    android.util.Log.w(
+        LIBRARY_LOAD_LOG_TAG,
+        "$where 실패: ${t.message ?: t.javaClass.simpleName}",
+        t,
+    )
+}
+
+private suspend fun loadModel3dLibraryOnIo(context: Context): Model3dSplitLibrary =
+    withContext(Dispatchers.IO) {
+        var result = Model3dSplitLibrary(emptyList(), emptyList())
+        loadModel3dLibrary(context) { result = it }
+        result
+    }
+
+private fun isServerTaskModelFile(file: File): Boolean =
+    file.parentFile?.name?.startsWith("server_task_") == true
+
+private fun shouldAutoGenerateModelThumbnail(file: File): Boolean {
+    if (!file.exists() || !file.isFile) return false
+    if (isServerTaskModelFile(file)) return false
+    return file.length() <= 20L * 1024L * 1024L
+}
+
 /** 갤러리 오버플로 메뉴에서 선택한 뒤 이미지 선택·확인으로 이어지는 동작 */
 private enum class PendingGalleryMenuAction {
     None,
@@ -621,8 +647,6 @@ data class ServerPipelineResultBundle(
     val plyFile: File,
     val directory: File,
     val filesByKey: Map<String, File>,
-    /** 서버 3DGS 파이프라인 완료 후 뷰어 URL (폴링·콜백으로 나중에 채워질 수 있음) */
-    val gsViewerUrl: String? = null,
 )
 
 
@@ -692,6 +716,10 @@ private fun PlyModelThumbnailImage(
     val themeMode = LocalAppUiThemeMode.current
     var thumbUri by remember(model.file.absolutePath) { mutableStateOf<Uri?>(null) }
     LaunchedEffect(model.file.absolutePath, model.lastModified, thumbRefresh, themeMode) {
+        if (!shouldAutoGenerateModelThumbnail(model.file)) {
+            thumbUri = null
+            return@LaunchedEffect
+        }
         thumbUri = try {
             Model3dThumbnail.generateOrGetAsync(context, model.file)?.let { Uri.fromFile(it) }
         } catch (_: Throwable) {
@@ -990,10 +1018,10 @@ private fun LibraryAlbumHubGrid(
             placeholderInk
         ),
         HubEntry(
-            LibraryTab.GS_ANALYSIS, "3DGS 분석 이미지",
+            LibraryTab.GS_ANALYSIS, "3DGS 분석·품질",
             "${gsAnalysisCount}개",
             gsAnalysisCoverUri,
-            Icons.Filled.AutoFixHigh,
+            Icons.Outlined.Description,
             placeholderInk
         ),
         HubEntry(
@@ -1172,16 +1200,35 @@ fun GalleryScreen(
     var showDeleteLibraryItemsConfirm by remember { mutableStateOf(false) }
     var libraryMiscRefresh by remember { mutableIntStateOf(0) }
     LaunchedEffect(libraryTab, serverArtifactLibraryVersion, libraryMiscRefresh) {
-        serverTaskManifestInfos = withContext(Dispatchers.IO) { scanServerTaskManifestInfos(context) }
-        jsonLibraryFiles = withContext(Dispatchers.IO) { JsonLibrary.listFilesSorted(context) }
-        arcoreLibraryFiles = withContext(Dispatchers.IO) { ArcoreLibrary.listFilesSorted(context) }
+        try {
+            // 세 가지 IO 작업을 병렬로 실행해 전체 대기 시간을 줄입니다.
+            coroutineScope {
+                val manifestsJob = async(Dispatchers.IO) { scanServerTaskManifestInfos(context) }
+                val jsonsJob     = async(Dispatchers.IO) { JsonLibrary.listFilesSorted(context) }
+                val arcoresJob   = async(Dispatchers.IO) { ArcoreLibrary.listFilesSorted(context) }
+                serverTaskManifestInfos = manifestsJob.await()
+                jsonLibraryFiles        = jsonsJob.await()
+                arcoreLibraryFiles      = arcoresJob.await()
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            logLibraryLoadFailure("서버/JSON/ARCore 라이브러리 재스캔", t)
+        }
     }
     val gsPreviewUris = remember(serverTaskManifestInfos) { previewUrisForServerTasks(serverTaskManifestInfos) }
-    val gsAnalysisUris = remember(serverTaskManifestInfos) { analysisImageUrisForServerTasks(serverTaskManifestInfos) }
+    val gsAnalysisGridItems = remember(serverTaskManifestInfos) { collectGsAnalysisGridItems(serverTaskManifestInfos) }
+    val gsAnalysisImageUrisOnly = remember(gsAnalysisGridItems) {
+        gsAnalysisGridItems.mapNotNull { item ->
+            when (item) {
+                is GsAnalysisGridItem.ImageTile -> item.uri
+                is GsAnalysisGridItem.QualityJsonTile -> null
+            }
+        }
+    }
     val gsPreviewCount = remember(serverTaskManifestInfos) { countPreviewTasks(serverTaskManifestInfos) }
     val gsAnalysisCount = remember(serverTaskManifestInfos) { countAnalysisTasks(serverTaskManifestInfos) }
     val gsPreviewCoverUri = gsPreviewUris.firstOrNull()
-    val gsAnalysisCoverUri = gsAnalysisUris.firstOrNull()
+    val gsAnalysisCoverUri = remember(gsAnalysisGridItems) { gsAnalysisCoverUriFirstImage(gsAnalysisGridItems) }
     val noServerResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
     var isEditMode by remember { mutableStateOf(false) }
     var selectedItems by remember { mutableStateOf<Set<Uri>>(emptySet()) }
@@ -1244,6 +1291,7 @@ fun GalleryScreen(
     // [추가] 내보내기/가져오기 작업 상태
     var isTransferring by remember { mutableStateOf(false) }
     val transferScope = rememberCoroutineScope()
+    val pipelineUploadScope = rememberCoroutineScope()
 
     LaunchedEffect(objViewerPathKey) {
         if (objViewerPathKey == null) return@LaunchedEffect
@@ -1320,6 +1368,10 @@ fun GalleryScreen(
             libraryHubModel3dCoverUri = null
             return@LaunchedEffect
         }
+        if (!shouldAutoGenerateModelThumbnail(f)) {
+            libraryHubModel3dCoverUri = null
+            return@LaunchedEffect
+        }
         libraryHubModel3dCoverUri = try {
             Model3dThumbnail.generateOrGetAsync(context, f)?.let { Uri.fromFile(it) }
         } catch (_: Throwable) {
@@ -1341,6 +1393,10 @@ fun GalleryScreen(
             plySubHubCoverUri = null
             return@LaunchedEffect
         }
+        if (!shouldAutoGenerateModelThumbnail(f)) {
+            plySubHubCoverUri = null
+            return@LaunchedEffect
+        }
         plySubHubCoverUri = try {
             Model3dThumbnail.generateOrGetAsync(context, f)?.let { Uri.fromFile(it) }
         } catch (_: Throwable) {
@@ -1359,6 +1415,10 @@ fun GalleryScreen(
     ) {
         val f = objSubHubSource
         if (f == null) {
+            objSubHubCoverUri = null
+            return@LaunchedEffect
+        }
+        if (!shouldAutoGenerateModelThumbnail(f)) {
             objSubHubCoverUri = null
             return@LaunchedEffect
         }
@@ -1394,6 +1454,8 @@ fun GalleryScreen(
     var pending3DArcoreZipUriForDataset by remember { mutableStateOf<Uri?>(null) }
     /** 3D 모델링 다이얼로그에서 ARCore ZIP을 앱 ARCore 라이브러리에서 고를 때 */
     var showDatasetArcoreLibraryPicker by remember { mutableStateOf(false) }
+    /** 서버 quality_report.json 미리보기 */
+    var qualityReportDialogFile by remember { mutableStateOf<File?>(null) }
     LaunchedEffect(show3DModelingDialog) {
         if (!show3DModelingDialog) showDatasetArcoreLibraryPicker = false
     }
@@ -1624,6 +1686,25 @@ fun GalleryScreen(
         onLibraryHubVisibilityChange(true)
     }
 
+    // 허브가 열리기 전에 라이브러리 데이터를 미리 병렬 로드해 초기 지연을 없앱니다.
+    LaunchedEffect(Unit) {
+        try {
+            coroutineScope {
+                val dsJob  = async(Dispatchers.IO) { loadDatasetFoldersSync(context) }
+                val m3dJob = async { loadModel3dLibraryOnIo(context) }
+                val stlJob = async(Dispatchers.IO) { AiCadLibrary.listStlFiles(context) }
+                datasetFolders = dsJob.await()
+                val lib = m3dJob.await()
+                plyLibraryModels = lib.plyModels
+                objLibraryModels = lib.objModels
+                aiCadStlFiles = stlJob.await()
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            logLibraryLoadFailure("라이브러리 사전 로드", t)
+        }
+    }
+
     LaunchedEffect(showLibraryHub) {
         if (showLibraryHub) {
             selectedLibraryDeletePaths = emptySet()
@@ -1632,42 +1713,44 @@ fun GalleryScreen(
     }
 
     LaunchedEffect(libraryTab) {
-        libraryAssetEditMode = false
-        selectedLibraryAssetPaths = emptySet()
-        showLibraryAssetDeleteConfirm = false
-        selectedLibraryDeletePaths = emptySet()
-        showDeleteLibraryItemsConfirm = false
-        if (libraryTab != LibraryTab.GALLERY) {
-            showGalleryOverflowMenu = false
-            pendingGalleryMenuAction = PendingGalleryMenuAction.None
-        }
-        if (libraryTab != LibraryTab.GALLERY && isEditMode) {
-            isEditMode = false
-            selectedItems = emptySet()
-        }
-        if (libraryTab != LibraryTab.DATASET && isDatasetEditMode) {
-            isDatasetEditMode = false
-            selectedDatasetFolders = emptySet()
-        }
-        if (libraryTab == LibraryTab.DATASET) {
-            loadDatasetFolders(context) { folders ->
-                datasetFolders = folders
+        try {
+            libraryAssetEditMode = false
+            selectedLibraryAssetPaths = emptySet()
+            showLibraryAssetDeleteConfirm = false
+            selectedLibraryDeletePaths = emptySet()
+            showDeleteLibraryItemsConfirm = false
+            if (libraryTab != LibraryTab.GALLERY) {
+                showGalleryOverflowMenu = false
+                pendingGalleryMenuAction = PendingGalleryMenuAction.None
             }
-        }
-        if (libraryTab == LibraryTab.MODEL_3D) {
-            loadModel3dLibrary(context) { lib ->
+            if (libraryTab != LibraryTab.GALLERY && isEditMode) {
+                isEditMode = false
+                selectedItems = emptySet()
+            }
+            if (libraryTab != LibraryTab.DATASET && isDatasetEditMode) {
+                isDatasetEditMode = false
+                selectedDatasetFolders = emptySet()
+            }
+            if (libraryTab == LibraryTab.DATASET) {
+                datasetFolders = withContext(Dispatchers.IO) { loadDatasetFoldersSync(context) }
+            }
+            if (libraryTab == LibraryTab.MODEL_3D) {
+                val lib = loadModel3dLibraryOnIo(context)
                 plyLibraryModels = lib.plyModels
                 objLibraryModels = lib.objModels
             }
-        }
-        if (libraryTab != LibraryTab.MODEL_3D) {
-            if (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER ||
-                libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ||
-                libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST
-            ) {
-                libraryDetailScreen = LibraryDetailScreen.NONE
-                currentPlyModel = null
+            if (libraryTab != LibraryTab.MODEL_3D) {
+                if (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER ||
+                    libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ||
+                    libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST
+                ) {
+                    libraryDetailScreen = LibraryDetailScreen.NONE
+                    currentPlyModel = null
+                }
             }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            logLibraryLoadFailure("라이브러리 탭 전환 처리", t)
         }
     }
 
@@ -1682,10 +1765,15 @@ fun GalleryScreen(
     }
 
     LaunchedEffect(libraryTab, aiCadLibraryVersion) {
-        if (libraryTab == LibraryTab.AI_CAD) {
-            aiCadStlFiles = withContext(Dispatchers.IO) { AiCadLibrary.listStlFiles(context) }
-        } else {
-            selectedAiCadStlFile = null
+        try {
+            if (libraryTab == LibraryTab.AI_CAD) {
+                aiCadStlFiles = withContext(Dispatchers.IO) { AiCadLibrary.listStlFiles(context) }
+            } else {
+                selectedAiCadStlFile = null
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            logLibraryLoadFailure("AI CAD 라이브러리 목록 로드", t)
         }
     }
 
@@ -1696,21 +1784,35 @@ fun GalleryScreen(
         if (libraryDetailScreen == LibraryDetailScreen.DATASET_FOLDER) return@LaunchedEffect
 
         while (true) {
-            val folders = withContext(Dispatchers.IO) { loadDatasetFoldersSync(context) }
-            datasetFolders = folders
+            try {
+                val folders = withContext(Dispatchers.IO) { loadDatasetFoldersSync(context) }
+                datasetFolders = folders
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                logLibraryLoadFailure("데이터셋 폴더 주기 갱신", t)
+            }
             delay(10_000) // 10초마다 정리/갱신
         }
     }
 
-    // 앨범 허브에 표시할 최신 개수·표지용 데이터 선로드
+    // 앨범 허브 표시·버전 변경 시 최신 개수·표지 데이터를 병렬로 갱신합니다.
     LaunchedEffect(showLibraryHub, aiCadLibraryVersion, images.size, serverArtifactLibraryVersion) {
         if (!showLibraryHub) return@LaunchedEffect
-        loadDatasetFolders(context) { datasetFolders = it }
-        loadModel3dLibrary(context) { lib ->
-            plyLibraryModels = lib.plyModels
-            objLibraryModels = lib.objModels
+        try {
+            coroutineScope {
+                val dsJob  = async(Dispatchers.IO) { loadDatasetFoldersSync(context) }
+                val m3dJob = async { loadModel3dLibraryOnIo(context) }
+                val stlJob = async(Dispatchers.IO) { AiCadLibrary.listStlFiles(context) }
+                datasetFolders = dsJob.await()
+                val lib = m3dJob.await()
+                plyLibraryModels = lib.plyModels
+                objLibraryModels = lib.objModels
+                aiCadStlFiles = stlJob.await()
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            logLibraryLoadFailure("라이브러리 허브 갱신", t)
         }
-        aiCadStlFiles = withContext(Dispatchers.IO) { AiCadLibrary.listStlFiles(context) }
     }
 
     Column(
@@ -1787,7 +1889,7 @@ fun GalleryScreen(
                                 LibraryTab.DATASET -> "데이터셋폴더"
                                 LibraryTab.GALLERY -> "갤러리"
                                 LibraryTab.GS_PREVIEW -> "3DGS 미리보기"
-                                LibraryTab.GS_ANALYSIS -> "3DGS 분석 이미지"
+                                LibraryTab.GS_ANALYSIS -> "3DGS 분석·품질"
                                 LibraryTab.JSON_LIBRARY -> "JSON"
                                 LibraryTab.AR_CORE_LIBRARY -> "ARCore"
                             }
@@ -3356,16 +3458,18 @@ fun GalleryScreen(
                 }
             }
         } else if (libraryTab == LibraryTab.GS_ANALYSIS) {
-            if (gsAnalysisUris.isEmpty()) {
+            if (gsAnalysisGridItems.isEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "저장된 3DGS 분석 이미지가 없습니다.",
+                        text = "저장된 포인트 클라우드 품질 리포트·분석 이미지가 없습니다.",
                         color = palette.onBackground.copy(alpha = 0.65f),
                         fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(24.dp),
                     )
                 }
             } else {
@@ -3376,63 +3480,146 @@ fun GalleryScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    itemsIndexed(gsAnalysisUris, key = { _, uri -> uri.toString() }) { index, uri ->
-                        val filePath = remember(uri) {
-                            if (uri.scheme == "file") {
-                                uri.path?.let { p ->
-                                    runCatching { File(p).canonicalPath }.getOrNull() ?: p
+                    itemsIndexed(
+                        gsAnalysisGridItems,
+                        key = { _, item ->
+                            when (item) {
+                                is GsAnalysisGridItem.ImageTile ->
+                                    "img:${item.canonicalPath ?: item.uri}"
+                                is GsAnalysisGridItem.QualityJsonTile ->
+                                    "qj:${item.taskId}:${item.file.absolutePath}"
+                            }
+                        },
+                    ) { index, item ->
+                        when (item) {
+                            is GsAnalysisGridItem.ImageTile -> {
+                                val uri = item.uri
+                                val filePath = item.canonicalPath
+                                val delHighlight =
+                                    filePath != null && filePath in selectedLibraryDeletePaths
+                                Image(
+                                    painter = rememberGalleryGridPhotoPainter(uri, gridThumbPx),
+                                    contentDescription = "3DGS 분석 이미지",
+                                    modifier = Modifier
+                                        .aspectRatio(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .then(
+                                            if (delHighlight) {
+                                                Modifier.border(
+                                                    2.dp,
+                                                    Color(0xFFFF5252),
+                                                    RoundedCornerShape(8.dp),
+                                                )
+                                            } else {
+                                                Modifier
+                                            },
+                                        )
+                                        .combinedClickable(
+                                            onClick = {
+                                                if (selectedLibraryDeletePaths.isNotEmpty()) {
+                                                    filePath?.let { p ->
+                                                        selectedLibraryDeletePaths =
+                                                            if (p in selectedLibraryDeletePaths) {
+                                                                selectedLibraryDeletePaths - p
+                                                            } else {
+                                                                selectedLibraryDeletePaths + p
+                                                            }
+                                                    }
+                                                } else {
+                                                    val imgIndex = gsAnalysisImageUrisOnly.indexOf(uri)
+                                                    if (imgIndex >= 0) {
+                                                        onServerPipelineOpenImageViewer(gsAnalysisImageUrisOnly, imgIndex)
+                                                    } else {
+                                                        onServerPipelineOpenImageViewer(listOf(uri), 0)
+                                                    }
+                                                }
+                                            },
+                                            onLongClick = {
+                                                filePath?.let { p ->
+                                                    selectedLibraryDeletePaths =
+                                                        if (p in selectedLibraryDeletePaths) {
+                                                            selectedLibraryDeletePaths - p
+                                                        } else {
+                                                            selectedLibraryDeletePaths + p
+                                                        }
+                                                }
+                                            },
+                                        ),
+                                    contentScale = ContentScale.Crop,
+                                )
+                            }
+                            is GsAnalysisGridItem.QualityJsonTile -> {
+                                val filePath = item.canonicalPath
+                                val delHighlight =
+                                    filePath != null && filePath in selectedLibraryDeletePaths
+                                Box(
+                                    modifier = Modifier
+                                        .aspectRatio(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(palette.surfaceCardAlt)
+                                        .then(
+                                            if (delHighlight) {
+                                                Modifier.border(
+                                                    2.dp,
+                                                    Color(0xFFFF5252),
+                                                    RoundedCornerShape(8.dp),
+                                                )
+                                            } else {
+                                                Modifier
+                                            },
+                                        )
+                                        .combinedClickable(
+                                            onClick = {
+                                                if (selectedLibraryDeletePaths.isNotEmpty()) {
+                                                    filePath?.let { p ->
+                                                        selectedLibraryDeletePaths =
+                                                            if (p in selectedLibraryDeletePaths) {
+                                                                selectedLibraryDeletePaths - p
+                                                            } else {
+                                                                selectedLibraryDeletePaths + p
+                                                            }
+                                                    }
+                                                } else {
+                                                    qualityReportDialogFile = item.file
+                                                }
+                                            },
+                                            onLongClick = {
+                                                filePath?.let { p ->
+                                                    selectedLibraryDeletePaths =
+                                                        if (p in selectedLibraryDeletePaths) {
+                                                            selectedLibraryDeletePaths - p
+                                                        } else {
+                                                            selectedLibraryDeletePaths + p
+                                                        }
+                                                }
+                                            },
+                                        ),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        modifier = Modifier.padding(6.dp),
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Outlined.Description,
+                                            contentDescription = "품질 리포트",
+                                            tint = palette.onBackground.copy(alpha = 0.55f),
+                                            modifier = Modifier.size(36.dp),
+                                        )
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = "품질\n평가",
+                                            color = palette.onBackground.copy(alpha = 0.85f),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            textAlign = TextAlign.Center,
+                                            lineHeight = 13.sp,
+                                            maxLines = 2,
+                                        )
+                                    }
                                 }
-                            } else {
-                                null
                             }
                         }
-                        val delHighlight =
-                            filePath != null && filePath in selectedLibraryDeletePaths
-                        Image(
-                            painter = rememberGalleryGridPhotoPainter(uri, gridThumbPx),
-                            contentDescription = "3DGS 분석 이미지",
-                            modifier = Modifier
-                                .aspectRatio(1f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .then(
-                                    if (delHighlight) {
-                                        Modifier.border(
-                                            2.dp,
-                                            Color(0xFFFF5252),
-                                            RoundedCornerShape(8.dp),
-                                        )
-                                    } else {
-                                        Modifier
-                                    },
-                                )
-                                .combinedClickable(
-                                    onClick = {
-                                        if (selectedLibraryDeletePaths.isNotEmpty()) {
-                                            filePath?.let { p ->
-                                                selectedLibraryDeletePaths =
-                                                    if (p in selectedLibraryDeletePaths) {
-                                                        selectedLibraryDeletePaths - p
-                                                    } else {
-                                                        selectedLibraryDeletePaths + p
-                                                    }
-                                            }
-                                        } else {
-                                            onServerPipelineOpenImageViewer(gsAnalysisUris, index)
-                                        }
-                                    },
-                                    onLongClick = {
-                                        filePath?.let { p ->
-                                            selectedLibraryDeletePaths =
-                                                if (p in selectedLibraryDeletePaths) {
-                                                    selectedLibraryDeletePaths - p
-                                                } else {
-                                                    selectedLibraryDeletePaths + p
-                                                }
-                                        }
-                                    },
-                                ),
-                            contentScale = ContentScale.Crop,
-                        )
                     }
                 }
             }
@@ -4006,15 +4193,20 @@ fun GalleryScreen(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalAlignment = Alignment.CenterHorizontally
                                     ) {
-                                        LinearProgressIndicator(
-                                            progress = { 1f },
+                                        Box(
                                             modifier = Modifier
                                                 .fillMaxWidth()
                                                 .height(8.dp)
-                                                .clip(RoundedCornerShape(4.dp)),
-                                            color = palette.onBackground,
-                                            trackColor = palette.onBackground.copy(alpha = 0.12f),
-                                        )
+                                                .clip(RoundedCornerShape(4.dp))
+                                                .background(palette.onBackground.copy(alpha = 0.12f))
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxHeight()
+                                                    .fillMaxWidth()
+                                                    .background(palette.onBackground)
+                                            )
+                                        }
                                         Spacer(modifier = Modifier.height(8.dp))
                                         Text(
                                             text = "100%",
@@ -4066,7 +4258,9 @@ fun GalleryScreen(
                                             textAlign = TextAlign.Center
                                         )
                                     }
-                                    val analysisPng = spb.filesByKey["quality_png"]
+                                    val qualityJson = spb.filesByKey["quality_json"]?.takeIf { it.exists() && it.isFile }
+                                    val analysisPngLegacy = spb.filesByKey["quality_png"]?.takeIf { it.exists() && it.isFile }
+                                    val hasQualityOrAnalysisView = qualityJson != null || analysisPngLegacy != null
                                     Box(
                                         modifier = Modifier
                                             .weight(1f)
@@ -4074,15 +4268,20 @@ fun GalleryScreen(
                                             .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
                                             .clip(RoundedCornerShape(8.dp))
                                             .background(
-                                                if (analysisPng?.exists() == true) completionBtnBg
+                                                if (hasQualityOrAnalysisView) completionBtnBg
                                                 else completionBtnDisabled
                                             )
-                                            .clickable(enabled = analysisPng?.exists() == true) {
-                                                val f = analysisPng
+                                            .clickable(enabled = hasQualityOrAnalysisView) {
+                                                val jf = qualityJson
+                                                if (jf != null) {
+                                                    qualityReportDialogFile = jf
+                                                    return@clickable
+                                                }
+                                                val f = analysisPngLegacy
                                                 if (f == null || !f.exists()) {
                                                     android.widget.Toast.makeText(
                                                         context,
-                                                        "분석 이미지가 없습니다.",
+                                                        "품질 리포트·분석 이미지가 없습니다.",
                                                         android.widget.Toast.LENGTH_SHORT
                                                     ).show()
                                                     return@clickable
@@ -4096,9 +4295,9 @@ fun GalleryScreen(
                                                         android.widget.Toast.LENGTH_SHORT
                                                     ).show()
                                                 } else {
-                                                    val ai = gsAnalysisUris.indexOfFirst { it == u }
+                                                    val ai = gsAnalysisImageUrisOnly.indexOfFirst { it == u }
                                                     if (ai >= 0) {
-                                                        onServerPipelineOpenImageViewer(gsAnalysisUris, ai)
+                                                        onServerPipelineOpenImageViewer(gsAnalysisImageUrisOnly, ai)
                                                     } else {
                                                         onServerPipelineOpenImageViewer(listOf(u), 0)
                                                     }
@@ -4107,8 +4306,12 @@ fun GalleryScreen(
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
-                                            text = "3DGS 분석\n이미지",
-                                            color = if (analysisPng?.exists() == true) completionBtnFg else completionBtnFgDisabled,
+                                            text = when {
+                                                qualityJson != null -> "포인트 클라우드\n품질 평가"
+                                                analysisPngLegacy != null -> "3DGS 분석\n이미지"
+                                                else -> "품질·분석"
+                                            },
+                                            color = if (hasQualityOrAnalysisView) completionBtnFg else completionBtnFgDisabled,
                                             fontSize = 12.sp,
                                             fontWeight = FontWeight.Bold,
                                             textAlign = TextAlign.Center,
@@ -4963,9 +5166,76 @@ fun GalleryScreen(
             }
         }
 
+        qualityReportDialogFile?.let { qFile ->
+            Dialog(onDismissRequest = { qualityReportDialogFile = null }) {
+                val scrollState = rememberScrollState()
+                var bodyText by remember(qFile.absolutePath) { mutableStateOf<String?>(null) }
+                LaunchedEffect(qFile.absolutePath) {
+                    bodyText = withContext(Dispatchers.IO) {
+                        parsePointCloudQualityReportJson(qFile)?.let { formatPointCloudQualityReportKorean(it) }
+                            ?: runCatching { qFile.readText(Charsets.UTF_8) }.getOrNull()
+                            ?: "파일을 읽을 수 없습니다."
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(palette.surfaceCard, RoundedCornerShape(16.dp))
+                        .padding(20.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "포인트 클라우드 품질",
+                            color = palette.onBackground,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = qFile.name,
+                            color = palette.onBackgroundMuted,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = bodyText ?: "불러오는 중…",
+                            color = palette.onBackground,
+                            fontSize = 14.sp,
+                            lineHeight = 20.sp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 400.dp)
+                                .verticalScroll(scrollState)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(palette.onBackground.copy(alpha = 0.12f))
+                                .clickable { qualityReportDialogFile = null }
+                                .padding(vertical = 12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "닫기",
+                                color = palette.onBackground,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // 3D 모델링 프롬프트 입력 다이얼로그
         if (show3DModelingDialog) {
-            val isValid3DPrompt = modelingPromptText.isNotEmpty() && !modelingPromptError
+            val isDatasetServerUpload = pending3DSourceTab == LibraryTab.DATASET
+            val isValid3DPrompt = if (isDatasetServerUpload) {
+                pending3DArcoreZipUriForDataset != null
+            } else {
+                modelingPromptText.isNotEmpty() && !modelingPromptError
+            }
             val noServerResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
             val modelingPromptFieldBg =
                 if (palette.isDark) Color(0xFF1E1E1E) else palette.surfaceCardAlt
@@ -4986,57 +5256,63 @@ fun GalleryScreen(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "어떤 사물을 3D 모델링하시겠습니까?",
+                            text = if (isDatasetServerUpload) {
+                                "전송할 데이터셋과 ARCore ZIP을 확인하십시오."
+                            } else {
+                                "어떤 사물을 3D 모델링하시겠습니까?"
+                            },
                             color = palette.onBackground,
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold
                         )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        androidx.compose.material3.OutlinedTextField(
-                            value = modelingPromptText,
-                            onValueChange = { input ->
-                                modelingPromptText = input
-                                // 영문자, 숫자, 스페이스, 특수기호(ASCII 0x20~0x7E)만 허용
-                                modelingPromptError = input.isNotEmpty() && !input.all { it.code in 0x20..0x7E }
-                            },
-                            placeholder = {
-                                Text(
-                                    text = "예: gundam figure, white cup",
-                                    color = palette.onBackground.copy(alpha = 0.35f),
-                                    fontSize = 13.sp
-                                )
-                            },
-                            singleLine = true,
-                            isError = modelingPromptError,
-                            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = palette.onBackground,
-                                unfocusedTextColor = palette.onBackground,
-                                focusedBorderColor = if (modelingPromptError) Color(0xFFFF5252) else Color(0xFF9CD83B),
-                                unfocusedBorderColor = if (modelingPromptError) Color(0xFFFF5252) else palette.onBackground.copy(alpha = 0.4f),
-                                cursorColor = Color(0xFF9CD83B),
-                                focusedContainerColor = modelingPromptFieldBg,
-                                unfocusedContainerColor = modelingPromptFieldBg,
-                                errorBorderColor = Color(0xFFFF5252),
-                                errorContainerColor = modelingPromptFieldBg,
-                                errorTextColor = palette.onBackground,
-                                errorCursorColor = Color(0xFFFF5252)
-                            ),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        if (modelingPromptError) {
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "영어, 숫자, 특수기호만 입력 가능합니다 (한국어 불가)",
-                                color = Color(0xFFFF5252),
-                                fontSize = 12.sp
+                        if (!isDatasetServerUpload) {
+                            Spacer(modifier = Modifier.height(14.dp))
+                            androidx.compose.material3.OutlinedTextField(
+                                value = modelingPromptText,
+                                onValueChange = { input ->
+                                    modelingPromptText = input
+                                    // 영문자, 숫자, 스페이스, 특수기호(ASCII 0x20~0x7E)만 허용
+                                    modelingPromptError = input.isNotEmpty() && !input.all { it.code in 0x20..0x7E }
+                                },
+                                placeholder = {
+                                    Text(
+                                        text = "예: gundam figure, white cup",
+                                        color = palette.onBackground.copy(alpha = 0.35f),
+                                        fontSize = 13.sp
+                                    )
+                                },
+                                singleLine = true,
+                                isError = modelingPromptError,
+                                colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = palette.onBackground,
+                                    unfocusedTextColor = palette.onBackground,
+                                    focusedBorderColor = if (modelingPromptError) Color(0xFFFF5252) else Color(0xFF9CD83B),
+                                    unfocusedBorderColor = if (modelingPromptError) Color(0xFFFF5252) else palette.onBackground.copy(alpha = 0.4f),
+                                    cursorColor = Color(0xFF9CD83B),
+                                    focusedContainerColor = modelingPromptFieldBg,
+                                    unfocusedContainerColor = modelingPromptFieldBg,
+                                    errorBorderColor = Color(0xFFFF5252),
+                                    errorContainerColor = modelingPromptFieldBg,
+                                    errorTextColor = palette.onBackground,
+                                    errorCursorColor = Color(0xFFFF5252)
+                                ),
+                                modifier = Modifier.fillMaxWidth()
                             )
-                        } else {
-                            Spacer(modifier = Modifier.height(6.dp + 18.sp.value.dp))
+                            if (modelingPromptError) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = "영어, 숫자, 특수기호만 입력 가능합니다 (한국어 불가)",
+                                    color = Color(0xFFFF5252),
+                                    fontSize = 12.sp
+                                )
+                            } else {
+                                Spacer(modifier = Modifier.height(6.dp + 18.sp.value.dp))
+                            }
                         }
-                        if (pending3DSourceTab == LibraryTab.DATASET) {
+                        if (isDatasetServerUpload) {
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(
-                                text = "ARCore ZIP (선택) · poses.json 등이 포함된 ZIP",
+                                text = "ARCore ZIP (필수) · poses.json 등이 포함된 ZIP",
                                 color = palette.onBackground.copy(alpha = 0.85f),
                                 fontSize = 13.sp,
                             )
@@ -5070,7 +5346,7 @@ fun GalleryScreen(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "선택",
+                                    text = "라이브러리에서 선택",
                                     color = palette.brand,
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold,
@@ -5092,6 +5368,13 @@ fun GalleryScreen(
                                     )
                                 }
                             }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "텍스트 입력 없이 데이터셋 ZIP(file_pc)과 ARCore ZIP(file_gs)만 서버로 전송합니다.",
+                                color = palette.onBackground.copy(alpha = 0.62f),
+                                fontSize = 12.sp,
+                                lineHeight = 16.sp,
+                            )
                         }
                         Spacer(modifier = Modifier.height(16.dp))
                         Row(
@@ -5121,7 +5404,7 @@ fun GalleryScreen(
                                         else Color(0xFF1B4F8A).copy(alpha = 0.3f)
                                     )
                                     .clickable(enabled = isValid3DPrompt) {
-                                        val promptSnapshot = modelingPromptText.trim()
+                                        val promptSnapshot = if (isDatasetServerUpload) "" else modelingPromptText.trim()
                                         show3DModelingDialog = false
                                         uploadSourceTab = pending3DSourceTab
 
@@ -5131,7 +5414,7 @@ fun GalleryScreen(
                                                 isUploading = true
                                                 uploadProgress = 0 to 100
                                                 uploadMessage = "업로드 준비 중..."
-                                                CoroutineScope(Dispatchers.IO).launch {
+                                                pipelineUploadScope.launch(Dispatchers.IO) {
                                                     val mainHandler = Handler(Looper.getMainLooper())
                                                     try {
                                                         val zipFile = createZipFromUris(
@@ -5139,33 +5422,46 @@ fun GalleryScreen(
                                                             uris = urisSnapshot,
                                                             zipPrefix = "media"
                                                         )
-                                                        val bundle = if (zipFile != null) {
-                                                            uploadZipAndRunPipeline(
-                                                                context = context,
-                                                                zipFile = zipFile,
-                                                                prompt = promptSnapshot,
-                                                                onProgress = { p, msg ->
-                                                                    uploadProgress = p to 100
-                                                                    uploadMessage = msg
-                                                                }
-                                                            )
-                                                        } else null
-                                                        mainHandler.post {
-                                                            isUploading = false
-                                                            if (bundle != null) {
-                                                                onServerPipelineCompleteBundleChange(bundle)
-                                                                libraryModelThumbRefresh++
-                                                                selectedItems = emptySet()
-                                                                isEditMode = false
-                                                            } else {
+                                                        val pipelineResult =
+                                                            if (zipFile != null) {
+                                                                uploadZipAndRunPipeline(
+                                                                    context = context,
+                                                                    zipFile = zipFile,
+                                                                    prompt = promptSnapshot,
+                                                                    onProgress = { p, msg ->
+                                                                        uploadProgress = p to 100
+                                                                        uploadMessage = msg
+                                                                    },
+                                                                    onDa3Complete = { da3Bundle ->
+                                                                        mainHandler.post {
+                                                                            try {
+                                                                                isUploading = false
+                                                                                onServerPipelineCompleteBundleChange(da3Bundle)
+                                                                                if (shouldAutoGenerateModelThumbnail(da3Bundle.plyFile)) {
+                                                                                    libraryModelThumbRefresh++
+                                                                                }
+                                                                                selectedItems = emptySet()
+                                                                                isEditMode = false
+                                                                            } catch (t: Throwable) {
+                                                                                logLibraryLoadFailure("갤러리 DA3 완료 UI 갱신", t)
+                                                                                isUploading = false
+                                                                            }
+                                                                        }
+                                                                    },
+                                                                )
+                                                            } else null
+                                                        if (pipelineResult == null) {
+                                                            mainHandler.post {
+                                                                isUploading = false
                                                                 uploadResultPopupMessage =
                                                                     if (uploadMessage == noServerResponseMsg) noServerResponseMsg else "업로드 실패"
                                                                 showUploadResultPopup = true
                                                                 if (uploadMessage != noServerResponseMsg) uploadMessage = "업로드 실패"
                                                             }
                                                         }
-                                                    } catch (e: Exception) {
-                                                        e.printStackTrace()
+                                                    } catch (t: Throwable) {
+                                                        if (t is kotlinx.coroutines.CancellationException) throw t
+                                                        t.printStackTrace()
                                                         mainHandler.post {
                                                             isUploading = false
                                                             uploadMessage = "업로드 실패"
@@ -5181,7 +5477,7 @@ fun GalleryScreen(
                                                 isUploading = true
                                                 uploadProgress = 0 to 100
                                                 uploadMessage = "업로드 준비 중..."
-                                                CoroutineScope(Dispatchers.IO).launch {
+                                                pipelineUploadScope.launch(Dispatchers.IO) {
                                                     val mainHandler = Handler(Looper.getMainLooper())
                                                     try {
                                                         val folderFiles = foldersSnapshot
@@ -5192,86 +5488,73 @@ fun GalleryScreen(
                                                             folders = folderFiles,
                                                             zipPrefix = "dataset"
                                                         )
-                                                        val bundle = if (rawDatasetZip != null) {
-                                                            // ── ARCore ZIP 처리 ──────────────────────────────
-                                                            // 서버(main.py)는 file_pc 안의 poses.json만 ARCore로 사용.
-                                                            // → poses.json 을 file_pc(데이터셋 ZIP)에 병합.
-                                                            // → ARCore ZIP 원본은 file_gs 로도 전달(GS_ENABLE 시 3DGS 서버용).
-                                                            val arcoreZipForGs: File?
-                                                            val fileForPc: File
+                                                        var pipelineOk = false
+                                                        if (rawDatasetZip != null) {
+                                                            // 데이터셋 업로드는 텍스트 없이 두 ZIP만 전송합니다:
+                                                            // file_pc = 데이터셋 라이브러리 압축파일, file_gs = ARCore 압축파일.
                                                             val arcoreUri = arcoreUriSnapshot
-                                                            if (arcoreUri != null) {
-                                                                val arcoreTmp =
-                                                                    copyContentUriToTempZipFile(context, arcoreUri)
-                                                                if (arcoreTmp != null) {
-                                                                    // poses.json 을 데이터셋 ZIP에 병합 → file_pc
-                                                                    val merged = mergeArcorePosesIntoDatasetZip(
-                                                                        datasetZip = rawDatasetZip,
-                                                                        arcoreZip  = arcoreTmp,
-                                                                        context    = context,
-                                                                    )
-                                                                    if (merged != null) {
-                                                                        // 병합 성공 — 원본 데이터셋 ZIP 삭제
-                                                                        try { rawDatasetZip.delete() } catch (_: Exception) {}
-                                                                        fileForPc = merged
-                                                                    } else {
-                                                                        // poses.json 없음 — 데이터셋 ZIP 그대로 사용
-                                                                        mainHandler.post {
-                                                                            Toast.makeText(
-                                                                                context,
-                                                                                "ARCore ZIP에서 poses.json을 찾지 못했습니다.\n데이터셋만 file_pc로 전송합니다.",
-                                                                                Toast.LENGTH_LONG,
-                                                                            ).show()
-                                                                        }
-                                                                        fileForPc = rawDatasetZip
-                                                                    }
-                                                                    arcoreZipForGs = arcoreTmp  // file_gs: 3DGS 서버용
-                                                                } else {
-                                                                    mainHandler.post {
-                                                                        Toast.makeText(
-                                                                            context,
-                                                                            "ARCore ZIP 복사에 실패했습니다. 데이터셋만 전송합니다.",
-                                                                            Toast.LENGTH_LONG,
-                                                                        ).show()
-                                                                    }
-                                                                    fileForPc      = rawDatasetZip
-                                                                    arcoreZipForGs = null
+                                                            val arcoreZipForGs = if (arcoreUri != null) {
+                                                                copyContentUriToTempZipFile(context, arcoreUri)
+                                                            } else {
+                                                                null
+                                                            }
+                                                            if (arcoreZipForGs == null) {
+                                                                try {
+                                                                    rawDatasetZip.delete()
+                                                                } catch (_: Exception) {
+                                                                }
+                                                                mainHandler.post {
+                                                                    Toast.makeText(
+                                                                        context,
+                                                                        "ARCore ZIP을 읽을 수 없습니다. 데이터셋과 ARCore ZIP 두 파일이 모두 필요합니다.",
+                                                                        Toast.LENGTH_LONG,
+                                                                    ).show()
                                                                 }
                                                             } else {
-                                                                fileForPc      = rawDatasetZip
-                                                                arcoreZipForGs = null
+                                                                val pr = uploadZipAndRunPipeline(
+                                                                    context = context,
+                                                                    zipFile = rawDatasetZip,
+                                                                    prompt = "",
+                                                                    onProgress = { p, msg ->
+                                                                        uploadProgress = p to 100
+                                                                        uploadMessage = msg
+                                                                    },
+                                                                    gsZipFile = arcoreZipForGs,
+                                                                    contentDispositionFilename = SERVER_PIPELINE_ZIP_NAME_DATASET,
+                                                                    contentDispositionGsFilename = SERVER_PIPELINE_ZIP_NAME_ARCORE,
+                                                                    onDa3Complete = { da3Bundle ->
+                                                                        mainHandler.post {
+                                                                            try {
+                                                                                isUploading = false
+                                                                                pending3DArcoreZipUriForDataset = null
+                                                                                onServerPipelineCompleteBundleChange(da3Bundle)
+                                                                                if (shouldAutoGenerateModelThumbnail(da3Bundle.plyFile)) {
+                                                                                    libraryModelThumbRefresh++
+                                                                                }
+                                                                                selectedDatasetFolders = emptySet()
+                                                                                isDatasetEditMode = false
+                                                                            } catch (t: Throwable) {
+                                                                                logLibraryLoadFailure("데이터셋 DA3 완료 UI 갱신", t)
+                                                                                isUploading = false
+                                                                            }
+                                                                        }
+                                                                    },
+                                                                )
+                                                                pipelineOk = pr != null
                                                             }
-
-                                                            uploadZipAndRunPipeline(
-                                                                context = context,
-                                                                zipFile = fileForPc,
-                                                                prompt  = promptSnapshot,
-                                                                onProgress = { p, msg ->
-                                                                    uploadProgress = p to 100
-                                                                    uploadMessage = msg
-                                                                },
-                                                                gsZipFile                  = arcoreZipForGs,
-                                                                contentDispositionFilename   = SERVER_PIPELINE_ZIP_NAME_DATASET,
-                                                                contentDispositionGsFilename = SERVER_PIPELINE_ZIP_NAME_ARCORE,
-                                                            )
-                                                        } else null
-                                                        mainHandler.post {
-                                                            isUploading = false
-                                                            if (bundle != null) {
-                                                                pending3DArcoreZipUriForDataset = null
-                                                                onServerPipelineCompleteBundleChange(bundle)
-                                                                libraryModelThumbRefresh++
-                                                                selectedDatasetFolders = emptySet()
-                                                                isDatasetEditMode = false
-                                                            } else {
+                                                        }
+                                                        if (!pipelineOk) {
+                                                            mainHandler.post {
+                                                                isUploading = false
                                                                 uploadResultPopupMessage =
                                                                     if (uploadMessage == noServerResponseMsg) noServerResponseMsg else "업로드 실패"
                                                                 showUploadResultPopup = true
                                                                 if (uploadMessage != noServerResponseMsg) uploadMessage = "업로드 실패"
                                                             }
                                                         }
-                                                    } catch (e: Exception) {
-                                                        e.printStackTrace()
+                                                    } catch (t: Throwable) {
+                                                        if (t is kotlinx.coroutines.CancellationException) throw t
+                                                        t.printStackTrace()
                                                         mainHandler.post {
                                                             isUploading = false
                                                             uploadMessage = "업로드 실패"
@@ -5284,10 +5567,10 @@ fun GalleryScreen(
                                                 isUploading = true
                                                 uploadProgress = 0 to 100
                                                 uploadMessage = "업로드 준비 중..."
-                                                CoroutineScope(Dispatchers.IO).launch {
+                                                pipelineUploadScope.launch(Dispatchers.IO) {
                                                     val mainHandler = Handler(Looper.getMainLooper())
                                                     try {
-                                                        var lastBundle: ServerPipelineResultBundle? = null
+                                                        var lastDa3Bundle: ServerPipelineResultBundle? = null
                                                         var anyFail = false
                                                         for ((idx, pathStr) in pathsSnapshot.withIndex()) {
                                                             val src = File(pathStr)
@@ -5300,29 +5583,38 @@ fun GalleryScreen(
                                                                 "arcore_upload_${System.currentTimeMillis()}_${idx}_${src.name}",
                                                             )
                                                             src.copyTo(tmp, overwrite = true)
-                                                            val bundle = uploadZipAndRunPipeline(
+                                                            val single = uploadZipAndRunPipeline(
                                                                 context = context,
                                                                 zipFile = tmp,
                                                                 prompt = promptSnapshot,
                                                                 onProgress = { p, msg ->
-                                                                    mainHandler.post {
-                                                                        uploadProgress = p to 100
-                                                                        uploadMessage = msg
-                                                                    }
+                                                                    uploadProgress = p to 100
+                                                                    uploadMessage = msg
                                                                 },
                                                                 contentDispositionFilename = SERVER_PIPELINE_ZIP_NAME_ARCORE,
+                                                                onDa3Complete = { da3Bundle ->
+                                                                    mainHandler.post {
+                                                                        try {
+                                                                            // 다중 파일 업로드 중: isUploading 은 모든 파일 완료 후 해제
+                                                                            onServerPipelineCompleteBundleChange(da3Bundle)
+                                                                            if (shouldAutoGenerateModelThumbnail(da3Bundle.plyFile)) {
+                                                                                libraryModelThumbRefresh++
+                                                                            }
+                                                                        } catch (t: Throwable) {
+                                                                            logLibraryLoadFailure("ARCore DA3 완료 UI 갱신", t)
+                                                                        }
+                                                                    }
+                                                                },
                                                             )
-                                                            if (bundle != null) {
-                                                                lastBundle = bundle
-                                                            } else {
+                                                            if (single == null) {
                                                                 anyFail = true
+                                                            } else {
+                                                                lastDa3Bundle = single
                                                             }
                                                         }
                                                         mainHandler.post {
                                                             isUploading = false
-                                                            if (lastBundle != null) {
-                                                                onServerPipelineCompleteBundleChange(lastBundle)
-                                                                libraryModelThumbRefresh++
+                                                            if (lastDa3Bundle != null) {
                                                                 selectedLibraryDeletePaths = emptySet()
                                                                 if (anyFail) {
                                                                     Toast.makeText(
@@ -5340,8 +5632,9 @@ fun GalleryScreen(
                                                                 }
                                                             }
                                                         }
-                                                    } catch (e: Exception) {
-                                                        e.printStackTrace()
+                                                    } catch (t: Throwable) {
+                                                        if (t is kotlinx.coroutines.CancellationException) throw t
+                                                        t.printStackTrace()
                                                         mainHandler.post {
                                                             isUploading = false
                                                             uploadMessage = "업로드 실패"

@@ -29,6 +29,9 @@ object JsonLibrary {
     /** 로컬 메타는 JSON 라이브러리에 넣지 않음 */
     private const val SERVER_TASK_META_JSON = ".server_artifacts.json"
 
+    /** `models/json` 으로 복사할 JSON 상한(OOM 방지). 그 이상은 task 폴더 원본만 사용 */
+    private const val MAX_JSON_INGEST_COPY_BYTES = 24L * 1024L * 1024L
+
     fun ingestFromPipelineOutputDir(
         context: Context,
         taskDir: File,
@@ -45,6 +48,11 @@ object JsonLibrary {
         }
         for (source in candidates) {
             if (source.name == SERVER_TASK_META_JSON) continue
+            try {
+                Thread.sleep(25L)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
             val can = try {
                 source.canonicalPath
             } catch (_: Exception) {
@@ -66,9 +74,11 @@ object JsonLibrary {
     private fun isJsonLibraryCandidateFile(f: File): Boolean {
         if (!f.isFile) return false
         if (f.name == SERVER_TASK_META_JSON) return false
-        if (f.extension.equals("json", ignoreCase = true)) return true
         val len = f.length()
-        if (len <= 0L || len > 2_000_000L) return false
+        if (len <= 0L) return false
+        if (len > MAX_JSON_INGEST_COPY_BYTES) return false
+        if (f.extension.equals("json", ignoreCase = true)) return fileStartsLikeJson(f)
+        if (len > 2_000_000L) return false
         return fileStartsLikeJson(f)
     }
 

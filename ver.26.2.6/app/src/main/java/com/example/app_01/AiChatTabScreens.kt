@@ -1102,10 +1102,8 @@ fun ClaudeChatScreen(
                 scope.launch {
                     val imageBase64List = imagesForLlm.mapNotNull { uri ->
                         try {
-                            context.contentResolver.openInputStream(uri)?.use { stream ->
-                                val bitmap = BitmapFactory.decodeStream(stream)
-                                bitmap?.let { ClaudeChatClient.bitmapToBase64ForLlm(it) }
-                            }
+                            decodeBitmapWithMaxDimension(context, uri, 1280)
+                                ?.let { ClaudeChatClient.bitmapToBase64ForLlm(it) }
                         } catch (e: Exception) {
                             null
                         }

@@ -71,18 +71,32 @@ internal class PipelineCallbackHttpServer(
             return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "not found")
         }
 
-        // ── OOM 방어 ──────────────────────────────────────────────────────────
-        // NanoHTTPD 2.3.1 은 parseBody() 호출 시 multipart 전체를 ByteArray 로
-        // 메모리에 올립니다. PLY·GLB 등 대용량 파일이 포함된 경우 OOM 크래시가
-        // 발생합니다. Content-Length > MAX_PUSH_BODY_BYTES 이면 본문을 조각별로
-        // 읽어 버린 뒤 200 OK 반환 → 폴링 + HTTP 다운로드 경로로 자동 폴백됩니다.
-        val contentLength = session.headers["content-length"]?.toLongOrNull() ?: 0L
-        if (contentLength > MAX_PUSH_BODY_BYTES) {
+        // ── OOM 방어 (필수) ─────────────────────────────────────────────────────
+        // NanoHTTPD 2.3.1 의 parseBody() 는 멀티파트 POST 전량을 바이트 배열로
+        // 들고 올린 뒤 파싱합니다. 서버가 PLY·GLB·이미지를 콜백에 포함하면 한 번에
+        // 수백 MB 힙이 필요해 프로세스가 바로 종료되는 사례가 있습니다.
+        //
+        // - Content-Length 가 없거나(청크 등) 신뢰할 수 없으면 parseBody 호출 불가 → 드레인만
+        // - 알려진 길이라도 소량(텍스트·소형 JSON 상태만) 일 때만 parseBody 허용
+        // 그 외는 고정 버퍼로만 읽어 버리고 GET /results 다운로드로만 결과를 받습니다.
+        val contentLengthParsed = parseContentLengthSafe(session.headers["content-length"])
+        if (contentLengthParsed == CONTENT_LENGTH_MISSING) {
             android.util.Log.i(
                 "PipelineCallback",
-                "push body too large (${contentLength / 1024 / 1024} MB) — skipping file parsing, will use download path",
+                "content-length 불명 — parseBody 건너뜀(메모리 안전). HTTP 결과 다운로드 사용.",
             )
-            drainStreamQuietly(session.inputStream, contentLength)
+            drainInputStreamFixedBuffer(session.inputStream)
+            return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "ok")
+        }
+        if (contentLengthParsed > MAX_PARSE_BODY_BYTES) {
+            android.util.Log.i(
+                "PipelineCallback",
+                "본문 큼 (${contentLengthParsed / 1024} KB > ${MAX_PARSE_BODY_BYTES / 1024} KB) — 드레인 후 GET 다운로드 사용.",
+            )
+            drainStreamQuietly(session.inputStream, contentLengthParsed)
+            return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "ok")
+        }
+        if (contentLengthParsed == 0L) {
             return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "ok")
         }
 
@@ -111,13 +125,17 @@ internal class PipelineCallbackHttpServer(
             val partFiles = LinkedHashMap<String, File>()
             for ((field, tmpPath) in tmpPaths) {
                 if (field in SKIP_FIELDS) continue
+                val artifactKey = normalizeMobileServerArtifactKey(field, field) ?: run {
+                    android.util.Log.i("PipelineCallback", "unsupported callback file field skipped: $field")
+                    continue
+                }
                 val src = File(tmpPath)
                 if (!src.isFile) continue
-                val ext = src.extension.ifBlank { "bin" }
-                val dest = File(pushPartsDir, "${taskId}_${ord}_$field.$ext")
+                val ext = extensionForCallbackArtifact(artifactKey)
+                val dest = File(pushPartsDir, "${taskId}_${ord}_$artifactKey.$ext")
                 try {
                     src.copyTo(dest, overwrite = true)
-                    if (dest.isFile && dest.length() > 0L) partFiles[field] = dest
+                    if (dest.isFile && dest.length() > 0L) partFiles[artifactKey] = dest
                 } catch (_: Exception) {
                     // 복사 실패 시 해당 파일만 건너뜀
                 }
@@ -150,10 +168,6 @@ internal class PipelineCallbackHttpServer(
         }
     }
 
-    /**
-     * 소켓 연결을 깔끔하게 유지하기 위해 [length] 바이트만큼 읽어 버립니다.
-     * 고정 크기 버퍼를 사용하므로 대용량 본문에서도 OOM 이 발생하지 않습니다.
-     */
     private fun drainStreamQuietly(input: InputStream, length: Long) {
         try {
             val buf = ByteArray(32 * 1024)
@@ -168,13 +182,46 @@ internal class PipelineCallbackHttpServer(
         }
     }
 
+    /** Content-Length 불명 등 — 끝까지 소량 버퍼로만 읽어 버림 */
+    private fun drainInputStreamFixedBuffer(input: InputStream) {
+        try {
+            val buf = ByteArray(16 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n <= 0) break
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun extensionForCallbackArtifact(key: String): String = when (key) {
+        "ply" -> "ply"
+        "glb" -> "glb"
+        "topview", "sideview", "quality_png", "analysis_png" -> "png"
+        "quality_json", "analysis_json" -> "json"
+        "quality_txt" -> "txt"
+        "vehicle_csv", "contact_csv", "contact_points_csv" -> "csv"
+        else -> "bin"
+    }
+
     companion object {
+        private const val CONTENT_LENGTH_MISSING = -1L
+
         /**
-         * 이 크기를 초과하는 본문은 파일 파싱을 건너뜁니다 (OOM 방지).
-         * 서버가 PLY·GLB 등 대용량 파일을 포함해 전송하는 경우 해당 콜백은
-         * 무시되고 앱은 HTTP GET 다운로드 경로로 파일을 받아옵니다.
+         * [session.parseBody] 로 파싱해도 될 바이트 상한 (멀티파트가 이 이상이면 보통 결과 바이너리 포함으로 간주).
+         * 상태·실패 문자열 콜백만 이 한도 안에 들어가도록 서버 구성 시 유리함.
          */
-        const val MAX_PUSH_BODY_BYTES = 20L * 1024L * 1024L  // 20 MB
+        const val MAX_PARSE_BODY_BYTES = 512L * 1024L // 512 KB
+
+        /** 하위 호환: 예전 이름 (동일 의미로 축소됨 — 대용량 콜백은 항상 드레인) */
+        const val MAX_PUSH_BODY_BYTES = MAX_PARSE_BODY_BYTES
+
+        private fun parseContentLengthSafe(raw: String?): Long {
+            if (raw.isNullOrBlank()) return CONTENT_LENGTH_MISSING
+            val v = raw.trim().toLongOrNull() ?: return CONTENT_LENGTH_MISSING
+            if (v < 0L) return CONTENT_LENGTH_MISSING
+            return v
+        }
 
         private val SKIP_FIELDS = setOf(
             "task_id", "status", "summary", "message", "event",

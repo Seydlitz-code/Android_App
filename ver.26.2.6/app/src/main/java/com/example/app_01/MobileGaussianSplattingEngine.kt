@@ -60,8 +60,8 @@ object MobileGaussianSplattingEngine {
 
     // ── 설정 상수 ─────────────────────────────────────────────────────────────
     private const val MAX_SPLATS     = 20_000
-    /** COLMAP points3D 기반 뷰어: 점이 많을 때도 디테일 유지 (메모리·GPU 여유 전제) */
-    private const val MAX_COLMAP_SPLATS = 120_000
+    /** COLMAP points3D 기반 뷰어: 모바일 메모리 절약을 위해 80K로 제한 */
+    private const val MAX_COLMAP_SPLATS = 80_000
     private const val DECODE_SIDE    = 224
     private const val BASE_GRID_STEP = 4
     private const val SCENE_RADIUS   = 0.9f
@@ -633,11 +633,12 @@ object MobileGaussianSplattingEngine {
         if (nIn <= 0) return null
         val cap = minOf(maxSplats, nIn)
 
-        val sortedIdx: List<Int>? =
+        // 박싱된 List<Int> 대신 IntArray를 사용해 정렬 시 메모리 피크를 낮춥니다.
+        val sortedIdx: IntArray? =
             if (nIn > cap) {
-                (0 until nIn).sortedWith(
-                    compareBy({ bundle.reprojErr[it] }, { -bundle.trackLen[it] }),
-                )
+                Array(nIn) { it }
+                    .apply { sortWith(compareBy({ bundle.reprojErr[it] }, { -bundle.trackLen[it] })) }
+                    .toIntArray()
             } else {
                 null
             }

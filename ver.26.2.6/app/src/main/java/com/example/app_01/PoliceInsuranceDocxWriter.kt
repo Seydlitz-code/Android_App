@@ -151,14 +151,55 @@ object PoliceInsuranceDocxWriter {
         }
         out.add("1. 서버 결과 메타" to meta.trim())
 
-        val textKeys = listOf(
-            "analysis_json" to "2. 분석 JSON (analysis_result.json)",
-            "quality_txt" to "3. 품질·상세 리포트 (quality_report.txt)",
+        bundle.filesByKey["analysis_json"]?.takeIf { it.exists() && it.isFile }?.let { f ->
+            try {
+                f.readText(Charsets.UTF_8)
+            } catch (_: Exception) {
+                null
+            }?.trim()?.takeIf { it.isNotEmpty() }?.let { raw ->
+                out.add("2. 분석 JSON (analysis_result.json)\n원본: ${f.name}" to raw)
+            }
+        }
+
+        val qualityJson = bundle.filesByKey["quality_json"]?.takeIf { it.exists() && it.isFile }
+        val qualityTxt = bundle.filesByKey["quality_txt"]?.takeIf { it.exists() && it.isFile }
+        val qFile = qualityJson ?: qualityTxt
+        if (qFile != null) {
+            val raw = try {
+                qFile.readText(Charsets.UTF_8)
+            } catch (_: Exception) {
+                null
+            }
+            if (!raw.isNullOrBlank()) {
+                val title = if (qualityJson != null && qFile == qualityJson) {
+                    "3. 포인트 클라우드 품질 (quality_report.json)"
+                } else {
+                    "3. 포인트 클라우드 품질 (레거시 quality_report.txt)"
+                }
+                val body = if (qualityJson != null && qFile == qualityJson) {
+                    val summary = parsePointCloudQualityReportJson(qFile)?.let { formatPointCloudQualityReportKorean(it) }
+                    buildString {
+                        if (!summary.isNullOrBlank()) {
+                            appendLine(summary)
+                            appendLine()
+                            appendLine("--- 원본 JSON ---")
+                            appendLine()
+                        }
+                        append(raw.trim())
+                    }
+                } else {
+                    raw.trim()
+                }
+                out.add("$title\n원본: ${qFile.name}" to body)
+            }
+        }
+
+        val tailKeys = listOf(
             "vehicle_csv" to "4. 차량 분석 (vehicle_analysis.csv)",
             "contact_csv" to "5. 접촉 분석 (contact_analysis.csv)",
             "contact_points_csv" to "6. 접촉 후보 점 (contact_candidate_points.csv)",
         )
-        for ((key, title) in textKeys) {
+        for ((key, title) in tailKeys) {
             val f = bundle.filesByKey[key] ?: continue
             val raw = try {
                 f.readText(Charsets.UTF_8)

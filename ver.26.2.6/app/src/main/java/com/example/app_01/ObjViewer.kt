@@ -21,7 +21,7 @@ import javax.microedition.khronos.opengles.GL10
 import kotlin.math.max
 
 /** GL 미리보기·UI용: 초과 시 균등 간격으로 줄여 힙 OOM을 완화합니다. */
-private const val MAX_PREVIEW_VERTICES = 350_000
+private const val MAX_PREVIEW_VERTICES = 200_000
 
 /**
  * PLY -> OBJ 변환 (캐시)
@@ -34,6 +34,24 @@ data class ObjConversionResult(
     val previewMesh: ObjParseResult? = null
 )
 
+/**
+ * OBJ 캐시 디렉토리의 총 크기가 [maxTotalBytes]를 초과하면 가장 오래된 파일부터 삭제합니다.
+ */
+private fun pruneObjCacheDir(cacheDir: File, maxTotalBytes: Long) {
+    try {
+        val files = cacheDir.listFiles { f -> f.isFile } ?: return
+        var total = files.sumOf { it.length() }
+        if (total <= maxTotalBytes) return
+        val sorted = files.sortedBy { it.lastModified() }
+        for (f in sorted) {
+            if (total <= maxTotalBytes) break
+            val size = f.length()
+            try { f.delete() } catch (_: Exception) {}
+            total -= size
+        }
+    } catch (_: Exception) {}
+}
+
 fun convertPlyToObjCached(context: Context, plyFile: File): ObjConversionResult {
     if (!plyFile.exists()) return ObjConversionResult(error = "원본 PLY 파일이 존재하지 않습니다.")
     val storageRoot = context.getExternalFilesDir(null)
@@ -41,6 +59,10 @@ fun convertPlyToObjCached(context: Context, plyFile: File): ObjConversionResult 
 
     return try {
         val outDir = File(storageRoot, "models_obj").apply { mkdirs() }
+
+        // OBJ 캐시 크기 제한: 총 256 MB 초과 시 가장 오래된 파일부터 삭제
+        pruneObjCacheDir(outDir, maxTotalBytes = 256L * 1024L * 1024L)
+
         val key = "${plyFile.nameWithoutExtension}_${plyFile.lastModified()}_v5"
         val outFile = File(outDir, "${key}.obj")
         val mtlFile = File(outDir, "${key}.mtl")
@@ -309,7 +331,8 @@ private fun buildPreviewMeshFromPly(
  */
 fun loadModelForThumbnailMesh(file: File): ObjParseResult? {
     if (!file.exists() || !file.isFile) return null
-    val maxBytes = 120L * 1024L * 1024L
+    // 30 MB 초과 PLY는 파싱 중 피크 RAM(~50 MB)이 앱 전체 힙 압박을 유발하므로 건너뜁니다.
+    val maxBytes = 30L * 1024L * 1024L
     if (file.length() > maxBytes) return null
     return try {
         when {

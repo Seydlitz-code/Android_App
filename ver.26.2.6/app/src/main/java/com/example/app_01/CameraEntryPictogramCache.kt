@@ -7,6 +7,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import java.io.File
+import java.io.FileOutputStream
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
@@ -17,6 +19,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /** 카메라 허브 2×2 타일에서 쓰는 픽토그램 리소스 ID (프리로드·캐시 키용) */
 val CAMERA_ENTRY_PICTOGRAM_RES_IDS: IntArray = intArrayOf(
@@ -154,10 +157,10 @@ private fun processCameraEntryPictogramBitmap(source: Bitmap, ink: Color): Bitma
     return bitmap
 }
 
-/**
- * 메인 화면 진입 시 프리웜·타일에서 재사용. 테마(ink)별로 최대 4장만 보관.
- */
+// 메인 화면 진입 시 프리웜·타일에서 재사용. 최대 MAX_CACHE_ENTRIES 개만 보관해 RAM 누수를 방지합니다.
+// 캐싱 레이어(빠른 순서): 1) 메모리 ConcurrentHashMap  2) 디스크(filesDir/pictogram_cache/NNN.png)  3) BFS 풀 처리
 object CameraEntryPictogramCache {
+    private const val MAX_CACHE_ENTRIES = 16
     private val cache = ConcurrentHashMap<String, ImageBitmap>()
     private val buildMutexes = ConcurrentHashMap<String, Mutex>()
 
@@ -166,6 +169,29 @@ object CameraEntryPictogramCache {
 
     fun peek(resId: Int, ink: Color): ImageBitmap? = cache[cacheKey(resId, ink)]
 
+    // --- 디스크 캐시 헬퍼 ---
+
+    private fun diskCacheFile(context: Context, resId: Int, inkArgb: Int): File {
+        val dir = File(context.filesDir, "pictogram_cache").apply { mkdirs() }
+        return File(dir, "${resId}_$inkArgb.png")
+    }
+
+    private fun loadFromDisk(context: Context, resId: Int, inkArgb: Int): Bitmap? = try {
+        val file = diskCacheFile(context, resId, inkArgb)
+        if (file.exists() && file.length() > 0L) BitmapFactory.decodeFile(file.absolutePath)
+        else null
+    } catch (_: Exception) { null }
+
+    private fun saveToDisk(context: Context, resId: Int, inkArgb: Int, bitmap: Bitmap) {
+        try {
+            FileOutputStream(diskCacheFile(context, resId, inkArgb)).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 90, out)
+            }
+        } catch (_: Exception) {}
+    }
+
+    // --- 메인 API ---
+    // 1) 메모리 히트 → 즉시 반환  2) 디스크 히트 → IO 스레드에서 PNG 디코딩  3) 미스 → BFS 처리 후 디스크 저장
     suspend fun ensureLoaded(context: Context, resId: Int, ink: Color): ImageBitmap {
         peek(resId, ink)?.let { return it }
         val key = cacheKey(resId, ink)
@@ -173,17 +199,35 @@ object CameraEntryPictogramCache {
         return mutex.withLock {
             peek(resId, ink)?.let { return@withLock it }
             val appCtx = context.applicationContext
-            val raw = decodeResourceScaledForCameraPictogram(appCtx, resId)
-                ?: BitmapFactory.decodeResource(appCtx.resources, resId)
-            val image = if (raw == null) {
-                solidColorBitmap(ink)
-            } else {
-                try {
-                    processCameraEntryPictogramBitmap(raw, ink).asImageBitmap()
-                } catch (_: Throwable) {
-                    raw.recycle()
-                    solidColorBitmap(ink)
+            val inkArgb = ink.toArgb()
+
+            val image = withContext(Dispatchers.IO) {
+                // 1차: 디스크 캐시 (PNG 디코딩 — 수 ms)
+                val diskBmp = loadFromDisk(appCtx, resId, inkArgb)
+                if (diskBmp != null) {
+                    diskBmp.asImageBitmap()
+                } else {
+                    // 2차: BFS 처리 후 디스크에 저장 (최초 1회)
+                    val raw = decodeResourceScaledForCameraPictogram(appCtx, resId)
+                        ?: BitmapFactory.decodeResource(appCtx.resources, resId)
+                    if (raw == null) {
+                        solidColorBitmap(ink)
+                    } else {
+                        try {
+                            val processed = processCameraEntryPictogramBitmap(raw, ink)
+                            saveToDisk(appCtx, resId, inkArgb, processed)
+                            processed.asImageBitmap()
+                        } catch (_: Throwable) {
+                            raw.recycle()
+                            solidColorBitmap(ink)
+                        }
+                    }
                 }
+            }
+
+            // 캐시 항목이 상한에 도달하면 가장 오래된 항목을 제거해 메모리 누적을 방지합니다.
+            if (cache.size >= MAX_CACHE_ENTRIES) {
+                cache.keys.firstOrNull()?.let { cache.remove(it) }
             }
             cache[key] = image
             image
@@ -194,7 +238,7 @@ object CameraEntryPictogramCache {
         val appCtx = context.applicationContext
         coroutineScope {
             CAMERA_ENTRY_PICTOGRAM_RES_IDS.map { id ->
-                async(Dispatchers.Default) {
+                async(Dispatchers.IO) {
                     ensureLoaded(appCtx, id, ink)
                 }
             }.awaitAll()
