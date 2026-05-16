@@ -34,6 +34,7 @@ enum class LibraryDetailScreen {
     OBJ_VIEWER,
     MODEL_3D_PLY_LIST,
     MODEL_3D_OBJ_LIST,
+    GS3D_WEBVIEW,
 }
 
 enum class CameraEntryMode {

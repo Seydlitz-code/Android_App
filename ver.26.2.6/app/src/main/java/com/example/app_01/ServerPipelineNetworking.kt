@@ -6,7 +6,6 @@ import android.net.Uri
 import android.os.Build
 import android.util.JsonReader
 import android.util.JsonToken
-import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -42,6 +41,8 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.buffer
+import okio.sink
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -69,6 +70,11 @@ internal const val SERVER_PIPELINE_WAKE_MAX_MS = 4L * 60L * 60L * 1000L
  */
 internal const val SERVER_STATUS_POLL_MAX_SILENCE_MS = 10L * 60L * 1000L
 
+/** DA3 완료 후 3DGS 상태 폴링 최대 대기 시간 (ms) */
+internal const val SERVER_GS_POLL_TIMEOUT_MS = 20L * 60L * 1000L
+/** 3DGS 상태 폴링 간격 (ms) */
+internal const val SERVER_GS_POLL_INTERVAL_MS = 5_000L
+
 /** FastAPI `POST /upload` 의 `file_pc: UploadFile = File(...)` 필드명 */
 internal const val SERVER_PIPELINE_PART_PC = "file_pc"
 /** FastAPI `file_gs: Optional[UploadFile] = File(None)` — 3DGS·보조 ZIP(선택) */
@@ -85,24 +91,19 @@ private const val PREF_SERVER_PORT = "server_port"
 private const val PREF_USE_HTTPS = "use_https"
 
 /**
- * 스트림 읽기/쓰기 버퍼. 예전처럼 4MiB+2MiB+4MiB를 동시에 쓰면
- * PLY·GLB 등 여러 개를 순차 받을 때까지 힙이 넉넉한 기기만 안전했고,
- * 중저사양에서는 GC·메모리 압박으로 프로세스가 죽는 사례가 있었다.
- *
- * LAN은 충분히 빠르고, 버퍼는 64KiB 급으로도 처리량 확보 가능.
+ * 스트림 읽기·쓰기 버퍼 — 2 MiB.
+ * LAN (1 Gbps) 에서 초당 100 MB/s 이상의 단일 스트림 처리량을 확보합니다.
+ * 소켓 버퍼·OkHttp·Okio 세그먼트와 조화를 이루도록 설정합니다.
  */
-private const val SERVER_DOWNLOAD_STREAM_BUFFER_BYTES = 64 * 1024
+private const val SERVER_DOWNLOAD_STREAM_BUFFER_BYTES = 2 * 1024 * 1024
 
-private const val SERVER_DOWNLOAD_FILE_OUT_BUFFER_BYTES = 64 * 1024
+private const val SERVER_DOWNLOAD_FILE_OUT_BUFFER_BYTES = 2 * 1024 * 1024
 
-/** [BufferedInputStream] 내장 버퍼 — 본 버퍼(byte[])와 과도하게 겹치지 않게 소형 유지 */
-private const val SERVER_DOWNLOAD_BUFFERED_WRAP_BYTES = 8 * 1024
+/** 코루틴 yield 간격 — 16 MiB 마다 UI·다른 코루틴에 CPU 회복 기회 제공 */
+private const val SERVER_DOWNLOAD_YIELD_INTERVAL_BYTES = 16 * 1024 * 1024
 
-/** 코루틴 yield 간격 — UI·다른 코루틴에게 CPU·메모리 회복 기회 제공 */
-private const val SERVER_DOWNLOAD_YIELD_INTERVAL_BYTES = 2 * 1024 * 1024
-
-/** 여러 결과 파일 연속 다운로드 시 스트레스 분산(ms) — 네트워크·GC 완충 */
-private const val BETWEEN_SERVER_ARTIFACT_DOWNLOAD_MS = 120L
+/** 순차 다운로드 간 완충 (ms) */
+private const val BETWEEN_SERVER_ARTIFACT_DOWNLOAD_MS = 20L
 
 private const val SERVER_DOWNLOAD_PROGRESS_MIN_INTERVAL_MS = 5_000L
 
@@ -485,6 +486,8 @@ internal data class ServerTaskStatus(
     val progressPercent: Int,
     val message: String,
     val downloadUrl: String?,
+    val gsStatus: String? = null,
+    val gsViewerUrl: String? = null,
 )
 
 internal suspend fun fetchServerTaskStatus(context: Context, taskId: String): ServerTaskStatus? {
@@ -521,6 +524,8 @@ internal suspend fun fetchServerTaskStatus(context: Context, taskId: String): Se
                     progressPercent = pct,
                     message = json.optString("message", "처리 중..."),
                     downloadUrl = json.optString("download_url").takeIf { it.isNotBlank() },
+                    gsStatus = json.optString("gs_status").takeIf { it.isNotBlank() },
+                    gsViewerUrl = json.optString("gs_viewer_url").takeIf { it.isNotBlank() },
                 )
             }
         } catch (t: Throwable) {
@@ -807,45 +812,36 @@ internal suspend fun downloadHttpUrlToFile(
                 } catch (_: Exception) {
                 }
                 var lastProgressAt = 0L
-                body.byteStream().use { rawIn ->
-                    BufferedInputStream(rawIn, SERVER_DOWNLOAD_BUFFERED_WRAP_BYTES).use { input ->
-                        val fos = FileOutputStream(partFile)
-                        BufferedOutputStream(
-                            fos,
-                            SERVER_DOWNLOAD_FILE_OUT_BUFFER_BYTES,
-                        ).use { output ->
-                            val buf = ByteArray(SERVER_DOWNLOAD_STREAM_BUFFER_BYTES)
-                            var total = 0L
-                            var sinceYield = 0L
-                            while (true) {
-                                val n = input.read(buf)
-                                if (n <= 0) break
-                                output.write(buf, 0, n)
-                                total += n.toLong()
-                                sinceYield += n.toLong()
-                                if (sinceYield >= SERVER_DOWNLOAD_YIELD_INTERVAL_BYTES) {
-                                    sinceYield = 0L
-                                    yield()
-                                }
-                                if (onStreamProgress != null) {
-                                    val now = System.currentTimeMillis()
-                                    val done = contentLength > 0 && total >= contentLength
-                                    if (done || now - lastProgressAt >= SERVER_DOWNLOAD_PROGRESS_MIN_INTERVAL_MS) {
-                                        lastProgressAt = now
-                                        onStreamProgress(total, contentLength)
-                                    }
-                                }
+                body.source().use { source ->
+                    val sink = partFile.sink().buffer()
+                    sink.use { s ->
+                        var total = 0L
+                        var sinceYield = 0L
+                        while (true) {
+                            val buf = s.buffer
+                            val n = source.read(buf, SERVER_DOWNLOAD_STREAM_BUFFER_BYTES.toLong())
+                            if (n <= 0L) break
+                            total += n
+                            s.emitCompleteSegments()
+                            sinceYield += n
+                            if (sinceYield >= SERVER_DOWNLOAD_YIELD_INTERVAL_BYTES) {
+                                sinceYield = 0L
+                                yield()
                             }
-                            output.flush()
-                            try {
-                                fos.fd.sync()
-                            } catch (_: IOException) {
-                                // 일부 저장소/제조사에서 sync 실패 시에도 파일은 flush 됨
+                            if (onStreamProgress != null) {
+                                val now = System.currentTimeMillis()
+                                val done = contentLength > 0 && total >= contentLength
+                                if (done || now - lastProgressAt >= SERVER_DOWNLOAD_PROGRESS_MIN_INTERVAL_MS) {
+                                    lastProgressAt = now
+                                    onStreamProgress(total, contentLength)
+                                }
                             }
                         }
+                        s.flush()
                     }
                 }
                 if (!partFile.exists() || partFile.length() <= 0L) {
+                    try { partFile.delete() } catch (_: Exception) {}
                     return@withContext false
                 }
                 if (contentLength > 0L && partFile.length() != contentLength) {
@@ -853,6 +849,7 @@ internal suspend fun downloadHttpUrlToFile(
                         "downloadHttpUrlToFile",
                         "incomplete download: ${partFile.length()} / $contentLength bytes ($absoluteUrl)",
                     )
+                    try { partFile.delete() } catch (_: Exception) {}
                     // #region agent log
                     agentDebugNdjson(
                         context,
@@ -1042,15 +1039,14 @@ private suspend fun downloadServerPipelineArtifactsImpl(
                 )
             }
             for ((idx, e) in entries.withIndex()) {
-                val basePct = 95 + (idx * 3 / maxOf(total, 1)).coerceIn(0, 3)
-                safeProgress(basePct, "다운로드 (${idx + 1}/$total): ${e.filename}")
+                yield()
+                val fileNum = idx + 1
+                safeProgress(
+                    (95 + (idx * 3 / maxOf(total, 1))).coerceIn(0, 98),
+                    "다운로드 ($fileNum/$total): ${e.filename}",
+                )
                 val dest = File(stagingDir, e.filename)
                 val ok = downloadHttpUrlToFile(context, e.url, dest) { read, cl ->
-                    val localPct = if (cl > 0L) {
-                        basePct + (read * 3.0 / cl).toInt().coerceIn(0, 3)
-                    } else {
-                        basePct
-                    }
                     val mbRead = read / (1024L * 1024L)
                     val detail = if (cl > 0L) {
                         val mbTotal = cl / (1024L * 1024L)
@@ -1058,7 +1054,10 @@ private suspend fun downloadServerPipelineArtifactsImpl(
                     } else {
                         "${mbRead} MB"
                     }
-                    safeProgress(localPct.coerceAtMost(99), "${e.filename} · $detail")
+                    safeProgress(
+                        (95 + (idx * 3 / maxOf(total, 1))).coerceIn(0, 98),
+                        "($fileNum/$total) ${e.filename} · $detail",
+                    )
                 }
                 if (ok) {
                     staged[e.key] = dest
@@ -1074,6 +1073,7 @@ private suspend fun downloadServerPipelineArtifactsImpl(
         }
 
         if (staged["ply"] == null) {
+            yield()
             safeProgress(99, "PLY 다운로드 중...")
             downloadPlyResultToDirectory(context, taskId, stagingDir) { p, msg -> safeProgress(p, msg) }
                 ?.let { staged["ply"] = it }
@@ -1180,6 +1180,7 @@ private suspend fun downloadPlyResultToDirectory(
 
     val maxAttempts = 3
     repeat(maxAttempts) { attempt ->
+        yield()
         try {
             outFile.delete()
         } catch (_: Exception) {
@@ -1456,6 +1457,7 @@ internal suspend fun downloadPlyResult(
 
     val maxAttempts = 3
     repeat(maxAttempts) { attempt ->
+        yield()
         try {
             outFile.delete()
         } catch (_: Exception) {

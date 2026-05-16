@@ -47,6 +47,95 @@ internal fun clearApplicationCacheJunk(context: Context): AppCacheCleanResult {
     return accumulator.toResult()
 }
 
+/**
+ * 삭제되지 않고 남아있는 잉여 데이터셋·임시 파일·실패 잔여물을 전역 정리합니다.
+ * [clearApplicationCacheJunk]를 포함하며, 추가로 빈 데이터셋 폴더·고아 서버 작업 디렉터리·
+ * 임시 ZIP·오래된 배치 결과 폴더까지 정리합니다.
+ */
+internal fun cleanupOrphanedAppData(context: Context): AppCacheCleanResult {
+    val cacheResult = clearApplicationCacheJunk(context)
+    val appCtx = context.applicationContext
+    val accumulator = CacheDeleteAccumulator()
+    accumulator.absorb(cacheResult)
+
+    val storageRoot = ModelLibraryPaths.storageRoot(appCtx)
+    val now = System.currentTimeMillis()
+    val dayMs = 24L * 60L * 60L * 1000L
+    val staleThresholdMs = 7L * dayMs // 7일 이상 수정되지 않은 잉여물
+
+    // ── 빈 데이터셋 폴더 정리 ─────────────────────────────────────────────
+    val datasetsDir = File(storageRoot, "datasets")
+    if (datasetsDir.isDirectory) {
+        val imageExts = setOf("jpg", "jpeg", "png", "webp", "heic", "heif")
+        datasetsDir.listFiles()?.filter { it.isDirectory }?.forEach { dsDir ->
+            val hasImages = dsDir.listFiles { f ->
+                f.isFile && imageExts.contains(f.extension.lowercase())
+            }?.isNotEmpty() == true
+            if (!hasImages) {
+                accumulator.deleteRecursively(dsDir)
+            }
+        }
+    }
+
+    // ── 서버 다운로드 중단 잔여물 ─────────────────────────────────────────
+    val plyDir = ModelLibraryPaths.plyDir(appCtx)
+    if (plyDir.isDirectory) {
+        plyDir.listFiles()?.forEach { entry ->
+            when {
+                entry.isDirectory && entry.name.endsWith(".downloading") ->
+                    accumulator.deleteRecursively(entry)
+                entry.isFile && entry.name.endsWith(".part") ->
+                    accumulator.deleteRecursively(entry)
+                entry.isDirectory && entry.name.startsWith("server_task_") -> {
+                    val hasPly = entry.listFiles { f ->
+                        f.isFile && f.name.endsWith(".ply", ignoreCase = true) && f.length() > 0L
+                    }?.isNotEmpty() == true
+                    if (!hasPly) {
+                        accumulator.deleteRecursively(entry)
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 임시 ZIP 파일 정리 ───────────────────────────────────────────────
+    val cacheDir = appCtx.cacheDir ?: return@cleanupOrphanedAppData accumulator.toResult()
+    cacheDir.listFiles()?.forEach { f ->
+        if (f.isFile && (f.name.endsWith(".zip") || f.name.startsWith("arcore_upload_"))) {
+            if (now - f.lastModified() > staleThresholdMs) {
+                accumulator.deleteRecursively(f)
+            }
+        }
+    }
+
+    // ── 저장소 루트의 임시 ZIP 정리 ──────────────────────────────────────
+    storageRoot.listFiles()?.forEach { f ->
+        if (f.isFile && f.name.endsWith(".zip") && now - f.lastModified() > staleThresholdMs) {
+            accumulator.deleteRecursively(f)
+        }
+    }
+
+    // ── 빈 배치 결과 폴더 정리 ───────────────────────────────────────────
+    if (datasetsDir.isDirectory) {
+        datasetsDir.listFiles()?.filter { it.isDirectory }?.forEach { batchDir ->
+            if (now - batchDir.lastModified() > staleThresholdMs) {
+                val hasContent = batchDir.listFiles()?.any { true } == true
+                if (!hasContent) {
+                    accumulator.deleteRecursively(batchDir)
+                }
+            }
+        }
+    }
+
+    // ── PLY→OBJ 변환 캐시 정리 ──────────────────────────────────────────
+    accumulator.deleteRecursively(File(storageRoot, "models_obj"))
+
+    // ── WebView 캐시 ─────────────────────────────────────────────────────
+    clearWebViewCaches()
+
+    return accumulator.toResult()
+}
+
 private fun clearCoilImageCaches(context: Context) {
     try {
         val loader = context.applicationContext.imageLoader
@@ -85,6 +174,12 @@ private class CacheDeleteAccumulator {
     private var bytes = 0L
 
     fun toResult(): AppCacheCleanResult = AppCacheCleanResult(files, dirs, bytes)
+
+    fun absorb(result: AppCacheCleanResult) {
+        files += result.deletedFiles
+        dirs += result.deletedDirs
+        bytes += result.deletedBytes
+    }
 
     /** getCacheDir·getExternalCacheDir 밑 자식만 삭제하되 code_cache 디렉터리는 건너뜀 */
     fun deleteCacheJunkPreservingRuntimeArtifacts(dir: File?) {

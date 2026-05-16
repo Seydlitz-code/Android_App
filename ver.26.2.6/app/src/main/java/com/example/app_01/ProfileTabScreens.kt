@@ -60,26 +60,27 @@ fun ProfileScreen(
     val setMode = LocalSetAppUiThemeMode.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var isClearingAppCache by remember { mutableStateOf(false) }
+    var isCleaningOrphanedData by remember { mutableStateOf(false) }
 
-    fun runClearApplicationCacheJunk() {
-        if (isClearingAppCache) return
-        isClearingAppCache = true
+    fun runCleanupOrphanedData() {
+        if (isCleaningOrphanedData) return
+        isCleaningOrphanedData = true
         scope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
-                    clearApplicationCacheJunk(context.applicationContext)
+                    cleanupOrphanedAppData(context.applicationContext)
                 }
-                Toast.makeText(
-                    context,
-                    formatAppCacheCleanResult(result),
-                    Toast.LENGTH_LONG,
-                ).show()
+                val msg = if (result.isEmpty) {
+                    "잉여 데이터가 없습니다."
+                } else {
+                    "잉여 데이터 정리 완료: 파일 ${result.deletedFiles}개, 폴더 ${result.deletedDirs}개 삭제"
+                }
+                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                Toast.makeText(context, "캐시 삭제 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "데이터 정리 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
             } finally {
-                isClearingAppCache = false
+                isCleaningOrphanedData = false
             }
         }
     }
@@ -88,6 +89,7 @@ fun ProfileScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(palette.background)
+            .verticalScroll(rememberScrollState())
     ) {
         Text(
             text = "프로필",
@@ -303,18 +305,18 @@ fun ProfileScreen(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(enabled = !isClearingAppCache) { runClearApplicationCacheJunk() }
+                .clickable(enabled = !isCleaningOrphanedData) { runCleanupOrphanedData() }
                 .padding(16.dp)
         ) {
             Column {
                 Text(
-                    text = if (isClearingAppCache) "애플리케이션 캐시 삭제 중..." else "애플리케이션 캐시 삭제",
-                    color = palette.onBackground.copy(alpha = if (isClearingAppCache) 0.5f else 1f),
+                    text = if (isCleaningOrphanedData) "잉여 데이터 정리 중..." else "삭제 데이터 & 캐시 정리",
+                    color = palette.onBackground.copy(alpha = if (isCleaningOrphanedData) 0.5f else 1f),
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "앱 내부·외부 캐시, Coil(이미지), 웹 저장소, PLY→OBJ 변환 캐시, 세션 임시 폴더, 다운로드 실패 잔여물을 정리합니다. (라이브러리 원본·저장된 모델 결과는 유지)",
+                    text = "앱 내부·외부 캐시, Coil·WebView 캐시, 삭제되지 않은 빈 데이터셋 폴더, 다운로드 실패 잔여물, 임시 ZIP, 고아 서버 작업 디렉터리, 오래된 배치 결과 폴더, PLY→OBJ 변환 캐시, 세션 임시 폴더 등 모든 잉여 데이터를 정리합니다. (라이브러리 원본·저장된 모델 결과는 유지)",
                     color = palette.onBackgroundMuted,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 4.dp)

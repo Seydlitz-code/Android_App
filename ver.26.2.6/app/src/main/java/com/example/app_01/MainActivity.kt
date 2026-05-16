@@ -4103,11 +4103,41 @@ internal suspend fun uploadZipAndRunPipeline(
 
         // 4) 콜백으로 PLY 등을 이미 받았으면 HTTP 재다운로드 생략
         emitProgress(lastShownProgress.coerceAtLeast(95), "결과 정리 중…")
-        val bundle = pushBundle ?: downloadServerPipelineArtifacts(appCtx, taskId, ::emitProgress) ?: run {
+        var bundle = pushBundle ?: downloadServerPipelineArtifacts(appCtx, taskId, ::emitProgress) ?: run {
             appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
             return null
         }
 
+        drainPushEvents()
+        // push 이벤트에서 gs_viewer_url이 이미 도착했는지 1차 확인
+        var gsViewerUrl: String? = bundle.gsViewerUrl
+        if (gsViewerUrl.isNullOrBlank()) {
+            emitProgress(lastShownProgress.coerceAtLeast(96), "3DGS 모델 생성 대기 중…")
+            val gsPollStart = System.currentTimeMillis()
+            var gsPollCount = 0
+            while (System.currentTimeMillis() - gsPollStart < SERVER_GS_POLL_TIMEOUT_MS) {
+                drainPushEvents()
+                val gsSt = fetchServerTaskStatus(appCtx, taskId)
+                val gsStatus = gsSt?.gsStatus?.uppercase(Locale.US)
+                if (gsSt != null && gsSt.gsViewerUrl.isNullOrBlank().not()) {
+                    gsViewerUrl = gsSt.gsViewerUrl
+                    break
+                }
+                when (gsStatus) {
+                    "COMPLETED" -> {
+                        gsViewerUrl = gsSt!!.gsViewerUrl
+                        break
+                    }
+                    "FAILED", "DISABLED", "SEND_FAILED" -> break
+                }
+                gsPollCount++
+                delay(if (gsPollCount <= 30) SERVER_GS_POLL_INTERVAL_MS else SERVER_GS_POLL_INTERVAL_MS * 3L)
+            }
+            if (gsViewerUrl.isNullOrBlank().not()) {
+                bundle = bundle.copy(gsViewerUrl = gsViewerUrl)
+                emitProgress(100, "3DGS 모델 생성 완료!")
+            }
+        }
         drainPushEvents()
         ServerPipelinePostDownload.writeManifestIfNeeded(bundle)
         ServerPipelinePostDownload.scheduleDeferredHeavyWork(appCtx, bundle)
@@ -4123,7 +4153,6 @@ internal suspend fun uploadZipAndRunPipeline(
         stopForegroundService(appCtx, "3D 모델 생성 완료", "완료되었습니다!")
         return bundle
     } catch (t: Throwable) {
-        // CancellationException은 구조적 동시성을 위해 반드시 재투소
         if (t is kotlinx.coroutines.CancellationException) throw t
         t.printStackTrace()
         runCatching {
@@ -4134,7 +4163,6 @@ internal suspend fun uploadZipAndRunPipeline(
                 t,
             )
         }
-        appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
         return null
     } finally {
         try {
@@ -4147,6 +4175,10 @@ internal suspend fun uploadZipAndRunPipeline(
         }
         try {
             if (wakeLock.isHeld) wakeLock.release()
+        } catch (_: Exception) {
+        }
+        try {
+            appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
         } catch (_: Exception) {
         }
     }
@@ -5145,63 +5177,31 @@ class AppForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         ensureNotificationChannelSync()
+        val fgType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        val minimal = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("백그라운드 작업 준비 중")
+            .setContentText("곧 시작됩니다…")
+            .setSmallIcon(defaultNotificationSmallIcon())
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .build()
+        runCatching {
+            ServiceCompat.startForeground(this, NOTIF_ID, minimal, fgType)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // startForegroundService() 호출 후 일정 시간 안에 startForeground()가 없으면
-        // ForegroundServiceDidNotStartInTimeException 으로 프로세스가 종료됩니다.
-        // PendingIntent·진행률 UI 등은 예외가 나기 쉬우므로, 먼저 최소 알림으로 FG에 진입합니다.
-        ensureNotificationChannelSync()
+        intent ?: return START_NOT_STICKY
 
-        val progress  = intent?.getIntExtra(EXTRA_PROGRESS, -1) ?: -1
-        val message   = intent?.getStringExtra(EXTRA_MESSAGE) ?: ""
-        val taskTitle = intent?.getStringExtra(EXTRA_TASK_TITLE) ?: "백그라운드 작업 중"
-        val startMs   = intent?.getLongExtra(EXTRA_START_MS, 0L) ?: 0L
+        val progress  = intent.getIntExtra(EXTRA_PROGRESS, -1)
+        val message   = intent.getStringExtra(EXTRA_MESSAGE) ?: ""
+        val taskTitle = intent.getStringExtra(EXTRA_TASK_TITLE) ?: "백그라운드 작업 중"
+        val startMs   = intent.getLongExtra(EXTRA_START_MS, 0L)
         if (startMs > 0L && taskStartMs == 0L) taskStartMs = startMs
 
-        val fgType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-        fun promoteForeground(notification: Notification) {
-            ServiceCompat.startForeground(this, NOTIF_ID, notification, fgType)
-        }
-
         val ongoing = progress < 100
-        val minimal = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(taskTitle.take(100))
-            .setContentText(message.ifBlank { "처리 중…" }.take(250))
-            .setSmallIcon(defaultNotificationSmallIcon())
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(ongoing)
-            .setOnlyAlertOnce(true)
-            .build()
-
-        var fgOk = false
-        runCatching { promoteForeground(minimal); fgOk = true }
-        if (!fgOk) {
-            runCatching {
-                promoteForeground(
-                    NotificationCompat.Builder(this, CHANNEL_ID)
-                        .setContentTitle(taskTitle.take(50))
-                        .setContentText("처리 중")
-                        .setSmallIcon(android.R.drawable.stat_notify_sync)
-                        .setPriority(NotificationCompat.PRIORITY_LOW)
-                        .setOngoing(ongoing)
-                        .setOnlyAlertOnce(true)
-                        .build()
-                )
-                fgOk = true
-            }
-        }
-        if (!fgOk) {
-            android.util.Log.e(
-                "AppForegroundService",
-                "startForeground 실패 — 타임아웃으로 앱이 종료될 수 있음",
-            )
-            try { stopSelf() } catch (_: Exception) {}
-            return START_NOT_STICKY
-        }
-
         try {
-            // ── 예상 잔여 시간 계산 ─────────────────────────────────────────────
             val etaText = if (progress in 1..99 && taskStartMs > 0L) {
                 val elapsed = System.currentTimeMillis() - taskStartMs
                 val estimated = (elapsed / (progress.toDouble() / 100.0)).toLong()
@@ -5219,9 +5219,8 @@ class AppForegroundService : Service() {
                     ?: Intent(this, MainActivity::class.java).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                     }
-                ).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                }
+                ).apply { addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP) }
+
             val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             else PendingIntent.FLAG_UPDATE_CURRENT
@@ -5267,7 +5266,7 @@ class AppForegroundService : Service() {
         } catch (t: Throwable) {
             android.util.Log.w(
                 "AppForegroundService",
-                "알림 상세 갱신 실패(포그라운드는 유지): ${t.message}",
+                "알림 갱신 실패: ${t.message}",
                 t,
             )
         }

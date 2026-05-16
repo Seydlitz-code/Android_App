@@ -647,6 +647,7 @@ data class ServerPipelineResultBundle(
     val plyFile: File,
     val directory: File,
     val filesByKey: Map<String, File>,
+    val gsViewerUrl: String? = null,
 )
 
 
@@ -1456,6 +1457,9 @@ fun GalleryScreen(
     var showDatasetArcoreLibraryPicker by remember { mutableStateOf(false) }
     /** 서버 quality_report.json 미리보기 */
     var qualityReportDialogFile by remember { mutableStateOf<File?>(null) }
+    /** 3DGS 웹 뷰어용 URL */
+    var gs3dViewerUrl by remember { mutableStateOf<String?>(null) }
+    var showGs3dViewerPopup by remember { mutableStateOf(false) }
     LaunchedEffect(show3DModelingDialog) {
         if (!show3DModelingDialog) showDatasetArcoreLibraryPicker = false
     }
@@ -1686,6 +1690,16 @@ fun GalleryScreen(
         onLibraryHubVisibilityChange(true)
     }
 
+    if (libraryDetailScreen == LibraryDetailScreen.GS3D_WEBVIEW && !gs3dViewerUrl.isNullOrBlank()) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            Gs3dWebViewScreen(
+                url = gs3dViewerUrl!!,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        // dialogs는 그대로 렌더링 (뒤에 있음)
+    }
+
     // 허브가 열리기 전에 라이브러리 데이터를 미리 병렬 로드해 초기 지연을 없앱니다.
     LaunchedEffect(Unit) {
         try {
@@ -1865,6 +1879,10 @@ fun GalleryScreen(
                                         libraryDetailScreen = LibraryDetailScreen.NONE
                                         libraryAssetEditMode = false
                                         selectedLibraryAssetPaths = emptySet()
+                                    }
+                                    libraryDetailScreen == LibraryDetailScreen.GS3D_WEBVIEW -> {
+                                        libraryDetailScreen = LibraryDetailScreen.NONE
+                                        gs3dViewerUrl = null
                                     }
                                     else -> onLibraryHubVisibilityChange(true)
                                 }
@@ -4158,7 +4176,14 @@ fun GalleryScreen(
                     val completionBtnDisabled = if (palette.isDark) Color(0xFF444444) else Color(0xFFB8C0CC)
                     val completionBtnFgDisabled =
                         if (palette.isDark) Color.White.copy(alpha = 0.45f) else Color.Black.copy(alpha = 0.38f)
-                    Dialog(onDismissRequest = { onServerPipelineCompleteBundleChange(null) }) {
+                    Dialog(onDismissRequest = {
+                        val url = spb.gsViewerUrl
+                        onServerPipelineCompleteBundleChange(null)
+                        if (!url.isNullOrBlank()) {
+                            gs3dViewerUrl = url
+                            showGs3dViewerPopup = true
+                        }
+                    }) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -4318,6 +4343,30 @@ fun GalleryScreen(
                                             lineHeight = 15.sp
                                         )
                                     }
+                                    if (!spb.gsViewerUrl.isNullOrBlank()) {
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(52.dp)
+                                                .border(BorderStroke(1.dp, Color(0xFF1B5E20)), RoundedCornerShape(8.dp))
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(Color(0xFFE8F5E9))
+                                                .clickable {
+                                                    gs3dViewerUrl = spb.gsViewerUrl
+                                                    libraryDetailScreen = LibraryDetailScreen.GS3D_WEBVIEW
+                                                    onServerPipelineCompleteBundleChange(null)
+                                                },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = "3DGS 웹 뷰어",
+                                                color = Color(0xFF1B5E20),
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                textAlign = TextAlign.Center
+                                            )
+                                        }
+                                    }
                                 }
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Row(
@@ -4418,7 +4467,14 @@ fun GalleryScreen(
                                         .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
                                         .clip(RoundedCornerShape(8.dp))
                                         .background(completionBtnBg.copy(alpha = 0.55f))
-                                        .clickable { onServerPipelineCompleteBundleChange(null) },
+                                        .clickable {
+                                            val url = spb.gsViewerUrl
+                                            onServerPipelineCompleteBundleChange(null)
+                                            if (!url.isNullOrBlank()) {
+                                                gs3dViewerUrl = url
+                                                showGs3dViewerPopup = true
+                                            }
+                                        },
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
@@ -4427,6 +4483,77 @@ fun GalleryScreen(
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.Bold
                                     )
+                                }
+                            }
+                        }
+                    }
+                }
+                if (showGs3dViewerPopup && !gs3dViewerUrl.isNullOrBlank()) {
+                    Dialog(onDismissRequest = { showGs3dViewerPopup = false }) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(BorderStroke(1.dp, palette.divider), RoundedCornerShape(16.dp))
+                                .background(palette.surfaceCard, RoundedCornerShape(16.dp))
+                                .padding(20.dp)
+                        ) {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    text = "3DGS 모델 학습 완료",
+                                    color = palette.onBackground,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "3DGS 모델 학습이 완료되었습니다.\n웹 뷰어로 확인하시겠습니까?",
+                                    color = palette.onBackgroundMuted,
+                                    fontSize = 14.sp,
+                                    modifier = Modifier.padding(top = 8.dp)
+                                )
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(48.dp)
+                                            .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(if (palette.isDark) Color.Black else Color.White)
+                                            .clickable {
+                                                showGs3dViewerPopup = false
+                                            },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "닫기",
+                                            color = if (palette.isDark) Color.White else Color.Black,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(48.dp)
+                                            .border(BorderStroke(1.dp, Color(0xFF1B5E20)), RoundedCornerShape(8.dp))
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color(0xFFE8F5E9))
+                                            .clickable {
+                                                showGs3dViewerPopup = false
+                                                libraryDetailScreen = LibraryDetailScreen.GS3D_WEBVIEW
+                                            },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "확인",
+                                            color = Color(0xFF1B5E20),
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -5460,7 +5587,10 @@ fun GalleryScreen(
                                                             }
                                                         }
                                                     } catch (t: Throwable) {
-                                                        if (t is kotlinx.coroutines.CancellationException) throw t
+                                                        if (t is kotlinx.coroutines.CancellationException) {
+                                                            mainHandler.post { isUploading = false }
+                                                            throw t
+                                                        }
                                                         t.printStackTrace()
                                                         mainHandler.post {
                                                             isUploading = false
@@ -5553,7 +5683,10 @@ fun GalleryScreen(
                                                             }
                                                         }
                                                     } catch (t: Throwable) {
-                                                        if (t is kotlinx.coroutines.CancellationException) throw t
+                                                        if (t is kotlinx.coroutines.CancellationException) {
+                                                            mainHandler.post { isUploading = false }
+                                                            throw t
+                                                        }
                                                         t.printStackTrace()
                                                         mainHandler.post {
                                                             isUploading = false
@@ -5633,7 +5766,10 @@ fun GalleryScreen(
                                                             }
                                                         }
                                                     } catch (t: Throwable) {
-                                                        if (t is kotlinx.coroutines.CancellationException) throw t
+                                                        if (t is kotlinx.coroutines.CancellationException) {
+                                                            mainHandler.post { isUploading = false }
+                                                            throw t
+                                                        }
                                                         t.printStackTrace()
                                                         mainHandler.post {
                                                             isUploading = false
