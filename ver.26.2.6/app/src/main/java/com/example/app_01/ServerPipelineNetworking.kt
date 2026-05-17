@@ -301,7 +301,19 @@ private fun agentDebugHeapSnapshot(
 internal data class ServerUploadStartResult(
     val taskId: String?,
     val errorDetail: String?,
+    val gsEnabled: Boolean = false,
 )
+
+/**
+ * [JSONObject.optString]은 JSON null → "null"을 반환하므로,
+ * [JSONObject.opt] + 타입 체크로 올바른 String만 추출합니다.
+ */
+private fun safeOptString(json: JSONObject, key: String): String? {
+    val v = json.opt(key) ?: return null
+    if (v !is String) return null
+    val s = v.trim()
+    return if (s.isNotEmpty() && s != "null") s else null
+}
 
 private fun parseFastApiErrorDetail(body: String?): String? {
     if (body.isNullOrBlank()) return null
@@ -363,13 +375,25 @@ internal suspend fun startServerTaskWithZip(
                 return@withContext ServerUploadStartResult(null, "업로드할 파일을 읽을 수 없습니다.")
             }
             val gs = gsZipFile
+            var gsValid = false
             if (gs != null) {
                 if (!gs.name.endsWith(".zip", ignoreCase = true)) {
                     return@withContext ServerUploadStartResult(null, "file_gs 는 ZIP 파일만 허용됩니다.")
                 }
-                if (!gs.isFile || !gs.canRead() || gs.length() <= 0L) {
-                    return@withContext ServerUploadStartResult(null, "file_gs 파일을 읽을 수 없습니다.")
+                if (!gs.isFile || !gs.canRead()) {
+                    return@withContext ServerUploadStartResult(null, "file_gs 파일을 읽을 수 없습니다 (파일 없음·권한).")
                 }
+                val gsLen = gs.length()
+                if (gsLen <= 0L) {
+                    return@withContext ServerUploadStartResult(null, "file_gs 빈 파일입니다 (${gsLen} B). ARCore ZIP을 다시 확인하세요.")
+                }
+                gsValid = true
+                android.util.Log.i(
+                    "ServerPipelineUpload",
+                    "file_gs ready: ${gs.absolutePath} (${gsLen / 1024} KB)",
+                )
+            } else {
+                android.util.Log.i("ServerPipelineUpload", "file_gs not provided (null)")
             }
 
             val pcPartName = multipartZipFilenameForServer(
@@ -423,7 +447,15 @@ internal suspend fun startServerTaskWithZip(
                 try {
                     val json = JSONObject(body)
                     val tid = json.optString("task_id").takeIf { it.isNotBlank() }
-                    if (tid != null) return@withContext ServerUploadStartResult(tid, null)
+                    if (tid != null) {
+                        val gsEnabled = json.optBoolean("gs_enabled", false)
+                        android.util.Log.i(
+                            "ServerUpload",
+                            "Upload OK: task_id=$tid gsValid=${gs != null} gsServerEnabled=$gsEnabled" +
+                                (if (gs != null && !gsEnabled) " — WARN: file_gs ignored by server" else ""),
+                        )
+                        return@withContext ServerUploadStartResult(tid, null, gsEnabled)
+                    }
                     return@withContext ServerUploadStartResult(
                         null,
                         "서버 응답에 task_id가 없습니다.",
@@ -524,8 +556,8 @@ internal suspend fun fetchServerTaskStatus(context: Context, taskId: String): Se
                     progressPercent = pct,
                     message = json.optString("message", "처리 중..."),
                     downloadUrl = json.optString("download_url").takeIf { it.isNotBlank() },
-                    gsStatus = json.optString("gs_status").takeIf { it.isNotBlank() },
-                    gsViewerUrl = json.optString("gs_viewer_url").takeIf { it.isNotBlank() },
+                    gsStatus = safeOptString(json, "gs_status"),
+                    gsViewerUrl = safeOptString(json, "gs_viewer_url"),
                 )
             }
         } catch (t: Throwable) {

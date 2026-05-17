@@ -225,8 +225,10 @@ import androidx.compose.material.icons.filled.SettingsInputAntenna
 import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.material.icons.filled.Close
@@ -481,10 +483,12 @@ fun CameraApp(modifier: Modifier = Modifier) {
     }
     var showLlmApiKeySettings by remember { mutableStateOf(false) }
     var showServerSettings by remember { mutableStateOf(false) }
+    var showThemeSettings by remember { mutableStateOf(false) }
     var showArCoreSettings by remember { mutableStateOf(false) }
     var showSensorCheck by remember { mutableStateOf(false) }
     var showWarningLog by remember { mutableStateOf(false) }
     var showPermissions by remember { mutableStateOf(false) }
+    var showGs3dWaiting by remember { mutableStateOf(false) }
     var selectedTab by remember { mutableStateOf(MainTab.CAMERA) }
     var selectedLibraryTab by remember { mutableStateOf(LibraryTab.GALLERY) }
     /** true: 갤럭시 갤러리 스타일 앨범 허브, false: 선택한 라이브러리 구역 */
@@ -588,6 +592,43 @@ fun CameraApp(modifier: Modifier = Modifier) {
             .fillMaxSize()
             .background(rootPalette.background)
     ) {
+        AnimatedVisibility(
+            visible = showGs3dWaiting,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF0D47A1))
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "3DGS URL 수신 대기중…",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.White.copy(alpha = 0.2f))
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "백그라운드",
+                            color = Color.White.copy(alpha = 0.9f),
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+            }
+        }
         if (selectedMediaUri != null && viewingMediaList.isNotEmpty()) {
             MediaDetailScreen(
                 mediaList = viewingMediaList,
@@ -640,6 +681,10 @@ fun CameraApp(modifier: Modifier = Modifier) {
         } else if (showPermissions) {
             PermissionManagementScreen(
                 onBack = { showPermissions = false }
+            )
+        } else if (showThemeSettings) {
+            ThemeSettingsScreen(
+                onBack = { showThemeSettings = false }
             )
         } else {
             Box(
@@ -736,6 +781,7 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                 pending3dgsServerAutoSend = pending
                                 selectedTab = MainTab.CLAUDE
                             },
+                            onGs3dWaitingChange = { showGs3dWaiting = it },
                         )
                     }
                     MainTab.CLAUDE -> {
@@ -825,6 +871,7 @@ fun CameraApp(modifier: Modifier = Modifier) {
                     }
                     MainTab.PROFILE -> {
                         ProfileScreen(
+                            onThemeSettingsClick = { showThemeSettings = true },
                             onLlmApiKeyClick = { showLlmApiKeySettings = true },
                             onServerSettingsClick = { showServerSettings = true },
                             onArCoreSettingsClick = { showArCoreSettings = true },
@@ -999,8 +1046,7 @@ fun MediaDetailScreen(
                                                         val pcy = (p1.previousPosition.y + p2.previousPosition.y) / 2f
                                                         offsetX += cx - pcx
                                                         offsetY += cy - pcy
-                                                    } else {
-                                                        offsetX = 0f; offsetY = 0f
+
                                                     }
                                                 }
                                                 prevDist = dist
@@ -3916,6 +3962,11 @@ internal suspend fun uploadZipAndRunPipeline(
      * UI 상태 갱신은 이 콜백 안에서 바로 수행해도 됩니다.
      */
     onDa3Complete: ((ServerPipelineResultBundle) -> Unit)? = null,
+    /**
+     * 3DGS URL이 메인 파이프라인 완료 후 비동기로 도착했을 때 **[메인 스레드]** 에서 호출됩니다.
+     * 팝업 레이어를 위한 콜백 — URL만 전달하므로 onDa3Complete 재호출로 다이얼로그가 다시 뜨지 않습니다.
+     */
+    onGs3dUrl: ((String) -> Unit)? = null,
 ): ServerPipelineResultBundle? {
     val taskTitle = "3D 모델 생성 중"
     val uploadStartMs = System.currentTimeMillis()
@@ -3984,13 +4035,31 @@ internal suspend fun uploadZipAndRunPipeline(
             return null
         }
 
+        // 서버의 GS_ENABLE 상태 확인
+        if (gsZipFile != null && !startResult.gsEnabled) {
+            android.util.Log.w(
+                "uploadZipAndRunPipeline",
+                "file_gs 전송됐으나 서버 GS_ENABLE=false → ARCore ZIP 무시됨. 파이프라인은 계속 진행.",
+            )
+            mainHandler.post {
+                onProgress(
+                    lastShownProgress,
+                    "ARCore ZIP이 전송됐으나 서버에서 3DGS를 지원하지 않습니다. 파이프라인은 계속 진행합니다.",
+                )
+            }
+        }
+
         var pushFailureMessage: String? = null
         var pushBundle: ServerPipelineResultBundle? = null
+        var pushedGsViewerUrl: String? = null
 
         fun drainPushEvents() {
             while (true) {
                 val ev = pushChannel.tryReceive().getOrNull() ?: break
                 if (ev.taskId != taskId) continue
+                if (!ev.gsViewerUrl.isNullOrBlank()) {
+                    pushedGsViewerUrl = ev.gsViewerUrl
+                }
                 when {
                     ev.event.equals(PipelineCallbackEvents.THREE_DGS_COMPLETED, ignoreCase = true) -> {
                         emitProgress(
@@ -4021,8 +4090,12 @@ internal suspend fun uploadZipAndRunPipeline(
                             }
                             PipelineCallbackEvents.PIPELINE_RESULT_FILES -> {
                                 if (ev.partFiles.isNotEmpty()) {
-                                    buildServerPipelineBundleFromPushedFiles(appCtx, taskId, ev.partFiles)?.let {
-                                        pushBundle = it
+                                    buildServerPipelineBundleFromPushedFiles(appCtx, taskId, ev.partFiles)?.let { b ->
+                                        pushBundle = if (!pushedGsViewerUrl.isNullOrBlank()) {
+                                            b.copy(gsViewerUrl = pushedGsViewerUrl)
+                                        } else {
+                                            b
+                                        }
                                     }
                                     ev.partFiles.values.forEach { f -> try { f.delete() } catch (_: Exception) {} }
                                 }
@@ -4032,8 +4105,12 @@ internal suspend fun uploadZipAndRunPipeline(
                                     "FAILED" -> pushFailureMessage = ev.failureMessage ?: "서버 처리 실패"
                                     "COMPLETED" -> {
                                         if (ev.partFiles.isNotEmpty()) {
-                                            buildServerPipelineBundleFromPushedFiles(appCtx, taskId, ev.partFiles)?.let {
-                                                pushBundle = it
+                                            buildServerPipelineBundleFromPushedFiles(appCtx, taskId, ev.partFiles)?.let { b ->
+                                                pushBundle = if (!pushedGsViewerUrl.isNullOrBlank()) {
+                                                    b.copy(gsViewerUrl = pushedGsViewerUrl)
+                                                } else {
+                                                    b
+                                                }
                                             }
                                             ev.partFiles.values.forEach { f -> try { f.delete() } catch (_: Exception) {} }
                                         }
@@ -4109,36 +4186,54 @@ internal suspend fun uploadZipAndRunPipeline(
         }
 
         drainPushEvents()
-        // push 이벤트에서 gs_viewer_url이 이미 도착했는지 1차 확인
         var gsViewerUrl: String? = bundle.gsViewerUrl
+            ?: pushedGsViewerUrl
+        android.util.Log.i("uploadZipAndRunPipeline", "gsViewerUrl after drain: ${gsViewerUrl ?: "(null)"}")
         if (gsViewerUrl.isNullOrBlank()) {
-            emitProgress(lastShownProgress.coerceAtLeast(96), "3DGS 모델 생성 대기 중…")
-            val gsPollStart = System.currentTimeMillis()
-            var gsPollCount = 0
-            while (System.currentTimeMillis() - gsPollStart < SERVER_GS_POLL_TIMEOUT_MS) {
-                drainPushEvents()
-                val gsSt = fetchServerTaskStatus(appCtx, taskId)
-                val gsStatus = gsSt?.gsStatus?.uppercase(Locale.US)
-                if (gsSt != null && gsSt.gsViewerUrl.isNullOrBlank().not()) {
-                    gsViewerUrl = gsSt.gsViewerUrl
-                    break
-                }
-                when (gsStatus) {
-                    "COMPLETED" -> {
-                        gsViewerUrl = gsSt!!.gsViewerUrl
+            // DA3 완료 — 백그라운드에서 3DGS URL 대기 시작 (메인 파이프라인은 바로 반환)
+            android.util.Log.i("uploadZipAndRunPipeline", "Launching background GS poller+drainer — pipeline returns immediately")
+            val capturedTaskId = taskId
+            kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+                var pollCount = 0
+                var foundUrl: String? = null
+                while (pollCount < 120 && foundUrl == null) {
+                    drainPushEvents()
+                    if (!pushedGsViewerUrl.isNullOrBlank()) {
+                        foundUrl = pushedGsViewerUrl
                         break
                     }
-                    "FAILED", "DISABLED", "SEND_FAILED" -> break
+                    val gsSt = fetchServerTaskStatus(appCtx, taskId)
+                    if (gsSt != null && gsSt.gsViewerUrl.isNullOrBlank().not()) {
+                        foundUrl = gsSt.gsViewerUrl
+                        break
+                    }
+                    val gsStatus = gsSt?.gsStatus?.uppercase(Locale.US)
+                    when (gsStatus) {
+                        "FAILED", "DISABLED", "SEND_FAILED" -> break
+                        "COMPLETED" -> {
+                            if (gsSt != null && !gsSt.gsViewerUrl.isNullOrBlank()) {
+                                foundUrl = gsSt.gsViewerUrl
+                            }
+                            break
+                        }
+                    }
+                    pollCount++
+                    delay(if (pollCount <= 30) 10_000L else 20_000L)
                 }
-                gsPollCount++
-                delay(if (gsPollCount <= 30) SERVER_GS_POLL_INTERVAL_MS else SERVER_GS_POLL_INTERVAL_MS * 3L)
+                android.util.Log.i("uploadZipAndRunPipeline",
+                    "Background GS poller: found=${foundUrl != null} polls=$pollCount")
+                if (foundUrl != null) {
+                    android.util.Log.i("uploadZipAndRunPipeline", "Background GS poller: sending onGs3dUrl=$foundUrl")
+                    mainHandler.post {
+                        onGs3dUrl?.invoke(foundUrl)
+                    }
+                }
             }
-            if (gsViewerUrl.isNullOrBlank().not()) {
-                bundle = bundle.copy(gsViewerUrl = gsViewerUrl)
-                emitProgress(100, "3DGS 모델 생성 완료!")
-            }
+            drainPushEvents()
+            notifyForegroundDirectly(appCtx, taskTitle, 100, "결과 다운로드 완료 · 3DGS 대기 중", uploadStartMs)
+            mainHandler.post { onProgress(100, "결과 다운로드 완료 · 3DGS URL 수신 대기 중") }
+            lastShownProgress = 100
         }
-        drainPushEvents()
         ServerPipelinePostDownload.writeManifestIfNeeded(bundle)
         ServerPipelinePostDownload.scheduleDeferredHeavyWork(appCtx, bundle)
         emitProgress(100, "완료되었습니다!")
@@ -4166,14 +4261,6 @@ internal suspend fun uploadZipAndRunPipeline(
         return null
     } finally {
         try {
-            pushServer?.stop()
-        } catch (_: Exception) {
-        }
-        try {
-            pushChannel.close()
-        } catch (_: Exception) {
-        }
-        try {
             if (wakeLock.isHeld) wakeLock.release()
         } catch (_: Exception) {
         }
@@ -4181,6 +4268,8 @@ internal suspend fun uploadZipAndRunPipeline(
             appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
         } catch (_: Exception) {
         }
+        // pushServer는 3DGS 콜백을 수신하기 위해 앱 종료 시까지 유지
+        // pushChannel도 함께 유지 (finally 에서 stop/close 하지 않음)
     }
 }
 
@@ -5082,13 +5171,47 @@ fun ServerSettingsScreen(
 }
 // ── 포그라운드 서비스 공통 제어 헬퍼 ─────────────────────────────────────────
 
+/** 마지막 startForegroundService() 호출 시각 (ms) — 1초 이내 중복 호출 방지 */
+private var lastFgServiceStartMs: Long = 0L
+
+/**
+ * [startOrUpdateForegroundService]와 달리 `startForegroundService()`를 호출하지 않고
+ * [NotificationManager.notify]로 알림을 직접 갱신합니다.
+ * 포그라운드 서비스가 이미 실행 중이며 `startForeground()` 생명주기 충돌 없이
+ * 알림만 갱신해야 할 때 사용합니다. (예: 3DGS 대기)
+ */
+internal fun notifyForegroundDirectly(
+    context: Context,
+    taskTitle: String,
+    progress: Int,
+    message: String,
+    startMs: Long = 0L,
+) {
+    try {
+        val ongoing = progress < 100
+        val builder = NotificationCompat.Builder(context, AppForegroundService.CHANNEL_ID)
+            .setContentTitle(taskTitle.take(100))
+            .setContentText(message.ifBlank { "처리 중…" }.take(250))
+            .setSmallIcon(android.R.drawable.stat_sys_upload)
+            .setOnlyAlertOnce(true)
+            .setOngoing(ongoing)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+
+        if (progress in 0..100) {
+            builder.setProgress(100, progress, false)
+            builder.setSubText("$progress%")
+        } else {
+            builder.setProgress(0, 0, true)
+        }
+        NotificationManagerCompat.from(context)
+            .notify(AppForegroundService.NOTIF_ID, builder.build())
+    } catch (_: Exception) {
+    }
+}
+
 /**
  * 포그라운드 서비스를 시작하거나 진행률을 업데이트합니다.
- *
- * @param taskTitle  알림 제목 (예: "배경 제거 중", "광택 제거 중", "3D 모델 생성 중")
- * @param progress   0~100 (불확정이면 -1)
- * @param message    현재 단계 메시지
- * @param startMs    작업 시작 시각 (예상 시간 계산용, 0이면 무시)
+ * 메인 스레드 과부하 방지를 위해 3초 내 중복 startForegroundService()는 생략합니다.
  */
 internal fun startOrUpdateForegroundService(
     context: Context,
@@ -5097,6 +5220,9 @@ internal fun startOrUpdateForegroundService(
     message: String,
     startMs: Long = 0L
 ) {
+    val now = System.currentTimeMillis()
+    if (lastFgServiceStartMs > 0L && now - lastFgServiceStartMs < 3_000L) return
+    lastFgServiceStartMs = now
     val intent = Intent(context, AppForegroundService::class.java).apply {
         putExtra(AppForegroundService.EXTRA_TASK_TITLE, taskTitle)
         putExtra(AppForegroundService.EXTRA_PROGRESS, progress)
@@ -5146,6 +5272,9 @@ class AppForegroundService : Service() {
 
         /** 알림 ID (하위 호환 보존) */
         const val NOTIFICATION_ID  = NOTIF_ID
+
+        /** startForeground() 즉시 호출을 위한 최소 알림 캐시 */
+        private var cachedMinimalNotification = Notification()
     }
 
     private var taskStartMs: Long = 0L
@@ -5178,21 +5307,35 @@ class AppForegroundService : Service() {
         super.onCreate()
         ensureNotificationChannelSync()
         val fgType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-        val minimal = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("백그라운드 작업 준비 중")
-            .setContentText("곧 시작됩니다…")
+        cachedMinimalNotification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("백그라운드 작업")
+            .setContentText("처리 중…")
             .setSmallIcon(defaultNotificationSmallIcon())
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
-            .setOnlyAlertOnce(true)
             .build()
         runCatching {
-            ServiceCompat.startForeground(this, NOTIF_ID, minimal, fgType)
+            ServiceCompat.startForeground(this, NOTIF_ID, cachedMinimalNotification, fgType)
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         intent ?: return START_NOT_STICKY
+        // startForeground() 즉시 재호출 — 이전 stopForeground(REMOVE) 후 재진입 시 5초 제한 회피
+        ensureNotificationChannelSync()
+        val fgType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(NOTIF_ID, cachedMinimalNotification, fgType)
+            } else {
+                @Suppress("DEPRECATION")
+                startForeground(NOTIF_ID, cachedMinimalNotification)
+            }
+        } catch (t: Throwable) {
+            android.util.Log.w("AppForegroundService", "startForeground 실패: ${t.message}", t)
+            try { stopSelf() } catch (_: Exception) {}
+            return START_NOT_STICKY
+        }
 
         val progress  = intent.getIntExtra(EXTRA_PROGRESS, -1)
         val message   = intent.getStringExtra(EXTRA_MESSAGE) ?: ""

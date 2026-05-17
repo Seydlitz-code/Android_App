@@ -1176,6 +1176,7 @@ fun GalleryScreen(
     onServerPipelineCompleteBundleChange: (ServerPipelineResultBundle?) -> Unit,
     serverArtifactLibraryVersion: Int,
     onEnqueueBackground3dgsFromBundle: (ServerPipelineResultBundle) -> Unit,
+    onGs3dWaitingChange: (Boolean) -> Unit = {},
 ) {
     val context = LocalContext.current
     val palette = LocalAppUiPalette.current
@@ -1691,13 +1692,13 @@ fun GalleryScreen(
     }
 
     if (libraryDetailScreen == LibraryDetailScreen.GS3D_WEBVIEW && !gs3dViewerUrl.isNullOrBlank()) {
-        Box(modifier = Modifier.fillMaxSize()) {
+        Box(modifier = Modifier.fillMaxSize().background(palette.background)) {
             Gs3dWebViewScreen(
                 url = gs3dViewerUrl!!,
                 modifier = Modifier.fillMaxSize(),
             )
         }
-        // dialogs는 그대로 렌더링 (뒤에 있음)
+        return@GalleryScreen
     }
 
     // 허브가 열리기 전에 라이브러리 데이터를 미리 병렬 로드해 초기 지연을 없앱니다.
@@ -4168,7 +4169,7 @@ fun GalleryScreen(
                     }
                 }
             } else {
-                // 업로드 결과 팝업 (완료: 서버 결과 번들 / 실패·무응답: 기존 알림)
+                // ── 완료 다이얼로그 ──────────────────────────────────────────
                 if (serverPipelineCompleteBundle != null) {
                     val spb = serverPipelineCompleteBundle!!
                     val completionBtnBg = if (palette.isDark) Color.Black else Color.White
@@ -4184,6 +4185,11 @@ fun GalleryScreen(
                             showGs3dViewerPopup = true
                         }
                     }) {
+                        val completionBtnBg = if (palette.isDark) Color.Black else Color.White
+                        val completionBtnFg = if (palette.isDark) Color.White else Color.Black
+                        val completionBtnDisabled = if (palette.isDark) Color(0xFF444444) else Color(0xFFB8C0CC)
+                        val completionBtnFgDisabled =
+                            if (palette.isDark) Color.White.copy(alpha = 0.45f) else Color.Black.copy(alpha = 0.38f)
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -4192,380 +4198,362 @@ fun GalleryScreen(
                                 .padding(20.dp)
                         ) {
                             Column(modifier = Modifier.fillMaxWidth()) {
-                                Text(
-                                    text = "서버 전송 완료",
-                                    color = palette.onBackground,
-                                    fontSize = 18.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "결과 파일을 기기에 저장했습니다.",
-                                    color = palette.onBackgroundMuted,
-                                    fontSize = 12.sp,
-                                    modifier = Modifier.padding(top = 4.dp)
-                                )
-                                Spacer(modifier = Modifier.height(12.dp))
+                                Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "서버 전송 완료",
+                                color = palette.onBackground,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = "닫기",
+                                color = palette.brand,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        val url = spb.gsViewerUrl
+                                        onServerPipelineCompleteBundleChange(null)
+                                        if (!url.isNullOrBlank()) {
+                                            gs3dViewerUrl = url
+                                            showGs3dViewerPopup = true
+                                        }
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                        Text(
+                            text = "결과 파일을 기기에 저장했습니다.",
+                            color = palette.onBackgroundMuted,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(56.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(palette.onBackground.copy(alpha = 0.08f))
+                                .padding(12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(56.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(palette.onBackground.copy(alpha = 0.08f))
-                                        .padding(12.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Column(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalAlignment = Alignment.CenterHorizontally
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(8.dp)
-                                                .clip(RoundedCornerShape(4.dp))
-                                                .background(palette.onBackground.copy(alpha = 0.12f))
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .fillMaxHeight()
-                                                    .fillMaxWidth()
-                                                    .background(palette.onBackground)
-                                            )
-                                        }
-                                        Spacer(modifier = Modifier.height(8.dp))
-                                        Text(
-                                            text = "100%",
-                                            color = palette.onBackground,
-                                            fontSize = 18.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-                                Spacer(modifier = Modifier.height(16.dp))
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        .height(8.dp)
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(palette.onBackground.copy(alpha = 0.12f))
                                 ) {
                                     Box(
                                         modifier = Modifier
-                                            .weight(1f)
-                                            .height(52.dp)
-                                            .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(completionBtnBg)
-                                            .clickable {
-                                                val ply = spb.plyFile
-                                                if (!ply.exists()) {
-                                                    android.widget.Toast.makeText(
-                                                        context,
-                                                        "PLY 파일을 찾을 수 없습니다.",
-                                                        android.widget.Toast.LENGTH_SHORT
-                                                    ).show()
-                                                    return@clickable
-                                                }
-                                                onEnqueueBackground3dgsFromBundle(spb)
-                                                onLibraryTabChange(LibraryTab.MODEL_3D)
-                                                onLibraryHubVisibilityChange(false)
-                                                currentPlyModel = PlyModel(
-                                                    name = ply.nameWithoutExtension.ifBlank { "model" },
-                                                    file = ply,
-                                                    lastModified = ply.lastModified()
-                                                )
-                                                libraryDetailScreen = LibraryDetailScreen.OBJ_VIEWER
-                                            },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = "PLY 확인",
-                                            color = completionBtnFg,
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            textAlign = TextAlign.Center
-                                        )
-                                    }
-                                    val qualityJson = spb.filesByKey["quality_json"]?.takeIf { it.exists() && it.isFile }
-                                    val analysisPngLegacy = spb.filesByKey["quality_png"]?.takeIf { it.exists() && it.isFile }
-                                    val hasQualityOrAnalysisView = qualityJson != null || analysisPngLegacy != null
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(52.dp)
-                                            .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(
-                                                if (hasQualityOrAnalysisView) completionBtnBg
-                                                else completionBtnDisabled
-                                            )
-                                            .clickable(enabled = hasQualityOrAnalysisView) {
-                                                val jf = qualityJson
-                                                if (jf != null) {
-                                                    qualityReportDialogFile = jf
-                                                    return@clickable
-                                                }
-                                                val f = analysisPngLegacy
-                                                if (f == null || !f.exists()) {
-                                                    android.widget.Toast.makeText(
-                                                        context,
-                                                        "품질 리포트·분석 이미지가 없습니다.",
-                                                        android.widget.Toast.LENGTH_SHORT
-                                                    ).show()
-                                                    return@clickable
-                                                }
-                                                onEnqueueBackground3dgsFromBundle(spb)
-                                                val u = uriToShareableContentUri(context, Uri.fromFile(f))
-                                                if (u == null) {
-                                                    android.widget.Toast.makeText(
-                                                        context,
-                                                        "이미지를 열 수 없습니다.",
-                                                        android.widget.Toast.LENGTH_SHORT
-                                                    ).show()
-                                                } else {
-                                                    val ai = gsAnalysisImageUrisOnly.indexOfFirst { it == u }
-                                                    if (ai >= 0) {
-                                                        onServerPipelineOpenImageViewer(gsAnalysisImageUrisOnly, ai)
-                                                    } else {
-                                                        onServerPipelineOpenImageViewer(listOf(u), 0)
-                                                    }
-                                                }
-                                            },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = when {
-                                                qualityJson != null -> "포인트 클라우드\n품질 평가"
-                                                analysisPngLegacy != null -> "3DGS 분석\n이미지"
-                                                else -> "품질·분석"
-                                            },
-                                            color = if (hasQualityOrAnalysisView) completionBtnFg else completionBtnFgDisabled,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            textAlign = TextAlign.Center,
-                                            lineHeight = 15.sp
-                                        )
-                                    }
-                                    if (!spb.gsViewerUrl.isNullOrBlank()) {
-                                        Box(
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .height(52.dp)
-                                                .border(BorderStroke(1.dp, Color(0xFF1B5E20)), RoundedCornerShape(8.dp))
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(Color(0xFFE8F5E9))
-                                                .clickable {
-                                                    gs3dViewerUrl = spb.gsViewerUrl
-                                                    libraryDetailScreen = LibraryDetailScreen.GS3D_WEBVIEW
-                                                    onServerPipelineCompleteBundleChange(null)
-                                                },
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Text(
-                                                text = "3DGS 웹 뷰어",
-                                                color = Color(0xFF1B5E20),
-                                                fontSize = 13.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                textAlign = TextAlign.Center
-                                            )
-                                        }
-                                    }
-                                }
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(52.dp)
-                                            .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(completionBtnBg)
-                                            .clickable {
-                                                // AI 탭 3DGS 분석 모드로 전환해 LLM에 자동 전송.
-                                                // LLM 응답 후 메시지 버블에 "Word 저장·열기" 버튼이 나타납니다.
-                                                val payload = buildPoliceInsurance3dgsPayload(
-                                                    context,
-                                                    spb,
-                                                    basePrompt = "위 입력 파일을 기반으로 사고현장 분석 보고서를 작성하라",
-                                                )
-                                                onServerPipelineStart3dgsAi(
-                                                    Pending3dgsServerAutoSend(
-                                                        nonce = System.nanoTime(),
-                                                        promptText = payload.first,
-                                                        imageUris = payload.second,
-                                                        switchToAiTab = true,
-                                                        sourceServerTaskId = spb.taskId,
-                                                    )
-                                                )
-                                                // 다이얼로그 닫기
-                                                onServerPipelineCompleteBundleChange(null)
-                                            },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = "PLY 분석",
-                                            color = completionBtnFg,
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            textAlign = TextAlign.Center
-                                        )
-                                    }
-                                    val top = spb.filesByKey["topview"]
-                                    val side = spb.filesByKey["sideview"]
-                                    val previewsOk = top?.exists() == true && side?.exists() == true
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(52.dp)
-                                            .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(if (previewsOk) completionBtnBg else completionBtnDisabled)
-                                            .clickable(enabled = previewsOk) {
-                                                if (!previewsOk) {
-                                                    android.widget.Toast.makeText(
-                                                        context,
-                                                        "미리보기 이미지가 없습니다.",
-                                                        android.widget.Toast.LENGTH_SHORT
-                                                    ).show()
-                                                    return@clickable
-                                                }
-                                                onEnqueueBackground3dgsFromBundle(spb)
-                                                val u1 = uriToShareableContentUri(context, Uri.fromFile(top!!))
-                                                val u2 = uriToShareableContentUri(context, Uri.fromFile(side!!))
-                                                if (u1 == null || u2 == null) {
-                                                    android.widget.Toast.makeText(
-                                                        context,
-                                                        "이미지를 열 수 없습니다.",
-                                                        android.widget.Toast.LENGTH_SHORT
-                                                    ).show()
-                                                } else {
-                                                    val pi = gsPreviewUris.indexOfFirst { it == u1 }
-                                                    if (pi >= 0) {
-                                                        onServerPipelineOpenImageViewer(gsPreviewUris, pi)
-                                                    } else {
-                                                        onServerPipelineOpenImageViewer(listOf(u1, u2), 0)
-                                                    }
-                                                }
-                                            },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = "3DGS\n미리보기",
-                                            color = if (previewsOk) completionBtnFg else completionBtnFgDisabled,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            textAlign = TextAlign.Center,
-                                            lineHeight = 15.sp
-                                        )
-                                    }
-                                }
-                                Spacer(modifier = Modifier.height(12.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(48.dp)
-                                        .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(completionBtnBg.copy(alpha = 0.55f))
-                                        .clickable {
-                                            val url = spb.gsViewerUrl
-                                            onServerPipelineCompleteBundleChange(null)
-                                            if (!url.isNullOrBlank()) {
-                                                gs3dViewerUrl = url
-                                                showGs3dViewerPopup = true
-                                            }
-                                        },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = "닫기",
-                                        color = completionBtnFg,
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Bold
+                                            .fillMaxHeight()
+                                            .fillMaxWidth()
+                                            .background(palette.onBackground)
                                     )
                                 }
-                            }
-                        }
-                    }
-                }
-                if (showGs3dViewerPopup && !gs3dViewerUrl.isNullOrBlank()) {
-                    Dialog(onDismissRequest = { showGs3dViewerPopup = false }) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .border(BorderStroke(1.dp, palette.divider), RoundedCornerShape(16.dp))
-                                .background(palette.surfaceCard, RoundedCornerShape(16.dp))
-                                .padding(20.dp)
-                        ) {
-                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Spacer(modifier = Modifier.height(8.dp))
                                 Text(
-                                    text = "3DGS 모델 학습 완료",
+                                    text = "100%",
                                     color = palette.onBackground,
                                     fontSize = 18.sp,
                                     fontWeight = FontWeight.Bold
                                 )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(52.dp)
+                                    .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(completionBtnBg)
+                                    .clickable {
+                                        val ply = spb.plyFile
+                                        if (!ply.exists()) {
+                                            android.widget.Toast.makeText(
+                                                context,
+                                                "PLY 파일을 찾을 수 없습니다.",
+                                                android.widget.Toast.LENGTH_SHORT
+                                            ).show()
+                                            return@clickable
+                                        }
+                                        onEnqueueBackground3dgsFromBundle(spb)
+                                        onLibraryTabChange(LibraryTab.MODEL_3D)
+                                        onLibraryHubVisibilityChange(false)
+                                        currentPlyModel = PlyModel(
+                                            name = ply.nameWithoutExtension.ifBlank { "model" },
+                                            file = ply,
+                                            lastModified = ply.lastModified()
+                                        )
+                                        libraryDetailScreen = LibraryDetailScreen.OBJ_VIEWER
+                                        val url = spb.gsViewerUrl
+                                        onServerPipelineCompleteBundleChange(null)
+                                        if (!url.isNullOrBlank()) {
+                                            gs3dViewerUrl = url
+                                            showGs3dViewerPopup = true
+                                        }
+                                    },
+                                    contentAlignment = Alignment.Center
+                            ) {
                                 Text(
-                                    text = "3DGS 모델 학습이 완료되었습니다.\n웹 뷰어로 확인하시겠습니까?",
-                                    color = palette.onBackgroundMuted,
-                                    fontSize = 14.sp,
-                                    modifier = Modifier.padding(top = 8.dp)
+                                    text = "PLY 확인",
+                                    color = completionBtnFg,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    textAlign = TextAlign.Center
                                 )
-                                Spacer(modifier = Modifier.height(16.dp))
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(48.dp)
-                                            .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(if (palette.isDark) Color.Black else Color.White)
-                                            .clickable {
-                                                showGs3dViewerPopup = false
-                                            },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = "닫기",
-                                            color = if (palette.isDark) Color.White else Color.Black,
-                                            fontSize = 14.sp,
-                                            fontWeight = FontWeight.Bold
+                            }
+                            val qualityJson = spb.filesByKey["quality_json"]?.takeIf { it.exists() && it.isFile }
+                            val analysisPngLegacy = spb.filesByKey["quality_png"]?.takeIf { it.exists() && it.isFile }
+                            val hasQualityOrAnalysisView = qualityJson != null || analysisPngLegacy != null
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(52.dp)
+                                    .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(
+                                        if (hasQualityOrAnalysisView) completionBtnBg
+                                        else completionBtnDisabled
+                                    )
+                                    .clickable(enabled = hasQualityOrAnalysisView) {
+                                        val jf = qualityJson
+                                        if (jf != null) {
+                                            qualityReportDialogFile = jf
+                                            return@clickable
+                                        }
+                                        val f = analysisPngLegacy
+                                        if (f == null || !f.exists()) {
+                                            android.widget.Toast.makeText(
+                                                context,
+                                                "품질 리포트·분석 이미지가 없습니다.",
+                                                android.widget.Toast.LENGTH_SHORT
+                                            ).show()
+                                            return@clickable
+                                        }
+                                        onEnqueueBackground3dgsFromBundle(spb)
+                                        val u = uriToShareableContentUri(context, Uri.fromFile(f))
+                                        if (u == null) {
+                                            android.widget.Toast.makeText(
+                                                context,
+                                                "이미지를 열 수 없습니다.",
+                                                android.widget.Toast.LENGTH_SHORT
+                                            ).show()
+                                        } else {
+                                            val ai = gsAnalysisImageUrisOnly.indexOfFirst { it == u }
+                                            if (ai >= 0) {
+                                                onServerPipelineOpenImageViewer(gsAnalysisImageUrisOnly, ai)
+                                            } else {
+                                                onServerPipelineOpenImageViewer(listOf(u), 0)
+                                            }
+                                        }
+                                    },
+                                    contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = when {
+                                        qualityJson != null -> "품질평가"
+                                        analysisPngLegacy != null -> "3DGS 분석\n이미지"
+                                        else -> "품질·분석"
+                                    },
+                                    color = if (hasQualityOrAnalysisView) completionBtnFg else completionBtnFgDisabled,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    textAlign = TextAlign.Center,
+                                    lineHeight = 15.sp
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(52.dp)
+                                    .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(completionBtnBg)
+                                    .clickable {
+                                        val payload = buildPoliceInsurance3dgsPayload(
+                                            context,
+                                            spb,
+                                            basePrompt = "위 입력 파일을 기반으로 사고현장 분석 보고서를 작성하라",
                                         )
-                                    }
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(48.dp)
-                                            .border(BorderStroke(1.dp, Color(0xFF1B5E20)), RoundedCornerShape(8.dp))
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(Color(0xFFE8F5E9))
-                                            .clickable {
-                                                showGs3dViewerPopup = false
-                                                libraryDetailScreen = LibraryDetailScreen.GS3D_WEBVIEW
-                                            },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = "확인",
-                                            color = Color(0xFF1B5E20),
-                                            fontSize = 14.sp,
-                                            fontWeight = FontWeight.Bold
+                                        onServerPipelineStart3dgsAi(
+                                            Pending3dgsServerAutoSend(
+                                                nonce = System.nanoTime(),
+                                                promptText = payload.first,
+                                                imageUris = payload.second,
+                                                switchToAiTab = true,
+                                                sourceServerTaskId = spb.taskId,
+                                            )
                                         )
-                                    }
-                                }
+                                        val url = spb.gsViewerUrl
+                                        onServerPipelineCompleteBundleChange(null)
+                                        if (!url.isNullOrBlank()) {
+                                            gs3dViewerUrl = url
+                                            showGs3dViewerPopup = true
+                                        }
+                                    },
+                                    contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "PLY 분석",
+                                    color = completionBtnFg,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                            val top = spb.filesByKey["topview"]
+                            val side = spb.filesByKey["sideview"]
+                            val previewsOk = top?.exists() == true && side?.exists() == true
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(52.dp)
+                                    .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (previewsOk) completionBtnBg else completionBtnDisabled)
+                                    .clickable(enabled = previewsOk) {
+                                        if (!previewsOk) {
+                                            android.widget.Toast.makeText(
+                                                context,
+                                                "미리보기 이미지가 없습니다.",
+                                                android.widget.Toast.LENGTH_SHORT
+                                            ).show()
+                                            return@clickable
+                                        }
+                                        onEnqueueBackground3dgsFromBundle(spb)
+                                        val u1 = uriToShareableContentUri(context, Uri.fromFile(top!!))
+                                        val u2 = uriToShareableContentUri(context, Uri.fromFile(side!!))
+                                        if (u1 == null || u2 == null) {
+                                            android.widget.Toast.makeText(
+                                                context,
+                                                "이미지를 열 수 없습니다.",
+                                                android.widget.Toast.LENGTH_SHORT
+                                            ).show()
+                                        } else {
+                                            val pi = gsPreviewUris.indexOfFirst { it == u1 }
+                                            if (pi >= 0) {
+                                                onServerPipelineOpenImageViewer(gsPreviewUris, pi)
+                                            } else {
+                                                onServerPipelineOpenImageViewer(listOf(u1, u2), 0)
+                                            }
+                                        }
+                                    },
+                                    contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "3DGS 미리보기",
+                                    color = if (previewsOk) completionBtnFg else completionBtnFgDisabled,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    textAlign = TextAlign.Center,
+                                    maxLines = 1
+                                )
                             }
                         }
                     }
                 }
-                if (showUploadResultPopup && uploadResultPopupMessage != null) {
-                    Dialog(
-                        onDismissRequest = {
-                            showUploadResultPopup = false
-                            uploadResultPopupMessage = null
+            }
+        }
+        // ── 3DGS 완료 팝업 (완료 다이얼로그 위에 표시) ─────────────
+        if (showGs3dViewerPopup && !gs3dViewerUrl.isNullOrBlank()) {
+            Dialog(onDismissRequest = { showGs3dViewerPopup = false }) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(BorderStroke(1.dp, palette.divider), RoundedCornerShape(16.dp))
+                        .background(palette.surfaceCard, RoundedCornerShape(16.dp))
+                        .padding(20.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "3DGS 모델 학습 완료",
+                            color = palette.onBackground,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "3DGS 모델 학습이 완료되었습니다.\n웹 뷰어로 확인하시겠습니까?",
+                            color = palette.onBackgroundMuted,
+                            fontSize = 14.sp,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (palette.isDark) Color.Black else Color.White)
+                                    .clickable { showGs3dViewerPopup = false },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "닫기",
+                                    color = if (palette.isDark) Color.White else Color.Black,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .border(BorderStroke(1.dp, Color(0xFF1B5E20)), RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFFE8F5E9))
+                                    .clickable {
+                                        showGs3dViewerPopup = false
+                                        android.util.Log.i("Gs3dWebView", "User confirmed: gs3dViewerUrl=$gs3dViewerUrl")
+                                        libraryDetailScreen = LibraryDetailScreen.GS3D_WEBVIEW
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "확인",
+                                    color = Color(0xFF1B5E20),
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
-                    ) {
+                    }
+                }
+            }
+        }
+        if (showUploadResultPopup && uploadResultPopupMessage != null) {
+            Dialog(
+                onDismissRequest = {
+                    showUploadResultPopup = false
+                    uploadResultPopupMessage = null
+                }
+            ) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -5641,9 +5629,17 @@ fun GalleryScreen(
                                                                     ).show()
                                                                 }
                                                             } else {
+                                                                // ARCore ZIP의 poses.json을 데이터셋 ZIP에 병합 (서버 file_pc 사양)
+                                                                val mergedZip = mergeArcorePosesIntoDatasetZip(
+                                                                    rawDatasetZip, arcoreZipForGs, context,
+                                                                )
+                                                                val datasetUploadZip = mergedZip ?: rawDatasetZip
+                                                                if (mergedZip != null && mergedZip != rawDatasetZip) {
+                                                                    try { rawDatasetZip.delete() } catch (_: Exception) {}
+                                                                }
                                                                 val pr = uploadZipAndRunPipeline(
                                                                     context = context,
-                                                                    zipFile = rawDatasetZip,
+                                                                    zipFile = datasetUploadZip,
                                                                     prompt = "",
                                                                     onProgress = { p, msg ->
                                                                         uploadProgress = p to 100
@@ -5658,6 +5654,9 @@ fun GalleryScreen(
                                                                                 isUploading = false
                                                                                 pending3DArcoreZipUriForDataset = null
                                                                                 onServerPipelineCompleteBundleChange(da3Bundle)
+                                                                                if (da3Bundle.gsViewerUrl.isNullOrBlank()) {
+                                                                                    onGs3dWaitingChange(true)
+                                                                                }
                                                                                 if (shouldAutoGenerateModelThumbnail(da3Bundle.plyFile)) {
                                                                                     libraryModelThumbRefresh++
                                                                                 }
@@ -5668,6 +5667,11 @@ fun GalleryScreen(
                                                                                 isUploading = false
                                                                             }
                                                                         }
+                                                                    },
+                                                                    onGs3dUrl = { url ->
+                                                                        gs3dViewerUrl = url
+                                                                        showGs3dViewerPopup = true
+                                                                        onGs3dWaitingChange(false)
                                                                     },
                                                                 )
                                                                 pipelineOk = pr != null

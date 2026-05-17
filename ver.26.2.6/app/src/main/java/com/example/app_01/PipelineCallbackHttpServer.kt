@@ -6,6 +6,7 @@ import java.io.File
 import java.io.InputStream
 import java.net.Inet4Address
 import java.net.NetworkInterface
+import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -91,8 +92,23 @@ internal class PipelineCallbackHttpServer(
         if (contentLengthParsed > MAX_PARSE_BODY_BYTES) {
             android.util.Log.i(
                 "PipelineCallback",
-                "본문 큼 (${contentLengthParsed / 1024} KB > ${MAX_PARSE_BODY_BYTES / 1024} KB) — 드레인 후 GET 다운로드 사용.",
+                "본문 큼 (${contentLengthParsed / 1024} KB > ${MAX_PARSE_BODY_BYTES / 1024} KB) — 텍스트 필드만 추출 후 드레인.",
             )
+            val textFields = parseTextFieldsOnly(session)
+            val taskId = textFields["task_id"]?.trim().orEmpty()
+            if (taskId.isNotEmpty()) {
+                val ev = PipelineCallbackEvent(
+                    ordinal = seq.incrementAndGet(),
+                    event = textFields["event"]?.trim().orEmpty().ifEmpty { PipelineCallbackEvents.LEGACY_UNKNOWN },
+                    taskId = taskId,
+                    status = textFields["status"]?.trim().orEmpty().ifEmpty { "UNKNOWN" },
+                    summaryJson = textFields["summary"]?.trim()?.takeIf { it.isNotEmpty() },
+                    failureMessage = textFields["message"]?.trim()?.takeIf { it.isNotEmpty() },
+                    gsViewerUrl = textFields["gs_viewer_url"]?.trim()?.takeIf { it.isNotEmpty() },
+                    partFiles = emptyMap(),
+                )
+                outbound.trySend(ev)
+            }
             drainStreamQuietly(session.inputStream, contentLengthParsed)
             return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "ok")
         }
@@ -116,7 +132,7 @@ internal class PipelineCallbackHttpServer(
             val summary = parms["summary"]?.trim()?.takeIf { it.isNotEmpty() }
             val failureMessage = parms["message"]?.trim()?.takeIf { it.isNotEmpty() }
             val eventRaw = parms["event"]?.trim().orEmpty()
-            val gsViewerUrl = parms["gs_viewer_url"]?.trim()?.takeIf { it.isNotEmpty() }
+            val gsViewerUrl = parms["gs_viewer_url"]?.trim()?.takeIf { it.isNotEmpty() && it != "null" }
 
             // ── 임시 파일 즉시 영속 복사 ──────────────────────────────────────
             // serve() 리턴 직후 NanoHTTPD 가 tmpPaths 의 파일을 삭제합니다.
@@ -192,6 +208,64 @@ internal class PipelineCallbackHttpServer(
             }
         } catch (_: Exception) {
         }
+    }
+
+    private fun parseTextFieldsOnly(session: IHTTPSession): MutableMap<String, String> {
+        val result = LinkedHashMap<String, String>()
+        try {
+            val contentType = session.headers["content-type"]?.lowercase(Locale.US) ?: ""
+            val boundary = extractBoundary(contentType)
+            val textBytes = ByteArray(65536)  // 최대 64KB 읽기
+            var totalRead = 0
+            var n: Int
+            val input = session.inputStream
+            while (totalRead < textBytes.size) {
+                n = input.read(textBytes, totalRead, textBytes.size - totalRead)
+                if (n <= 0) break
+                totalRead += n
+            }
+            if (totalRead <= 0) return result
+            val chunk = String(textBytes, 0, totalRead, Charsets.UTF_8)
+
+            if (boundary != null) {
+                // multipart/form-data: boundary 단위로 텍스트 필드만 추출
+                val parts = chunk.split("--$boundary")
+                for (part in parts) {
+                    if (part.isBlank() || part.trim() == "--") continue
+                    val headerEnd = part.indexOf("\r\n\r\n")
+                    if (headerEnd < 0) continue
+                    val headers = part.substring(0, headerEnd)
+                    val dispMatch = Regex("""name="([^"]+)"""").find(headers) ?: continue
+                    val name = dispMatch.groupValues[1]
+                    if (headers.contains("filename=", ignoreCase = true)) continue
+                    val value = part.substring(headerEnd + 4)
+                        .replace("\r\n", "")
+                        .trim()
+                    if (value.isNotEmpty()) result[name] = value
+                }
+            } else {
+                // application/x-www-form-urlencoded
+                chunk.split("&").forEach { pair ->
+                    val eq = pair.indexOf('=')
+                    if (eq < 0) return@forEach
+                    val key = java.net.URLDecoder.decode(pair.substring(0, eq), "UTF-8")
+                    val value = java.net.URLDecoder.decode(pair.substring(eq + 1), "UTF-8")
+                    if (value.isNotBlank()) result[key] = value
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return result
+    }
+
+    private fun extractBoundary(contentType: String): String? {
+        val idx = contentType.indexOf("boundary=")
+        if (idx < 0) return null
+        var b = contentType.substring(idx + "boundary=".length)
+        if (b.startsWith("\"") && b.indexOf('"', 1) > 0) {
+            b = b.substring(1, b.indexOf('"', 1))
+        }
+        return b.trim().takeIf { it.isNotEmpty() }
     }
 
     private fun extensionForCallbackArtifact(key: String): String = when (key) {

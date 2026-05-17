@@ -2,7 +2,9 @@ package com.example.app_01
 
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,6 +50,7 @@ import kotlinx.coroutines.withContext
 
 @Composable
 fun ProfileScreen(
+    onThemeSettingsClick: () -> Unit = {},
     onLlmApiKeyClick: () -> Unit,
     onServerSettingsClick: () -> Unit,
     onArCoreSettingsClick: () -> Unit,
@@ -99,64 +102,23 @@ fun ProfileScreen(
             modifier = Modifier.padding(16.dp)
         )
 
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(palette.divider)
-        )
-
-        Text(
-            text = "테마",
-            color = palette.onBackgroundMuted,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier
-                .padding(horizontal = 16.dp)
-                .padding(top = 14.dp, bottom = 4.dp)
-        )
-        Text(
-            text = "시스템 다크 모드와 무관하게 이 앱에만 적용됩니다.",
-            color = palette.onBackgroundMuted,
-            fontSize = 11.sp,
-            lineHeight = 15.sp,
-            modifier = Modifier
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 4.dp)
-        )
-        ThemeSettingsOptionRow(
-            title = "화이트 모드",
-            subtitle = "밝은 배경·카드형 표면·짙은 텍스트",
-            selected = mode == AppUiThemeMode.LIGHT,
-            onClick = { setMode(AppUiThemeMode.LIGHT) }
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .height(1.dp)
-                .background(palette.divider)
-        )
-        ThemeSettingsOptionRow(
-            title = "다크 모드",
-            subtitle = "검은 배경·라임 포인트 컬러에 가깝게",
-            selected = mode == AppUiThemeMode.DARK,
-            onClick = { setMode(AppUiThemeMode.DARK) }
-        )
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
 
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(1.dp)
-                .background(palette.divider)
-        )
+                .clickable { onThemeSettingsClick() }
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "테마",
+                color = palette.onBackground,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
 
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(palette.divider)
-        )
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
 
         Box(
             modifier = Modifier
@@ -172,12 +134,7 @@ fun ProfileScreen(
             )
         }
 
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(palette.divider)
-        )
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
 
         Box(
             modifier = Modifier
@@ -193,12 +150,7 @@ fun ProfileScreen(
             )
         }
 
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(palette.divider)
-        )
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
 
         Box(
             modifier = Modifier
@@ -206,29 +158,15 @@ fun ProfileScreen(
                 .clickable { onWarningLogClick() }
                 .padding(16.dp)
         ) {
-            Column {
-                Text(
-                    text = "경고 로그",
-                    color = palette.onBackground,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "강제 종료·복구 불가 예외 발생 시 재실행 후 여기에서 마지막 기록을 볼 수 있습니다.",
-                    color = palette.onBackgroundMuted,
-                    fontSize = 12.sp,
-                    lineHeight = 16.sp,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
+            Text(
+                text = "경고 로그",
+                color = palette.onBackground,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
 
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(palette.divider)
-        )
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
 
         Box(
             modifier = Modifier
@@ -244,12 +182,7 @@ fun ProfileScreen(
             )
         }
 
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(palette.divider)
-        )
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
 
         Box(
             modifier = Modifier
@@ -284,8 +217,8 @@ fun ProfileScreen(
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold
                 )
-                val context = androidx.compose.ui.platform.LocalContext.current
-                val allGranted = AppPermissions.list(context).all { it.isGranted(context) }
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                val allGranted = AppPermissions.list(ctx).all { it.isGranted(ctx) }
                 if (!allGranted) {
                     Text(
                         text = "미승인 항목 있음",
@@ -308,28 +241,95 @@ fun ProfileScreen(
                 .clickable(enabled = !isCleaningOrphanedData) { runCleanupOrphanedData() }
                 .padding(16.dp)
         ) {
-            Column {
-                Text(
-                    text = if (isCleaningOrphanedData) "잉여 데이터 정리 중..." else "삭제 데이터 & 캐시 정리",
-                    color = palette.onBackground.copy(alpha = if (isCleaningOrphanedData) 0.5f else 1f),
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "앱 내부·외부 캐시, Coil·WebView 캐시, 삭제되지 않은 빈 데이터셋 폴더, 다운로드 실패 잔여물, 임시 ZIP, 고아 서버 작업 디렉터리, 오래된 배치 결과 폴더, PLY→OBJ 변환 캐시, 세션 임시 폴더 등 모든 잉여 데이터를 정리합니다. (라이브러리 원본·저장된 모델 결과는 유지)",
-                    color = palette.onBackgroundMuted,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
+            Text(
+                text = if (isCleaningOrphanedData) "잉여 데이터 정리 중..." else "삭제 데이터 & 캐시 정리",
+                color = palette.onBackground.copy(alpha = if (isCleaningOrphanedData) 0.5f else 1f),
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
 
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
+    }
+}
+
+@Composable
+fun ThemeSettingsScreen(onBack: () -> Unit) {
+    val palette = LocalAppUiPalette.current
+    val mode = LocalAppUiThemeMode.current
+    val setMode = LocalSetAppUiThemeMode.current
+
+    BackHandler { onBack() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(palette.background)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "뒤로",
+                    tint = palette.onBackground
+                )
+            }
+            Text(
+                text = "테마",
+                color = palette.onBackground,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(1.dp)
                 .background(palette.divider)
         )
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "앱에 적용할 테마를 선택합니다.",
+                color = palette.onBackgroundMuted,
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .height(1.dp)
+                    .background(palette.divider)
+            )
+            ThemeSettingsOptionRow(
+                title = "화이트 모드",
+                selected = mode == AppUiThemeMode.LIGHT,
+                onClick = { setMode(AppUiThemeMode.LIGHT) }
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .height(1.dp)
+                    .background(palette.divider)
+            )
+            ThemeSettingsOptionRow(
+                title = "다크 모드",
+                selected = mode == AppUiThemeMode.DARK,
+                onClick = { setMode(AppUiThemeMode.DARK) }
+            )
+        }
     }
 }
 
@@ -436,7 +436,7 @@ fun WarningLogScreen(onBack: () -> Unit) {
 @Composable
 fun ThemeSettingsOptionRow(
     title: String,
-    subtitle: String,
+    subtitle: String = "",
     selected: Boolean,
     onClick: () -> Unit
 ) {
@@ -456,13 +456,15 @@ fun ThemeSettingsOptionRow(
                 fontSize = 17.sp,
                 fontWeight = FontWeight.SemiBold
             )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = subtitle,
-                color = palette.onBackgroundMuted,
-                fontSize = 12.sp,
-                lineHeight = 16.sp
-            )
+            if (subtitle.isNotBlank()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = subtitle,
+                    color = palette.onBackgroundMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp
+                )
+            }
         }
         if (selected) {
             Icon(
