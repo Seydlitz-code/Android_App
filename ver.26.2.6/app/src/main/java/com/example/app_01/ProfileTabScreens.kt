@@ -22,7 +22,9 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Switch
@@ -38,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -51,42 +54,15 @@ import kotlinx.coroutines.withContext
 @Composable
 fun ProfileScreen(
     onThemeSettingsClick: () -> Unit = {},
+    onSettingsClick: () -> Unit = {},
     onLlmApiKeyClick: () -> Unit,
-    onServerSettingsClick: () -> Unit,
-    onArCoreSettingsClick: () -> Unit,
-    onSensorCheckClick: () -> Unit,
     onWarningLogClick: () -> Unit,
-    onPermissionsClick: () -> Unit = {},
+    onArCoreSettingsClick: () -> Unit,
+    onGs3dWebViewClick: () -> Unit = {},
 ) {
     val palette = LocalAppUiPalette.current
     val mode = LocalAppUiThemeMode.current
     val setMode = LocalSetAppUiThemeMode.current
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var isCleaningOrphanedData by remember { mutableStateOf(false) }
-
-    fun runCleanupOrphanedData() {
-        if (isCleaningOrphanedData) return
-        isCleaningOrphanedData = true
-        scope.launch {
-            try {
-                val result = withContext(Dispatchers.IO) {
-                    cleanupOrphanedAppData(context.applicationContext)
-                }
-                val msg = if (result.isEmpty) {
-                    "잉여 데이터가 없습니다."
-                } else {
-                    "잉여 데이터 정리 완료: 파일 ${result.deletedFiles}개, 폴더 ${result.deletedDirs}개 삭제"
-                }
-                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                Toast.makeText(context, "데이터 정리 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
-            } finally {
-                isCleaningOrphanedData = false
-            }
-        }
-    }
 
     Column(
         modifier = Modifier
@@ -139,11 +115,11 @@ fun ProfileScreen(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { onServerSettingsClick() }
+                .clickable { onSettingsClick() }
                 .padding(16.dp)
         ) {
             Text(
-                text = "서버 설정",
+                text = "설정",
                 color = palette.onBackground,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold
@@ -176,6 +152,106 @@ fun ProfileScreen(
         ) {
             Text(
                 text = "ARCore",
+                color = palette.onBackground,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onGs3dWebViewClick() }
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "3DGS 웹 뷰어",
+                color = palette.onBackground,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
+    }
+}
+
+@Composable
+fun SettingsScreen(
+    onBack: () -> Unit,
+    onServerSettingsClick: () -> Unit,
+    onSensorCheckClick: () -> Unit,
+    onPermissionsClick: () -> Unit,
+) {
+    val palette = LocalAppUiPalette.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var isCleaningOrphanedData by remember { mutableStateOf(false) }
+
+    fun runCleanupOrphanedData() {
+        if (isCleaningOrphanedData) return
+        isCleaningOrphanedData = true
+        scope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    cleanupOrphanedAppData(context.applicationContext)
+                }
+                val msg = if (result.isEmpty) {
+                    "잉여 데이터가 없습니다."
+                } else {
+                    "잉여 데이터 정리 완료: 파일 ${result.deletedFiles}개, 폴더 ${result.deletedDirs}개 삭제"
+                }
+                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                Toast.makeText(context, "데이터 정리 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
+            } finally {
+                isCleaningOrphanedData = false
+            }
+        }
+    }
+
+    BackHandler { onBack() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(palette.background)
+            .verticalScroll(rememberScrollState())
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "뒤로",
+                    tint = palette.onBackground
+                )
+            }
+            Text(
+                text = "설정",
+                color = palette.onBackground,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onServerSettingsClick() }
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "서버 설정",
                 color = palette.onBackground,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold
@@ -265,6 +341,7 @@ fun ThemeSettingsScreen(onBack: () -> Unit) {
         modifier = Modifier
             .fillMaxSize()
             .background(palette.background)
+            .verticalScroll(rememberScrollState())
     ) {
         Row(
             modifier = Modifier
@@ -286,50 +363,68 @@ fun ThemeSettingsScreen(onBack: () -> Unit) {
                 fontWeight = FontWeight.Bold
             )
         }
+
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
+
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(1.dp)
-                .background(palette.divider)
-        )
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
+                .clickable { setMode(AppUiThemeMode.LIGHT) }
                 .padding(16.dp)
         ) {
-            Text(
-                text = "앱에 적용할 테마를 선택합니다.",
-                color = palette.onBackgroundMuted,
-                fontSize = 13.sp,
-                lineHeight = 19.sp,
-                modifier = Modifier.padding(bottom = 16.dp)
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-                    .height(1.dp)
-                    .background(palette.divider)
-            )
-            ThemeSettingsOptionRow(
-                title = "화이트 모드",
-                selected = mode == AppUiThemeMode.LIGHT,
-                onClick = { setMode(AppUiThemeMode.LIGHT) }
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-                    .height(1.dp)
-                    .background(palette.divider)
-            )
-            ThemeSettingsOptionRow(
-                title = "다크 모드",
-                selected = mode == AppUiThemeMode.DARK,
-                onClick = { setMode(AppUiThemeMode.DARK) }
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "화이트 모드",
+                    color = palette.onBackground,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                if (mode == AppUiThemeMode.LIGHT) {
+                    Icon(
+                        imageVector = Icons.Filled.Check,
+                        contentDescription = null,
+                        tint = palette.brand,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
         }
+
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { setMode(AppUiThemeMode.DARK) }
+                .padding(16.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "다크 모드",
+                    color = palette.onBackground,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                if (mode == AppUiThemeMode.DARK) {
+                    Icon(
+                        imageVector = Icons.Filled.Check,
+                        contentDescription = null,
+                        tint = palette.brand,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+        }
+
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
     }
 }
 
@@ -428,50 +523,6 @@ fun WarningLogScreen(onBack: () -> Unit) {
                 color = palette.onBackgroundMuted,
                 fontSize = 11.sp,
                 lineHeight = 14.sp,
-            )
-        }
-    }
-}
-
-@Composable
-fun ThemeSettingsOptionRow(
-    title: String,
-    subtitle: String = "",
-    selected: Boolean,
-    onClick: () -> Unit
-) {
-    val palette = LocalAppUiPalette.current
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                color = palette.onBackground,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-            if (subtitle.isNotBlank()) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = subtitle,
-                    color = palette.onBackgroundMuted,
-                    fontSize = 12.sp,
-                    lineHeight = 16.sp
-                )
-            }
-        }
-        if (selected) {
-            Icon(
-                imageVector = Icons.Filled.Check,
-                contentDescription = null,
-                tint = palette.brand,
-                modifier = Modifier.size(26.dp)
             )
         }
     }

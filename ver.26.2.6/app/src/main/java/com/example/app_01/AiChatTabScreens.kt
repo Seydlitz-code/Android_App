@@ -322,10 +322,29 @@ private const val GLTF_MAGIC = 0x46546C67
 
 /** 파손 분석 모드: 텍스트가 비어 있고 이미지만 보낼 때 LLM에 넣는 기본 요청 */
 private const val DAMAGE_ANALYSIS_DEFAULT_PROMPT =
-    "첨부 사고·차량 사진만을 근거로, 한국어 python-docx 스크립트(단일 ```python 블록)를 출력하세요. " +
-        "생성되는 Word(.docx)에는 반드시 포함하세요: (1) 차량 모델·차급 유추 및 근거·한계, (2) 파손 부위 정리 표, (3) 부위별 피해 규모(깊이·너비 등) 시각 추정 표—실측 아님 명시, (4) 수리 예상 견적·기간 참고 표—만 원·일자 범위, (5) 종합 결론 및 면책. " +
-        "모든 표는 `표 = doc.add_table(...)` 이후 **`표.cell(정수행, 정수열).text = \"…\"`** 로만 셀을 채우세요(행·열은 리터럴 정수). " +
-        "문장 중간에 문자열 안에서 줄을 바꾸지 마세요. 한 문단은 한 줄 문자열이거나 add_paragraph를 여러 번 호출하세요."
+    "첨부된 사고 차량 사진을 종합 분석하여, 한국어 python-docx 스크립트(단일 ```python 블록)를 출력하세요. " +
+        "이미지 개별 설명은 절대 금지 — 모든 사진을 하나의 통합 차량 파손 데이터셋으로 분석합니다. " +
+        "보고서는 다음 구조로 작성합니다: " +
+        "【제1페이지: 표지】 보고서 제목·부제·생성일시·작성도구·면책 문구 포함. " +
+        "【제2페이지: 목차】 2열(구분·페이지) 표. " +
+        "【제3페이지 이후: 본문】 아래 섹션을 각각 page_break로 분리: " +
+        "(1) 차량 모델 정보 — 브랜드·차급·모델·연식·색상·번호판 유추 (간결하게), " +
+        "(2) 사고 발생 형태 분석 — 충돌 유형·방향·접촉 지점·2차 피해, 파이 차트 포함, " +
+        "(3) 【핵심】파손 부위 정리 표 — 모든 가시 파손 부위를 개별 행으로(6~12행 이상), " +
+        "6열: [파손 부위 | 파손 유형 | 심각도 | 파손 깊이(추정) | 파손 면적(추정) | 비고], " +
+        "막대 차트(차트:bar:부위별 파손 심각도) 및 파이 차트(차트:pie:파손 유형 분포) 포함, " +
+        "(4) 파손 깊이 상세 분석 표 — 5열: [파손 부위 | 추정 깊이(cm) | 변형 형태 | 주변 부품 영향 | 측정 한계], " +
+        "막대 차트(차트:bar:부위별 파손 깊이 비교) 포함, " +
+        "(5) 【핵심】수리 예상 견적 표 — 각 파손 부위별 개별 행(6행 이상), " +
+        "6열: [파손 부위 | 수리 방법 | 예상 공임(만원) | 예상 부품비(만원) | 총 예상 비용(만원) | 예상 기간(영업일)], " +
+        "합계 행·파이 차트(차트:pie:부위별 수리 비용 분포)·막대 차트(차트:bar:부위별 수리 비용 비교)·선 차트(차트:line:수리 비용 누적) 포함, " +
+        "(6) 사고 원인 추론 — 3열: [추론 항목 | 관찰 근거 | 신뢰도] (간결하게), " +
+        "(7) 법적 면책 정보 — 면책 문구와 보고서 생성 시각 포함. " +
+        "모든 표는 `doc.add_table(...)` 후 `table.cell(정수행, 정수열).text = \"…\"` 로만 셀을 채우고, " +
+        "각 섹션 사이에 `doc.add_page_break()`를 사용하며, " +
+        "차트(차트:bar, 차트:pie, 차트:line)를 최소 4~6개 포함해 가독성을 극대화하세요. " +
+        "\"이미지 1에서는\", \"사진에서 보이듯\" 등 개별 사진 언급 표현은 절대 사용하지 말고, " +
+        "차량 전체에 대한 통합 파손 분석 보고서로 작성하세요."
 
 private fun uriFileExtension(uri: Uri): String {
     val name = uri.lastPathSegment?.substringAfterLast('/', missingDelimiterValue = "") ?: ""
@@ -793,46 +812,42 @@ fun ClaudeChatScreen(
                             onExport = {
                                 scope.launch {
                                     docxBusyMessageIndex = index
-                                    val result = withContext(Dispatchers.IO) {
+                                    val docxResult = withContext(Dispatchers.IO) {
                                         when (aiTabMode) {
                                             AiChatTabMode.DAMAGE_ANALYSIS ->
-                                                ThreeDgsChatDocxExport.tryExportToFiles(
+                                                ThreeDgsChatPdfExport.tryExportToPdf(
                                                     context,
                                                     msg.text,
                                                     subdirectory = "damage_llm_exports",
                                                     fileBasePrefix = "damage_report",
-                                                    mirrorDocTitle = "교통사고 파손·부위 분석 보고서 (LLM 스크립트 미러)",
-                                                    mirrorIntro =
-                                                        "이 문서는 기기에서 Python을 실행하지 않고, LLM 스크립트의 " +
-                                                            "add_heading·add_paragraph·add_run 문자열과 .text=\"…\" 셀 할당을 추출해 자동 생성했습니다. " +
-                                                            "보험사·경찰 제출용 틀 참고용이며 법적 효력을 보장하지 않습니다.",
+                                                    docTitle = "교통사고 파손·부위 분석 보고서",
                                                 )
                                             else ->
-                                                ThreeDgsChatDocxExport.tryExportToFiles(context, msg.text)
+                                                ThreeDgsChatPdfExport.tryExportToPdf(context, msg.text)
                                         }
                                     }
                                     docxBusyMessageIndex = null
-                                    if (result == null) {
+                                    if (docxResult == null) {
                                         Toast.makeText(
                                             context,
                                             "python 코드 블록이 없거나 저장에 실패했습니다.",
                                             Toast.LENGTH_LONG
                                         ).show()
                                     } else {
-                                        if (result.extractedPieceCount == 0) {
+                                        if (docxResult.extractedPieceCount == 0) {
                                             Toast.makeText(
                                                 context,
-                                                "스크립트에서 문단 문자열을 찾지 못했습니다. .py·.docx는 저장되었습니다.",
+                                                "스크립트에서 문단 문자열을 찾지 못했습니다. .py·.pdf는 저장되었습니다.",
                                                 Toast.LENGTH_LONG
                                             ).show()
                                         } else {
                                             Toast.makeText(
                                                 context,
-                                                "저장: ${result.docxFile.name}",
+                                                "저장: ${docxResult.pdfFile.name}",
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                         }
-                                        PoliceInsuranceDocxWriter.openDocx(context, result.docxFile)
+                                        openPdf(context, docxResult.pdfFile)
                                     }
                                 }
                             }
@@ -1004,28 +1019,6 @@ fun ClaudeChatScreen(
                 }
             }
 
-            if (aiTabMode == AiChatTabMode.MOBILE_3DGS) {
-                Text(
-                    text = "프로필 → LLM API 키로 제공자를 고릅니다. 응답은 python-docx로 .docx를 생성하는 Python 스크립트(단일 ```python 블록)가 중심입니다. 첨부는 한 팝업에서 갤러리·데이터셋·서버 3DGS 미리보기/분석·JSON·PLY/GLB·ARCore·기기 파일을 함께 여러 개 고를 수 있습니다.",
-                    color = palette.onBackgroundMuted,
-                    fontSize = 11.sp,
-                    lineHeight = 15.sp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 8.dp)
-                )
-            }
-            if (aiTabMode == AiChatTabMode.DAMAGE_ANALYSIS) {
-                Text(
-                    text = "프로필 → LLM API 키로 제공자를 고릅니다. 응답은 python-docx로 .docx를 만드는 Python 스크립트(단일 ```python 블록)가 중심입니다. 스크립트에는 차량 모델 유추, 파손 정리 표, 피해 규모(시각 추정) 표, 수리 견적·기간 참고 표, 결론 등이 포함되도록 설정되어 있습니다. 텍스트 없이 사진만 보내도 위 구조로 생성을 요청합니다. 사진이 많으면 전송 용량 제한에 맞춰 해상도를 줄이고 일부 장만 보냅니다. 아래「저장」에서 기기에 .docx를 만들고 열 수 있습니다.",
-                    color = palette.onBackgroundMuted,
-                    fontSize = 11.sp,
-                    lineHeight = 15.sp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 8.dp)
-                )
-            }
 
             // 전송 로직 — 스트리밍 방식 (토큰 단위 onDelta 콜백)
             val doSend: () -> Unit = sendLambda@{
@@ -1114,9 +1107,9 @@ fun ClaudeChatScreen(
                     val defaultImgPrompt = when (aiTabMode) {
                         AiChatTabMode.MOBILE_3DGS -> when {
                             imageBase64List.size > 1 ->
-                                "첨부된 여러 이미지를 근거로 3DGS·서버 분석 관점에서 요약한 내용을 한국어 Word(.docx)로 저장하는 python-docx 기반 Python 스크립트 전체를 단일 ```python 코드 블록으로만 출력하세요."
+                                "첨부된 여러 사고 현장 이미지를 근거로, 한국어 python-docx 스크립트(단일 ```python 블록)를 출력하세요. 보고서는 반드시 표지(1페이지)·목차(2페이지)·본문(3페이지 이후) 구조로 작성하고, 다음을 포함하세요: 사고 현장 개요, 사고 발생 형태 분석, 사고 원인 추론, 차량별 파손 부위 및 수리 견적 표(6열), 종합 수리 견적 요약, 법적 면책 정보. 모든 표는 table.cell(정수행, 정수열).text = \"…\" 로 채우고, 섹션마다 page_break로 분리하세요. 차트를 최소 2-3개 포함하고, 이미지별 개별 설명이 아닌 종합 분석을 제공하세요."
                             imageBase64List.size == 1 ->
-                                "첨부 이미지를 근거로 3DGS·서버 분석 관점에서 요약한 내용을 한국어 Word(.docx)로 저장하는 python-docx 기반 Python 스크립트 전체를 단일 ```python 코드 블록으로만 출력하세요."
+                                "첨부된 사고 현장 이미지를 근거로, 한국어 python-docx 스크립트(단일 ```python 블록)를 출력하세요. 보고서는 표지·목차·본문 구조로 작성하고, 사고 현장 개요, 사고 형태 분석, 원인 추론, 차량 파손 및 수리 견적 표(6열), 법적 면책 정보를 포함하세요. 모든 표는 table.cell(정수행, 정수열).text = \"…\" 로 채우고, 섹션마다 page_break로 분리하며 차트를 추가하세요."
                             else -> ""
                         }
                         AiChatTabMode.DAMAGE_ANALYSIS -> when {
@@ -1153,9 +1146,9 @@ fun ClaudeChatScreen(
                                 when {
                                     imageBase64List.isNotEmpty() -> defaultImgPrompt
                                     dataAppendix.isNotBlank() ->
-                                        "첨부 데이터 파일(JSON·PLY/GLB·ZIP 등)과 이미지를 반영해 사고 현장·차량을 보험사·경찰 자료 틀로 정리할 수 있도록 Mobile 3DGS·서버 분석 관점의 표·결론까지 담은 내용을 작성하고, 그 내용을 한국어 Word(.docx)로 만드는 python-docx Python 스크립트 전체를 단일 ```python 코드 블록으로만 출력하세요."
+                                        "첨부 데이터 파일(JSON·PLY/GLB·ZIP 등)을 반영해 사고 현장 분석 보고서를 작성하세요. 보고서는 표지(1페이지)·목차(2페이지)·본문(3페이지 이후) 구조로, 사고 현장 개요·사고 형태 분석·원인 추론·차량 파손 및 수리 견적 표(6열)·법적 면책 정보를 포함하고, 모든 표는 table.cell(정수행, 정수열).text = \"…\" 로 채우며 섹션마다 page_break로 분리하세요. 차트를 2-3개 이상 포함하고, 한국어 python-docx 스크립트(단일 ```python 블록)로만 출력하세요."
                                     else ->
-                                        "이 앱의 Mobile 3DGS(COLMAP·갤러리·서버 미리보기/분석 이미지) 워크플로와 흔한 진단 요점을 한국어 Word 보고서로 정리하기 위한 python-docx 샘플 스크립트 전체를 단일 ```python 코드 블록으로만 출력하세요."
+                                        "이 앱의 Mobile 3DGS 사고 현장 분석 시스템을 위한 보고서 샘플을 작성하세요. 보고서는 표지·목차·본문 구조로, 사고 현장 개요·사고 형태 분석·원인 추론·차량 파손 및 수리 견적 표·법적 면책 정보를 포함한 한국어 python-docx 스크립트(단일 ```python 블록)로 출력하세요. 표는 table.cell(정수행, 정수열).text = \"…\" 로 채우고 섹션마다 page_break로 분리하며 차트를 추가하세요."
                                 }
                             }
                             val fullText = if (dataAppendix.isNotBlank()) {
@@ -1177,7 +1170,7 @@ fun ClaudeChatScreen(
                                 if (imageBase64List.isNotEmpty()) {
                                     DAMAGE_ANALYSIS_DEFAULT_PROMPT
                                 } else {
-                                    "사고 차량 사진을 바탕으로 차량 모델 정보·파손 부위 표·피해 규모(시각 추정) 표·수리 견적·기간 참고 표·종합 결론을 담은 정교한 한국어 Word(.docx)용 python-docx 스크립트 전체를 단일 ```python 코드 블록으로만 출력하세요. 표 셀은 문자열 리터럴로 채우세요."
+                                    "사고 차량 사진을 종합 분석하여 표지·목차·본문 구조의 차량 파손 분석 보고서를 한국어 python-docx 스크립트(단일 ```python 블록)로 출력하세요. 이미지 개별 언급 없이, 파손 부위별 정리 표(6~12행·6열)·깊이 분석 표(5열)·수리 견적 표(6행 이상·6열)를 핵심으로 하고, 차량 모델 정보·사고 형태 분석·원인 추론·법적 면책 정보를 보조로 포함하세요. 모든 표는 table.cell(정수행, 정수열).text = \"…\" 로 채우고 섹션마다 page_break로 분리하며 차트(bar/pie/line)를 4~6개 포함하세요."
                                 }
                             }
                             ClaudeChatClient.streamDamageAnalysisReportMessage(
@@ -3012,7 +3005,7 @@ private fun MarkdownPythonCodeBlock3dgs(
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = "Word 저장·열기",
+                            text = "PDF 저장·열기",
                             color = palette.brand,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold
@@ -3083,5 +3076,23 @@ private fun MarkdownCodeBlock(language: String, code: String) {
                 )
             }
         }
+    }
+}
+
+private fun openPdf(context: Context, pdfFile: File) {
+    try {
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            pdfFile,
+        )
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/pdf")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(Intent.createChooser(intent, "PDF로 열기"))
+    } catch (e: Exception) {
+        Toast.makeText(context, "PDF 뷰어를 설치한 뒤 다시 시도하세요.", Toast.LENGTH_LONG).show()
     }
 }

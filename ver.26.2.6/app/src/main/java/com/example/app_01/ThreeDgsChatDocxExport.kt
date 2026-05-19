@@ -28,8 +28,8 @@ object ThreeDgsChatDocxExport {
     sealed class DocPiece {
         data class Heading(val level: Int, val text: String) : DocPiece()
         data class Paragraph(val text: String) : DocPiece()
-        /** `tbl.cell(r,c).text = "…"` 로 채운 셀들을 한 격자로 묶어 `<w:tbl>` 로 출력 */
         data class Table(val rows: List<List<String>>) : DocPiece()
+        data class PageBreak(val index: Int) : DocPiece()
     }
 
     data class ExportResult(
@@ -149,31 +149,53 @@ object ThreeDgsChatDocxExport {
         val cells = collectTableCellAssignments(py)
         val cellBlockedRanges = cells.map { it.index until it.endExclusive }
         collectPlainTextAssignments(py, raw, cellBlockedRanges)
-        if (raw.isEmpty() && cells.isEmpty()) return emptyList()
-        return mergeExtractsToDocPieces(raw, cells)
+        val pageBreaks = collectPageBreaks(py)
+        if (raw.isEmpty() && cells.isEmpty() && pageBreaks.isEmpty()) return emptyList()
+        return mergeExtractsToDocPieces(raw, cells, pageBreaks)
+    }
+
+    private data class PageBreakPos(val index: Int)
+
+    private fun collectPageBreaks(py: String): List<PageBreakPos> {
+        val out = ArrayList<PageBreakPos>()
+        val re = Regex("""\.\s*add_page_break\s*\(\s*\)""")
+        for (m in re.findAll(py)) {
+            out.add(PageBreakPos(m.range.first))
+        }
+        return out
     }
 
     private fun collectTableCellAssignments(py: String): List<CellExtract> {
         val out = ArrayList<CellExtract>()
-        val re = Regex(
-            """\b([a-zA-Z_]\w*)\s*\.\s*cell\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*\.\s*text\s*=""",
+        val reCell = Regex(
+            """\b([a-zA-Z_]\w*)\s*\.\s*cell\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*\.\s*text\s*=\s*(["'])""",
             RegexOption.IGNORE_CASE,
         )
-        for (m in re.findAll(py)) {
-            val tbl = m.groupValues[1]
-            val r = m.groupValues[2].toIntOrNull() ?: continue
-            val c = m.groupValues[3].toIntOrNull() ?: continue
-            val parsed = readFirstStringArg(py, m.range.last + 1) ?: continue
-            out.add(
-                CellExtract(
-                    index = m.range.first,
-                    endExclusive = parsed.second,
-                    tableVar = tbl,
-                    row = r,
-                    col = c,
-                    text = parsed.first,
-                ),
-            )
+        val reRows = Regex(
+            """\b([a-zA-Z_]\w*)\s*\.\s*rows\s*\[\s*(\d+)\s*\]\s*\.\s*cells\s*\[\s*(\d+)\s*\]\s*\.\s*text\s*=\s*(["'])""",
+            RegexOption.IGNORE_CASE,
+        )
+        val reTriple = Regex(
+            """\b([a-zA-Z_]\w*)\s*\.\s*cell\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*\.\s*text\s*=\s*"""",
+        )
+        for (regex in listOf(reCell, reRows, reTriple)) {
+            for (m in regex.findAll(py)) {
+                val tbl = m.groupValues[1]
+                val r = m.groupValues[2].toIntOrNull() ?: continue
+                val c = m.groupValues[3].toIntOrNull() ?: continue
+                val parsed = readFirstStringArg(py, m.range.last + 1) ?: continue
+                if (out.any { it.index == m.range.first }) continue
+                out.add(
+                    CellExtract(
+                        index = m.range.first,
+                        endExclusive = parsed.second,
+                        tableVar = tbl,
+                        row = r,
+                        col = c,
+                        text = parsed.first,
+                    ),
+                )
+            }
         }
         return out
     }
@@ -210,7 +232,7 @@ object ThreeDgsChatDocxExport {
         }
     }
 
-    private fun mergeExtractsToDocPieces(raw: List<Extracted>, cells: List<CellExtract>): List<DocPiece> {
+    private fun mergeExtractsToDocPieces(raw: List<Extracted>, cells: List<CellExtract>, pageBreaks: List<PageBreakPos>): List<DocPiece> {
         val events = ArrayList<Pair<Int, DocPiece>>()
         for (e in raw) {
             val p = e.piece ?: continue
@@ -223,6 +245,9 @@ object ThreeDgsChatDocxExport {
                 )
                 else -> events.add(e.index to p)
             }
+        }
+        for (bp in pageBreaks) {
+            events.add(bp.index to DocPiece.PageBreak(bp.index))
         }
         if (cells.isNotEmpty()) {
             val byVar = cells.groupBy { it.tableVar }
@@ -246,8 +271,9 @@ object ThreeDgsChatDocxExport {
 
     private fun sortTieBreaker(p: DocPiece): Int = when (p) {
         is DocPiece.Heading -> 0
-        is DocPiece.Table -> 1
-        is DocPiece.Paragraph -> 2
+        is DocPiece.PageBreak -> 1
+        is DocPiece.Table -> 2
+        is DocPiece.Paragraph -> 3
     }
 
     private fun normalizeSingleBlockText(s: String): String =
@@ -551,6 +577,7 @@ object ThreeDgsChatDocxExport {
         for (piece in pieces) {
             when (piece) {
                 is DocPiece.Heading -> sb.append(headingParagraph(piece.text, piece.level))
+                is DocPiece.PageBreak -> sb.append("<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>\n")
                 is DocPiece.Paragraph -> sb.append(bodyParagraph(piece.text))
                 is DocPiece.Table -> sb.append(tableXml(piece.rows))
             }

@@ -77,33 +77,14 @@ internal fun cleanupOrphanedAppData(context: Context): AppCacheCleanResult {
         }
     }
 
-    // ── 서버 다운로드 중단 잔여물 ─────────────────────────────────────────
-    val plyDir = ModelLibraryPaths.plyDir(appCtx)
-    if (plyDir.isDirectory) {
-        plyDir.listFiles()?.forEach { entry ->
-            when {
-                entry.isDirectory && entry.name.endsWith(".downloading") ->
-                    accumulator.deleteRecursively(entry)
-                entry.isFile && entry.name.endsWith(".part") ->
-                    accumulator.deleteRecursively(entry)
-                entry.isDirectory && entry.name.startsWith("server_task_") -> {
-                    val hasPly = entry.listFiles { f ->
-                        f.isFile && f.name.endsWith(".ply", ignoreCase = true) && f.length() > 0L
-                    }?.isNotEmpty() == true
-                    if (!hasPly) {
-                        accumulator.deleteRecursively(entry)
-                    }
-                }
-            }
-        }
-    }
-
     // ── 임시 ZIP 파일 정리 ───────────────────────────────────────────────
-    val cacheDir = appCtx.cacheDir ?: return@cleanupOrphanedAppData accumulator.toResult()
-    cacheDir.listFiles()?.forEach { f ->
-        if (f.isFile && (f.name.endsWith(".zip") || f.name.startsWith("arcore_upload_"))) {
-            if (now - f.lastModified() > staleThresholdMs) {
-                accumulator.deleteRecursively(f)
+    val cacheDir = appCtx.cacheDir
+    if (cacheDir != null) {
+        cacheDir.listFiles()?.forEach { f ->
+            if (f.isFile && (f.name.endsWith(".zip") || f.name.startsWith("arcore_upload_"))) {
+                if (now - f.lastModified() > staleThresholdMs) {
+                    accumulator.deleteRecursively(f)
+                }
             }
         }
     }
@@ -126,12 +107,6 @@ internal fun cleanupOrphanedAppData(context: Context): AppCacheCleanResult {
             }
         }
     }
-
-    // ── PLY→OBJ 변환 캐시 정리 ──────────────────────────────────────────
-    accumulator.deleteRecursively(File(storageRoot, "models_obj"))
-
-    // ── WebView 캐시 ─────────────────────────────────────────────────────
-    clearWebViewCaches()
 
     return accumulator.toResult()
 }

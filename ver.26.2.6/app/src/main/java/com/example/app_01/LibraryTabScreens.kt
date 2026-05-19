@@ -152,8 +152,10 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -161,6 +163,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.IconButton
 import java.util.Calendar
 import java.util.Date
@@ -271,6 +274,9 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.WebResourceResponse
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
@@ -379,18 +385,22 @@ fun PermissionManagementScreen(onBack: () -> Unit) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 4.dp),
+                .padding(horizontal = 4.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "뒤로",
+                    tint = palette.onBackground
+                )
+            }
             Text(
-                text = "< 권한 관리",
+                text = "권한 관리",
                 color = palette.onBackground,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier
-                    .weight(1f)
-                    .clickable { onBack() }
-                    .padding(8.dp)
+                modifier = Modifier.weight(1f)
             )
             // 미승인 권한이 있으면 일괄 요청 버튼 표시
             val ungrantedApplicable = permissions.filter { !it.isGranted(context) }
@@ -537,24 +547,22 @@ fun SensorCheckScreen(onBack: () -> Unit) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 24.dp),
-            horizontalArrangement = Arrangement.Start,
+                .padding(horizontal = 4.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
-                Text(
-                    text = "센서 확인",
-                    color = palette.onBackground,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Box(
-                    modifier = Modifier
-                        .width(100.dp)
-                        .height(2.dp)
-                        .background(palette.brand)
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "뒤로",
+                    tint = palette.onBackground
                 )
             }
+            Text(
+                text = "센서 확인",
+                color = palette.onBackground,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
 
         // 3열 그리드 레이아웃
@@ -949,6 +957,7 @@ private fun LibraryAlbumHubGrid(
     gsAnalysisCoverUri: Uri?,
     jsonLibraryCount: Int,
     arcoreLibraryCount: Int,
+    glbLibraryCount: Int,
     onOpenSection: (LibraryTab) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1009,6 +1018,13 @@ private fun LibraryAlbumHubGrid(
             "${model3dTotalCount}개",
             model3dCoverUri,
             Icons.Outlined.Public,
+            placeholderInk
+        ),
+        HubEntry(
+            LibraryTab.GLB_LIBRARY, "GLB 모델",
+            "${glbLibraryCount}개",
+            null,
+            Icons.Filled.ViewInAr,
             placeholderInk
         ),
         HubEntry(
@@ -1177,6 +1193,10 @@ fun GalleryScreen(
     serverArtifactLibraryVersion: Int,
     onEnqueueBackground3dgsFromBundle: (ServerPipelineResultBundle) -> Unit,
     onGs3dWaitingChange: (Boolean) -> Unit = {},
+    onShowGs3dPopup: (String) -> Unit = {},
+    globalGs3dViewerUrl: String? = null,
+    pendingGs3dViewerOpen: Boolean = false,
+    onPendingGs3dViewerOpenConsumed: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val palette = LocalAppUiPalette.current
@@ -1197,6 +1217,8 @@ fun GalleryScreen(
     var jsonLibraryDetailFile by remember { mutableStateOf<File?>(null) }
     var arcoreLibraryFiles by remember { mutableStateOf<List<File>>(emptyList()) }
     var arcoreLibraryDetailFile by remember { mutableStateOf<File?>(null) }
+    var glbLibraryFiles by remember { mutableStateOf<List<File>>(emptyList()) }
+    var glbViewerFile by remember { mutableStateOf<File?>(null) }
     /** 길게 누르거나 선택 모드에서 탭해 지정한 ARCore·JSON·3DGS 미리보기/분석 삭제 대상(정규화 절대 경로) */
     var selectedLibraryDeletePaths by remember { mutableStateOf(emptySet<String>()) }
     var showDeleteLibraryItemsConfirm by remember { mutableStateOf(false) }
@@ -1208,9 +1230,11 @@ fun GalleryScreen(
                 val manifestsJob = async(Dispatchers.IO) { scanServerTaskManifestInfos(context) }
                 val jsonsJob     = async(Dispatchers.IO) { JsonLibrary.listFilesSorted(context) }
                 val arcoresJob   = async(Dispatchers.IO) { ArcoreLibrary.listFilesSorted(context) }
+                val glbJob       = async(Dispatchers.IO) { scanGlbFiles(context) }
                 serverTaskManifestInfos = manifestsJob.await()
                 jsonLibraryFiles        = jsonsJob.await()
                 arcoreLibraryFiles      = arcoresJob.await()
+                glbLibraryFiles         = glbJob.await()
             }
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
@@ -1269,6 +1293,13 @@ fun GalleryScreen(
     var objLibraryModels by remember { mutableStateOf<List<PlyModel>>(emptyList()) }
     val allModel3dLibrary = plyLibraryModels + objLibraryModels
     var currentPlyModel by remember { mutableStateOf<PlyModel?>(null) }
+
+    LaunchedEffect(pendingGs3dViewerOpen) {
+        if (pendingGs3dViewerOpen && !globalGs3dViewerUrl.isNullOrBlank()) {
+            libraryDetailScreen = LibraryDetailScreen.GS3D_WEBVIEW
+            onPendingGs3dViewerOpenConsumed()
+        }
+    }
 
     val objViewerPathKey =
         if (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER && currentPlyModel != null) {
@@ -1458,9 +1489,6 @@ fun GalleryScreen(
     var showDatasetArcoreLibraryPicker by remember { mutableStateOf(false) }
     /** 서버 quality_report.json 미리보기 */
     var qualityReportDialogFile by remember { mutableStateOf<File?>(null) }
-    /** 3DGS 웹 뷰어용 URL */
-    var gs3dViewerUrl by remember { mutableStateOf<String?>(null) }
-    var showGs3dViewerPopup by remember { mutableStateOf(false) }
     LaunchedEffect(show3DModelingDialog) {
         if (!show3DModelingDialog) showDatasetArcoreLibraryPicker = false
     }
@@ -1691,11 +1719,15 @@ fun GalleryScreen(
         onLibraryHubVisibilityChange(true)
     }
 
-    if (libraryDetailScreen == LibraryDetailScreen.GS3D_WEBVIEW && !gs3dViewerUrl.isNullOrBlank()) {
+    if (libraryDetailScreen == LibraryDetailScreen.GS3D_WEBVIEW && !globalGs3dViewerUrl.isNullOrBlank()) {
         Box(modifier = Modifier.fillMaxSize().background(palette.background)) {
             Gs3dWebViewScreen(
-                url = gs3dViewerUrl!!,
+                url = globalGs3dViewerUrl!!,
                 modifier = Modifier.fillMaxSize(),
+                onClose = {
+                    libraryDetailScreen = LibraryDetailScreen.NONE
+                    onPendingGs3dViewerOpenConsumed()
+                },
             )
         }
         return@GalleryScreen
@@ -1883,7 +1915,7 @@ fun GalleryScreen(
                                     }
                                     libraryDetailScreen == LibraryDetailScreen.GS3D_WEBVIEW -> {
                                         libraryDetailScreen = LibraryDetailScreen.NONE
-                                        gs3dViewerUrl = null
+                                        onPendingGs3dViewerOpenConsumed()
                                     }
                                     else -> onLibraryHubVisibilityChange(true)
                                 }
@@ -1911,6 +1943,7 @@ fun GalleryScreen(
                                 LibraryTab.GS_ANALYSIS -> "3DGS 분석·품질"
                                 LibraryTab.JSON_LIBRARY -> "JSON"
                                 LibraryTab.AR_CORE_LIBRARY -> "ARCore"
+                                LibraryTab.GLB_LIBRARY -> "GLB"
                             }
                         },
                         fontSize = 18.sp,
@@ -1924,7 +1957,8 @@ fun GalleryScreen(
                             (libraryTab == LibraryTab.GS_PREVIEW ||
                                 libraryTab == LibraryTab.GS_ANALYSIS ||
                                 libraryTab == LibraryTab.JSON_LIBRARY ||
-                                libraryTab == LibraryTab.AR_CORE_LIBRARY)
+                                libraryTab == LibraryTab.AR_CORE_LIBRARY ||
+                                libraryTab == LibraryTab.GLB_LIBRARY)
                     if (showLibraryItemDeleteAction) {
                         if (libraryTab == LibraryTab.AR_CORE_LIBRARY) {
                             IconButton(
@@ -2543,6 +2577,7 @@ fun GalleryScreen(
                     gsAnalysisCoverUri = gsAnalysisCoverUri,
                     jsonLibraryCount = jsonLibraryFiles.size,
                     arcoreLibraryCount = arcoreLibraryFiles.size,
+                    glbLibraryCount = glbLibraryFiles.size,
                     onOpenSection = { tab ->
                         onLibraryTabChange(tab)
                         onLibraryHubVisibilityChange(false)
@@ -3131,7 +3166,7 @@ fun GalleryScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "데이터셋폴더에 이미지가 없습니다",
+                            text = "데이터셋폴더에 파일이 없습니다",
                             color = palette.onBackground.copy(alpha = 0.7f),
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold
@@ -3167,15 +3202,48 @@ fun GalleryScreen(
                                 items = uris,
                                 key = { it.toString() }
                             ) { uri ->
-                                Image(
-                                    painter = rememberGalleryGridPhotoPainter(uri, gridThumbPx),
-                                    contentDescription = "데이터셋폴더 이미지",
+                                val isDatasetVideo = remember(uri) { isVideoUri(context, uri) }
+                                Box(
                                     modifier = Modifier
                                         .aspectRatio(1f)
                                         .clip(RoundedCornerShape(8.dp))
                                         .clickable { onMediaSelected(uri, datasetImages) },
-                                    contentScale = ContentScale.Crop
-                                )
+                                ) {
+                                    if (isDatasetVideo) {
+                                        Box(
+                                            modifier = Modifier.fillMaxSize().background(Color.Black),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Filled.Videocam,
+                                                contentDescription = "동영상",
+                                                tint = palette.onBackground.copy(alpha = 0.7f),
+                                                modifier = Modifier.size(48.dp)
+                                            )
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.BottomEnd)
+                                                .padding(8.dp)
+                                                .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                                                .padding(4.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Filled.Videocam,
+                                                contentDescription = "동영상",
+                                                tint = palette.onBackground,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    } else {
+                                        Image(
+                                            painter = rememberGalleryGridPhotoPainter(uri, gridThumbPx),
+                                            contentDescription = "데이터셋폴더 이미지",
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -3391,9 +3459,9 @@ fun GalleryScreen(
                             )
                         }
                     }
-                    }
-                }
-                }
+        }
+    }
+}
             }
         } else if (libraryTab == LibraryTab.GS_PREVIEW) {
             if (gsPreviewUris.isEmpty()) {
@@ -3860,6 +3928,111 @@ fun GalleryScreen(
                     }
                 }
             }
+        } else if (libraryTab == LibraryTab.GLB_LIBRARY) {
+            if (libraryDetailScreen == LibraryDetailScreen.GLB_VIEWER && glbViewerFile != null) {
+                BackHandler {
+                    libraryDetailScreen = LibraryDetailScreen.NONE
+                    glbViewerFile = null
+                }
+                GlbViewerScreen(
+                    file = glbViewerFile!!,
+                    onBack = {
+                        libraryDetailScreen = LibraryDetailScreen.NONE
+                        glbViewerFile = null
+                    }
+                )
+            } else if (glbLibraryFiles.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "GLB 모델 파일이 없습니다.\n\n서버 파이프라인에서 다운로드한 GLB 파일이\n자동으로 이 라이브러리에 추가됩니다.",
+                        color = palette.onBackground.copy(alpha = 0.65f),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        lineHeight = 22.sp,
+                        modifier = Modifier.padding(24.dp)
+                    )
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(4),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(glbLibraryFiles, key = { it.absolutePath }) { file ->
+                        val fPath = remember(file.absolutePath, file.lastModified()) {
+                            runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
+                        }
+                        val delHighlight = fPath in selectedLibraryDeletePaths
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .border(1.dp, palette.onBackground.copy(alpha = 0.18f), RoundedCornerShape(10.dp))
+                                .then(
+                                    if (delHighlight) {
+                                        Modifier.border(2.dp, Color(0xFFFF5252), RoundedCornerShape(10.dp))
+                                    } else {
+                                        Modifier
+                                    },
+                                )
+                                .background(palette.surfaceCard.copy(alpha = 0.35f))
+                                .combinedClickable(
+                                    onClick = {
+                                        if (selectedLibraryDeletePaths.isNotEmpty()) {
+                                            selectedLibraryDeletePaths =
+                                                if (fPath in selectedLibraryDeletePaths) {
+                                                    selectedLibraryDeletePaths - fPath
+                                                } else {
+                                                    selectedLibraryDeletePaths + fPath
+                                                }
+                                        } else {
+                                            glbViewerFile = file
+                                            libraryDetailScreen = LibraryDetailScreen.GLB_VIEWER
+                                        }
+                                    },
+                                    onLongClick = {
+                                        selectedLibraryDeletePaths =
+                                            if (fPath in selectedLibraryDeletePaths) {
+                                                selectedLibraryDeletePaths - fPath
+                                            } else {
+                                                selectedLibraryDeletePaths + fPath
+                                            }
+                                    },
+                                )
+                                .padding(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.ViewInAr,
+                                contentDescription = null,
+                                tint = palette.brand,
+                                modifier = Modifier.size(32.dp)
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = file.name,
+                                color = palette.onBackground,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 2,
+                                textAlign = TextAlign.Center,
+                                lineHeight = 14.sp
+                            )
+                            Text(
+                                text = "${file.length() / 1024} KB",
+                                color = palette.onBackgroundMuted,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                }
+            }
         } else if (libraryTab == LibraryTab.GALLERY) {
             Column(modifier = Modifier.fillMaxSize()) {
             if (isEditMode && pendingGalleryMenuAction != PendingGalleryMenuAction.None) {
@@ -4181,8 +4354,7 @@ fun GalleryScreen(
                         val url = spb.gsViewerUrl
                         onServerPipelineCompleteBundleChange(null)
                         if (!url.isNullOrBlank()) {
-                            gs3dViewerUrl = url
-                            showGs3dViewerPopup = true
+                                                onShowGs3dPopup(url)
                         }
                     }) {
                         val completionBtnBg = if (palette.isDark) Color.Black else Color.White
@@ -4220,8 +4392,7 @@ fun GalleryScreen(
                                         val url = spb.gsViewerUrl
                                         onServerPipelineCompleteBundleChange(null)
                                         if (!url.isNullOrBlank()) {
-                                            gs3dViewerUrl = url
-                                            showGs3dViewerPopup = true
+                                            onShowGs3dPopup(url)
                                         }
                                     }
                                     .padding(horizontal = 8.dp, vertical = 4.dp)
@@ -4304,8 +4475,7 @@ fun GalleryScreen(
                                         val url = spb.gsViewerUrl
                                         onServerPipelineCompleteBundleChange(null)
                                         if (!url.isNullOrBlank()) {
-                                            gs3dViewerUrl = url
-                                            showGs3dViewerPopup = true
+                                            onShowGs3dPopup(url)
                                         }
                                     },
                                     contentAlignment = Alignment.Center
@@ -4409,8 +4579,7 @@ fun GalleryScreen(
                                         val url = spb.gsViewerUrl
                                         onServerPipelineCompleteBundleChange(null)
                                         if (!url.isNullOrBlank()) {
-                                            gs3dViewerUrl = url
-                                            showGs3dViewerPopup = true
+                                            onShowGs3dPopup(url)
                                         }
                                     },
                                     contentAlignment = Alignment.Center
@@ -4469,77 +4638,6 @@ fun GalleryScreen(
                                     fontWeight = FontWeight.Bold,
                                     textAlign = TextAlign.Center,
                                     maxLines = 1
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // ── 3DGS 완료 팝업 (완료 다이얼로그 위에 표시) ─────────────
-        if (showGs3dViewerPopup && !gs3dViewerUrl.isNullOrBlank()) {
-            Dialog(onDismissRequest = { showGs3dViewerPopup = false }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(BorderStroke(1.dp, palette.divider), RoundedCornerShape(16.dp))
-                        .background(palette.surfaceCard, RoundedCornerShape(16.dp))
-                        .padding(20.dp)
-                ) {
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "3DGS 모델 학습 완료",
-                            color = palette.onBackground,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "3DGS 모델 학습이 완료되었습니다.\n웹 뷰어로 확인하시겠습니까?",
-                            color = palette.onBackgroundMuted,
-                            fontSize = 14.sp,
-                            modifier = Modifier.padding(top = 8.dp)
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(48.dp)
-                                    .border(BorderStroke(1.dp, Color.Black), RoundedCornerShape(8.dp))
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(if (palette.isDark) Color.Black else Color.White)
-                                    .clickable { showGs3dViewerPopup = false },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "닫기",
-                                    color = if (palette.isDark) Color.White else Color.Black,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(48.dp)
-                                    .border(BorderStroke(1.dp, Color(0xFF1B5E20)), RoundedCornerShape(8.dp))
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFFE8F5E9))
-                                    .clickable {
-                                        showGs3dViewerPopup = false
-                                        android.util.Log.i("Gs3dWebView", "User confirmed: gs3dViewerUrl=$gs3dViewerUrl")
-                                        libraryDetailScreen = LibraryDetailScreen.GS3D_WEBVIEW
-                                    },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "확인",
-                                    color = Color(0xFF1B5E20),
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold
                                 )
                             }
                         }
@@ -5347,7 +5445,7 @@ fun GalleryScreen(
         if (show3DModelingDialog) {
             val isDatasetServerUpload = pending3DSourceTab == LibraryTab.DATASET
             val isValid3DPrompt = if (isDatasetServerUpload) {
-                pending3DArcoreZipUriForDataset != null
+                !pending3DDatasetFolders.isEmpty()
             } else {
                 modelingPromptText.isNotEmpty() && !modelingPromptError
             }
@@ -5371,9 +5469,9 @@ fun GalleryScreen(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = if (isDatasetServerUpload) {
-                                "전송할 데이터셋과 ARCore ZIP을 확인하십시오."
-                            } else {
+                                text = if (isDatasetServerUpload) {
+                                "전송할 데이터셋을 확인하십시오."
+                                } else {
                                 "어떤 사물을 3D 모델링하시겠습니까?"
                             },
                             color = palette.onBackground,
@@ -5427,7 +5525,7 @@ fun GalleryScreen(
                         if (isDatasetServerUpload) {
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(
-                                text = "ARCore ZIP (필수) · poses.json 등이 포함된 ZIP",
+                                text = "ARCore ZIP (선택) · poses.json 등이 포함된 ZIP (없으면 데이터셋 ZIP만 전송)",
                                 color = palette.onBackground.copy(alpha = 0.85f),
                                 fontSize = 13.sp,
                             )
@@ -5485,7 +5583,7 @@ fun GalleryScreen(
                             }
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "텍스트 입력 없이 데이터셋 ZIP(file_pc)과 ARCore ZIP(file_gs)만 서버로 전송합니다.",
+                                text = "텍스트 입력 없이 데이터셋 ZIP(file_pc)을 서버로 전송합니다. ARCore ZIP(file_gs)이 있으면 함께 전송됩니다.",
                                 color = palette.onBackground.copy(alpha = 0.62f),
                                 fontSize = 12.sp,
                                 lineHeight = 16.sp,
@@ -5547,6 +5645,7 @@ fun GalleryScreen(
                                                                         uploadProgress = p to 100
                                                                         uploadMessage = msg
                                                                     },
+                                                                    gsZipFile = null,
                                                                     onDa3Complete = { da3Bundle ->
                                                                         mainHandler.post {
                                                                             try {
@@ -5617,17 +5716,43 @@ fun GalleryScreen(
                                                                 null
                                                             }
                                                             if (arcoreZipForGs == null) {
-                                                                try {
-                                                                    rawDatasetZip.delete()
-                                                                } catch (_: Exception) {
-                                                                }
-                                                                mainHandler.post {
-                                                                    Toast.makeText(
-                                                                        context,
-                                                                        "ARCore ZIP을 읽을 수 없습니다. 데이터셋과 ARCore ZIP 두 파일이 모두 필요합니다.",
-                                                                        Toast.LENGTH_LONG,
-                                                                    ).show()
-                                                                }
+                                                                val pr = uploadZipAndRunPipeline(
+                                                                    context = context,
+                                                                    zipFile = rawDatasetZip,
+                                                                    prompt = "",
+                                                                    onProgress = { p, msg ->
+                                                                        uploadProgress = p to 100
+                                                                        uploadMessage = msg
+                                                                    },
+                                                                    gsZipFile = null,
+                                                                    contentDispositionFilename = SERVER_PIPELINE_ZIP_NAME_DATASET,
+                                                                    contentDispositionGsFilename = "",
+                                                                    onDa3Complete = { da3Bundle ->
+                                                                        mainHandler.post {
+                                                                            try {
+                                                                                isUploading = false
+                                                                                pending3DArcoreZipUriForDataset = null
+                                                                                onServerPipelineCompleteBundleChange(da3Bundle)
+                                                                                if (da3Bundle.gsViewerUrl.isNullOrBlank()) {
+                                                                                    onGs3dWaitingChange(true)
+                                                                                }
+                                                                                if (shouldAutoGenerateModelThumbnail(da3Bundle.plyFile)) {
+                                                                                    libraryModelThumbRefresh++
+                                                                                }
+                                                                                selectedDatasetFolders = emptySet()
+                                                                                isDatasetEditMode = false
+                                                                            } catch (t: Throwable) {
+                                                                                logLibraryLoadFailure("데이터셋 DA3 완료 UI 갱신", t)
+                                                                                isUploading = false
+                                                                            }
+                                                                        }
+                                                                    },
+                                                                    onGs3dUrl = { url ->
+                                                                        onShowGs3dPopup(url)
+                                                                        onGs3dWaitingChange(false)
+                                                                    },
+                                                                )
+                                                                pipelineOk = pr != null
                                                             } else {
                                                                 // ARCore ZIP의 poses.json을 데이터셋 ZIP에 병합 (서버 file_pc 사양)
                                                                 val mergedZip = mergeArcorePosesIntoDatasetZip(
@@ -5669,8 +5794,7 @@ fun GalleryScreen(
                                                                         }
                                                                     },
                                                                     onGs3dUrl = { url ->
-                                                                        gs3dViewerUrl = url
-                                                                        showGs3dViewerPopup = true
+                                                                        onShowGs3dPopup(url)
                                                                         onGs3dWaitingChange(false)
                                                                     },
                                                                 )
@@ -6323,5 +6447,190 @@ fun GalleryScreen(
                 }
             }
         }
+    }
+}
+
+internal suspend fun extractVideoFramesToDataset(
+    context: Context,
+    videoUri: Uri,
+    onProgress: (Float, Int, Int, Long, Long) -> Unit
+): Int = withContext(Dispatchers.IO) {
+    val datasetDir = File(
+        context.getExternalFilesDir(null),
+        "datasets/동영상프레임_${SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.US).format(Date())}"
+    ).also { it.mkdirs() }
+
+    val retriever = MediaMetadataRetriever()
+    retriever.setDataSource(context, videoUri)
+
+    val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+    val fps = 10
+    val frameIntervalUs = 1_000_000L / fps
+    val totalFrames = ((durationMs * fps) / 1000).toInt()
+
+    var frameCount = 0
+    var currentTimeUs = 0L
+    val startTime = System.currentTimeMillis()
+    var lastReportMs = 0L
+
+    while (currentTimeUs < durationMs * 1000) {
+        val bitmap = retriever.getScaledFrameAtTime(currentTimeUs, MediaMetadataRetriever.OPTION_CLOSEST, 480, 270)
+        if (bitmap != null) {
+            val frameFile = File(datasetDir, "${frameCount.toString().padStart(6, '0')}.jpg")
+            FileOutputStream(frameFile).use { fos ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 75, fos)
+            }
+            bitmap.recycle()
+            frameCount++
+
+            val nowMs = System.currentTimeMillis()
+            if (nowMs - lastReportMs >= 120L) {
+                val elapsedMs = nowMs - startTime
+                val progress = currentTimeUs.toFloat() / (durationMs * 1000).toFloat().coerceAtLeast(1f)
+                val estimateMs = if (progress > 0.001f) (elapsedMs / progress).toLong() else 0L
+                withContext(Dispatchers.Main) {
+                    onProgress(progress.coerceAtMost(1f), frameCount, totalFrames, elapsedMs, estimateMs)
+                }
+                lastReportMs = nowMs
+            }
+        }
+        currentTimeUs += frameIntervalUs
+    }
+
+    retriever.release()
+
+    withContext(Dispatchers.Main) {
+        Toast.makeText(
+            context,
+            "프레임 분할 완료: ${frameCount}장을\n데이터셋「동영상프레임_${datasetDir.name.substringAfter("동영상프레임_")}」에 저장했습니다.",
+            Toast.LENGTH_LONG
+        ).show()
+    }
+
+    frameCount
+}
+
+private fun scanGlbFiles(context: Context): List<File> {
+    val plyDir = File(context.getExternalFilesDir(null), "models/ply")
+    if (!plyDir.exists() || !plyDir.isDirectory) return emptyList()
+    val glbFiles = mutableListOf<File>()
+    plyDir.listFiles { f -> f.isDirectory && f.name.startsWith("server_task_") }?.forEach { taskDir ->
+        taskDir.listFiles { f -> f.isFile && f.extension.equals("glb", ignoreCase = true) }?.let {
+            glbFiles.addAll(it)
+        }
+    }
+    return glbFiles.sortedByDescending { it.lastModified() }
+}
+
+@Composable
+private fun GlbViewerScreen(file: File, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val palette = LocalAppUiPalette.current
+
+    BackHandler { onBack() }
+
+    val html = remember {
+        """
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<style>body{margin:0;overflow:hidden;background:#1a1a2e}</style></head>
+<body><div id="info" style="position:absolute;top:10px;left:10px;color:#fff;font:12px sans-serif;z-index:10">로딩 중...</div>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+const info = document.getElementById('info');
+info.textContent = '로딩 중...';
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x1a1a2e);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.environment = new RoomEnvironment(renderer);
+scene.background = new THREE.Color(0x1a1a2e);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 100);
+camera.position.set(2,1.5,3);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+const amb = new THREE.AmbientLight(0xffffff, 0.4);
+scene.add(amb);
+const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+dir.position.set(5,10,7);
+scene.add(dir);
+
+new GLTFLoader().load('/local/model.glb', function(gltf) {
+    scene.add(gltf.scene);
+    const box = new THREE.Box3().setFromObject(gltf.scene);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3()).length();
+    controls.target.copy(center);
+    camera.position.copy(center.clone().add(new THREE.Vector3(size*0.7, size*0.5, size*1.2)));
+    controls.update();
+    info.textContent = '';
+}, null, function(e) { info.textContent = '로딩 실패: ' + e.message; });
+
+function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene,camera); }
+animate();
+window.addEventListener('resize',()=>{camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);});
+</script></body></html>
+""".trimIndent()
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize().background(palette.background)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, "뒤로", tint = palette.onBackground)
+            }
+            Text(file.name, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = palette.onBackground, modifier = Modifier.weight(1f))
+            Text("${file.length() / 1024} KB", fontSize = 11.sp, color = palette.onBackgroundMuted)
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
+
+        AndroidView(
+            factory = { ctx ->
+                val webView = WebView(ctx).apply {
+                    settings.javaScriptEnabled = true
+                    settings.allowFileAccess = false
+                    settings.domStorageEnabled = true
+
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldInterceptRequest(view: WebView, url: String): WebResourceResponse? {
+                            val modelPath = "/local/model.glb"
+                            if (url.contains(modelPath)) {
+                                return try {
+                                    val fis = FileInputStream(file)
+                                    WebResourceResponse("model/gltf-binary", null, fis)
+                                } catch (e: Exception) {
+                                    null
+                                }
+                            }
+                            return super.shouldInterceptRequest(view, url)
+                        }
+
+                        override fun onReceivedError(view: WebView?, errorCode: Int, desc: String?, url: String?) {
+                        }
+                    }
+                }
+                webView.loadDataWithBaseURL("https://appassets.androidplatform.net/", html, "text/html", "UTF-8", null)
+                webView
+            },
+            modifier = Modifier.fillMaxSize()
+        )
     }
 }

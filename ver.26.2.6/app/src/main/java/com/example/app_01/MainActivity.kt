@@ -144,6 +144,7 @@ import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Videocam
@@ -288,8 +289,6 @@ import android.graphics.Bitmap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -484,11 +483,15 @@ fun CameraApp(modifier: Modifier = Modifier) {
     var showLlmApiKeySettings by remember { mutableStateOf(false) }
     var showServerSettings by remember { mutableStateOf(false) }
     var showThemeSettings by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     var showArCoreSettings by remember { mutableStateOf(false) }
     var showSensorCheck by remember { mutableStateOf(false) }
     var showWarningLog by remember { mutableStateOf(false) }
     var showPermissions by remember { mutableStateOf(false) }
     var showGs3dWaiting by remember { mutableStateOf(false) }
+    var gs3dViewerUrl by remember { mutableStateOf<String?>(null) }
+    var showGs3dViewerPopup by remember { mutableStateOf(false) }
+    var pendingGs3dViewerOpen by remember { mutableStateOf(false) }
     var selectedTab by remember { mutableStateOf(MainTab.CAMERA) }
     var selectedLibraryTab by remember { mutableStateOf(LibraryTab.GALLERY) }
     /** true: 갤럭시 갤러리 스타일 앨범 허브, false: 선택한 라이브러리 구역 */
@@ -561,6 +564,17 @@ fun CameraApp(modifier: Modifier = Modifier) {
         if (images.isNotEmpty()) {
             lastCapturedImageUri = images.first()
         }
+        // 3DGS 완료 알림 채널 등록
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = context.getSystemService(NotificationManager::class.java)
+            if (nm?.getNotificationChannel("gs3d_completion") == null) {
+                nm.createNotificationChannel(
+                    NotificationChannel("gs3d_completion", "3DGS 완료 알림", NotificationManager.IMPORTANCE_HIGH).apply {
+                        description = "3DGS 모델 학습이 완료되면 알림을 보냅니다."
+                    }
+                )
+            }
+        }
     }
 
     var selectedMediaUri by remember { mutableStateOf<Uri?>(null) }
@@ -629,6 +643,70 @@ fun CameraApp(modifier: Modifier = Modifier) {
                 }
             }
         }
+        // ── 3DGS 완료 팝업 (앱 전역 — 어느 탭에서든 표시) ───────────────
+        if (showGs3dViewerPopup && !gs3dViewerUrl.isNullOrBlank()) {
+            Dialog(
+                onDismissRequest = { showGs3dViewerPopup = false },
+                properties = androidx.compose.ui.window.DialogProperties(
+                    dismissOnClickOutside = false,
+                    dismissOnBackPress = true,
+                ),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(rootPalette.surfaceCard, RoundedCornerShape(16.dp))
+                        .padding(20.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "3DGS 모델 학습 완료",
+                            color = rootPalette.onBackground,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            text = "3DGS 모델 학습이 완료되었습니다.\n웹 뷰어로 확인하시겠습니까?",
+                            color = rootPalette.onBackgroundMuted,
+                            fontSize = 14.sp,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .background(if (rootPalette.isDark) Color.Black else Color.White, RoundedCornerShape(8.dp))
+                                    .clickable { showGs3dViewerPopup = false },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(text = "닫기", color = if (rootPalette.isDark) Color.White else Color.Black, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .background(Color(0xFFE8F5E9), RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        showGs3dViewerPopup = false
+                                        showGs3dWaiting = false
+                                        selectedTab = MainTab.LIBRARY
+                                        selectedLibraryTab = LibraryTab.GALLERY
+                                        pendingGs3dViewerOpen = true
+                                    },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(text = "확인", color = Color(0xFF1B5E20), fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if (selectedMediaUri != null && viewingMediaList.isNotEmpty()) {
             MediaDetailScreen(
                 mediaList = viewingMediaList,
@@ -681,6 +759,13 @@ fun CameraApp(modifier: Modifier = Modifier) {
         } else if (showPermissions) {
             PermissionManagementScreen(
                 onBack = { showPermissions = false }
+            )
+        } else if (showSettings) {
+            SettingsScreen(
+                onBack = { showSettings = false },
+                onServerSettingsClick = { showServerSettings = true },
+                onSensorCheckClick = { showSensorCheck = true },
+                onPermissionsClick = { showPermissions = true },
             )
         } else if (showThemeSettings) {
             ThemeSettingsScreen(
@@ -739,7 +824,9 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                 if (bundle.taskId !in server3dgsLlmAutoHandledTaskIds) {
                                     server3dgsLlmAutoHandledTaskIds =
                                         server3dgsLlmAutoHandledTaskIds + bundle.taskId
-                                    val payload = buildPoliceInsurance3dgsPayload(context, bundle)
+                                    val payload = buildPoliceInsurance3dgsPayload(
+                                        context, bundle,
+                                    )
                                     val jobPayload = Pending3dgsServerAutoSend(
                                         nonce = System.nanoTime(),
                                         promptText = payload.first,
@@ -782,6 +869,38 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                 selectedTab = MainTab.CLAUDE
                             },
                             onGs3dWaitingChange = { showGs3dWaiting = it },
+                            onShowGs3dPopup = { url ->
+                                gs3dViewerUrl = url
+                                showGs3dViewerPopup = true
+                                context.getSharedPreferences("gs3d_prefs", Context.MODE_PRIVATE)
+                                    .edit().putString("last_viewer_url", url).apply()
+                                // 시스템 알림
+                                try {
+                                    val tapIntent = PendingIntent.getActivity(
+                                        context, 1000,
+                                        Intent(context, MainActivity::class.java).apply {
+                                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                        },
+                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                                        else PendingIntent.FLAG_UPDATE_CURRENT
+                                    )
+                                    NotificationManagerCompat.from(context).notify(
+                                        1001,
+                                        NotificationCompat.Builder(context, "gs3d_completion")
+                                            .setSmallIcon(android.R.drawable.stat_sys_upload)
+                                            .setContentTitle("3DGS 모델 학습 완료")
+                                            .setContentText("웹 뷰어로 3DGS 모델을 확인할 수 있습니다.")
+                                            .setPriority(NotificationCompat.PRIORITY_HIGH)
+                                            .setAutoCancel(true)
+                                            .setContentIntent(tapIntent)
+                                            .build(),
+                                    )
+                                } catch (_: Exception) {}
+                            },
+                            globalGs3dViewerUrl = gs3dViewerUrl,
+                            pendingGs3dViewerOpen = pendingGs3dViewerOpen,
+                            onPendingGs3dViewerOpenConsumed = { pendingGs3dViewerOpen = false },
                         )
                     }
                     MainTab.CLAUDE -> {
@@ -872,12 +991,22 @@ fun CameraApp(modifier: Modifier = Modifier) {
                     MainTab.PROFILE -> {
                         ProfileScreen(
                             onThemeSettingsClick = { showThemeSettings = true },
+                            onSettingsClick = { showSettings = true },
                             onLlmApiKeyClick = { showLlmApiKeySettings = true },
-                            onServerSettingsClick = { showServerSettings = true },
-                            onArCoreSettingsClick = { showArCoreSettings = true },
-                            onSensorCheckClick = { showSensorCheck = true },
                             onWarningLogClick = { showWarningLog = true },
-                            onPermissionsClick = { showPermissions = true }
+                            onArCoreSettingsClick = { showArCoreSettings = true },
+                            onGs3dWebViewClick = {
+                                val savedUrl = context.getSharedPreferences("gs3d_prefs", Context.MODE_PRIVATE)
+                                    .getString("last_viewer_url", null)
+                                if (savedUrl.isNullOrBlank()) {
+                                    Toast.makeText(context, "아직 수신된 3DGS 웹 링크가 없습니다.", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    gs3dViewerUrl = savedUrl
+                                    pendingGs3dViewerOpen = true
+                                    selectedTab = MainTab.LIBRARY
+                                    selectedLibraryTab = LibraryTab.GALLERY
+                                }
+                            },
                         )
                     }
                 }
@@ -932,6 +1061,39 @@ fun MediaDetailScreen(
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var actionMessage by remember { mutableStateOf<String?>(null) }
     var showImageEdit by remember { mutableStateOf(false) }
+    var showFrameSplitDialog by remember { mutableStateOf(false) }
+    var frameSplitProgress by remember { mutableStateOf(0f) }
+    var frameSplitCount by remember { mutableStateOf(0) }
+    var frameSplitTotal by remember { mutableStateOf(0) }
+    var frameSplitElapsedMs by remember { mutableStateOf(0L) }
+    var frameSplitEstimateMs by remember { mutableStateOf(0L) }
+    var frameSplitResultMsg by remember { mutableStateOf<String?>(null) }
+
+    fun launchFrameSplit(videoUri: Uri) {
+        if (showFrameSplitDialog) return
+        showFrameSplitDialog = true
+        frameSplitProgress = 0f
+        frameSplitCount = 0
+        frameSplitTotal = 0
+        frameSplitElapsedMs = 0L
+        frameSplitEstimateMs = 0L
+        frameSplitResultMsg = null
+        scope.launch {
+            try {
+                val count = extractVideoFramesToDataset(context, videoUri) { prog, cnt, tot, elapsed, est ->
+                    frameSplitProgress = prog
+                    frameSplitCount = cnt
+                    frameSplitTotal = tot
+                    frameSplitElapsedMs = elapsed
+                    frameSplitEstimateMs = est
+                }
+                frameSplitResultMsg = "프레임 분할 완료: ${count}장"
+            } catch (e: Exception) {
+                e.printStackTrace()
+                frameSplitResultMsg = "프레임 분할 실패: ${e.message ?: "알 수 없는 오류"}"
+            }
+        }
+    }
 
     // 인덱스 변경 시 콜백 + 줌 리셋 + 필름스트립 자동 스크롤
     LaunchedEffect(currentIndex) {
@@ -1230,6 +1392,33 @@ fun MediaDetailScreen(
                 }
                 // 구분선
                 Box(modifier = Modifier.width(0.5.dp).height(28.dp).background(Color(0xFF444444)))
+                // 프레임 분할 (동영상 전용)
+                if (isVideo) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) { currentMediaUri?.let { launchFrameSplit(it) } },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Default.Videocam,
+                                contentDescription = "프레임 분할",
+                                tint = Color.White,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Text(
+                                "분할",
+                                color = Color.White,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                    Box(modifier = Modifier.width(0.5.dp).height(28.dp).background(Color(0xFF444444)))
+                }
                 // 이미지 삭제 (휴지통 아이콘)
                 Box(
                     modifier = Modifier
@@ -1277,6 +1466,55 @@ fun MediaDetailScreen(
                 }
             )
         }
+    }
+
+    // 프레임 분할 진행도 다이얼로그
+    if (showFrameSplitDialog) {
+        val palette = LocalAppUiPalette.current
+        AlertDialog(
+            onDismissRequest = {
+                if (frameSplitResultMsg != null) showFrameSplitDialog = false
+            },
+            title = { Text("프레임 분할", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    LinearProgressIndicator(
+                        progress = { frameSplitProgress },
+                        modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "${(frameSplitProgress * 100).toInt()}%",
+                        fontSize = 16.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    if (frameSplitTotal > 0) {
+                        Text(
+                            "프레임: ${frameSplitCount} / ${frameSplitTotal}",
+                            fontSize = 12.sp, color = palette.onBackgroundMuted
+                        )
+                        Text(
+                            "경과: ${frameSplitElapsedMs / 1000}초 · 예상: ${(frameSplitEstimateMs / 1000).toInt()}초",
+                            fontSize = 12.sp, color = palette.onBackgroundMuted
+                        )
+                    }
+                    if (frameSplitResultMsg != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            frameSplitResultMsg!!,
+                            fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                            color = if (frameSplitResultMsg!!.contains("실패")) palette.error else Color(0xFF2E7D32)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                if (frameSplitResultMsg != null) {
+                    TextButton(onClick = { showFrameSplitDialog = false }) { Text("확인") }
+                }
+            }
+        )
     }
 
     // 삭제 확인 다이얼로그
@@ -2675,12 +2913,15 @@ internal fun takePhoto(
 internal suspend fun takePhotoSuspend(
     context: Context,
     imageCapture: ImageCapture,
+    outputDir: File? = null,
 ): Pair<Uri, File>? = suspendCancellableCoroutine { cont ->
     fun resumeOk(value: Pair<Uri, File>?) {
         if (cont.isActive) cont.resume(value)
     }
+    val parentDir = outputDir ?: context.getExternalFilesDir(null) ?: context.filesDir
+    parentDir.mkdirs()
     val photoFile = File(
-        context.getExternalFilesDir(null),
+        parentDir,
         SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
             .format(System.currentTimeMillis()) + ".jpg",
     )
@@ -3365,7 +3606,7 @@ internal fun loadDatasetImages(
         onLoaded(emptyList())
         return
     }
-    val imageExts = setOf("jpg", "jpeg", "png", "webp")
+    val imageExts = setOf("jpg", "jpeg", "png", "webp", "mp4", "avi", "mov", "mkv", "3gp")
     val images = dir.listFiles { f ->
         f.isFile && imageExts.contains(f.extension.lowercase())
     }?.sortedByDescending { mediaSortTimeMillis(it) } ?: emptyList()
@@ -4833,12 +5074,26 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
             .padding(16.dp)
             .verticalScroll(rememberScrollState())
     ) {
-        Text(
-            text = "LLM API 키",
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold,
-            color = palette.onBackground
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "뒤로",
+                    tint = palette.onBackground
+                )
+            }
+            Text(
+                text = "LLM API 키",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                color = palette.onBackground
+            )
+        }
         Spacer(modifier = Modifier.height(16.dp))
         Text(
             text = "AI 메뉴에서 사용할 LLM을 선택한 뒤 해당 API 키를 입력하세요. 기본값은 local.properties의 claude_api_key·openai_api_key·gemini_api_key(빌드 시 주입)입니다. 필드를 비우고 저장하면 해당 제공자는 빌드 기본 키를 사용합니다.",
@@ -4989,9 +5244,16 @@ fun ServerSettingsScreen(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "뒤로",
+                    tint = palette.onBackground
+                )
+            }
             Text(
                 text = "서버 설정",
-                fontSize = 24.sp,
+                fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
                 color = palette.onBackground
             )

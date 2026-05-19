@@ -317,8 +317,8 @@ import java.security.cert.X509Certificate
 import java.util.Collections
 
 private const val CONTINUOUS_CAPTURE_MAX_SHOTS = 200
-private const val CONTINUOUS_CAPTURE_INTERVAL_MS = 3_000L
-private const val CAMERA_REBIND_WAIT_AFTER_ARCORE_MS = 550L
+private const val CONTINUOUS_CAPTURE_INTERVAL_MS = 125L
+private const val CAMERA_REBIND_WAIT_AFTER_ARCORE_MS = 100L
 
 /**
  * CameraX 언바인드 뒤 한 번의 ARCore 구간에서 여러 장의 포즈 메타를 채운 뒤 저장한다.
@@ -1177,7 +1177,7 @@ fun CameraScreen(
                 AndroidView(
                     factory = { ctx ->
                         PreviewView(ctx).apply {
-                            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
                             scaleType = PreviewView.ScaleType.FILL_CENTER
                             previewView = this
                         }
@@ -1288,56 +1288,69 @@ fun CameraScreen(
             }
         }
 
-        // 상단 모드 전환 + 해상도 선택 (한 줄, 알약 형태)
+        // 상단 바: 좌측 모드 전환 + 우측 플래시/포커스/카운트
         val topMenuPadding = 8.dp
-        Column(
+        Row(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
-                .padding(top = topMenuPadding),
-            horizontalAlignment = Alignment.CenterHorizontally,
+                .padding(top = topMenuPadding, start = 8.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
+            TopMenuSegmentedTriple(
+                leftText = "사진",
+                midText = "연속",
+                rightText = "동영상",
+                selectedIndex = when (captureMode) {
+                    CaptureMode.PHOTO -> 0
+                    CaptureMode.CONTINUOUS -> 1
+                    CaptureMode.VIDEO -> 2
+                },
+                onLeftClick = { captureMode = CaptureMode.PHOTO },
+                onMidClick = { captureMode = CaptureMode.CONTINUOUS },
+                onRightClick = { captureMode = CaptureMode.VIDEO },
+            )
+
+            Spacer(modifier = Modifier.weight(1f))
+
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TopMenuSegmentedTriple(
-                    leftText = "사진",
-                    midText = "연속",
-                    rightText = "동영상",
-                    selectedIndex = when (captureMode) {
-                        CaptureMode.PHOTO -> 0
-                        CaptureMode.CONTINUOUS -> 1
-                        CaptureMode.VIDEO -> 2
-                    },
-                    onLeftClick = { captureMode = CaptureMode.PHOTO },
-                    onMidClick = { captureMode = CaptureMode.CONTINUOUS },
-                    onRightClick = { captureMode = CaptureMode.VIDEO },
-                )
+                IconButton(onClick = { isFlashOn = !isFlashOn }) {
+                    Icon(
+                        imageVector = if (isFlashOn) Icons.Filled.FlashOn else Icons.Filled.FlashOff,
+                        contentDescription = "Flash",
+                        tint = Color.White,
+                    )
+                }
+                IconButton(onClick = { isFocusLockEnabled = !isFocusLockEnabled }) {
+                    Icon(
+                        imageVector = if (isFocusLockEnabled) Icons.Filled.Lock else Icons.Filled.CenterFocusStrong,
+                        contentDescription = if (isFocusLockEnabled) {
+                            "초점·노출 고정(탭한 지점 유지). 다시 누르면 해제"
+                        } else {
+                            "탭 초점. 고정 모드 켜면 탭 후 AF/AE 유지"
+                        },
+                        tint = if (isFocusLockEnabled) Color(0xFFFFAB40) else Color.White,
+                    )
+                }
 
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                if (captureMode == CaptureMode.CONTINUOUS &&
+                    (isContinuousBurstActive || continuousCapturedCount > 0)
                 ) {
-                    IconButton(onClick = { isFlashOn = !isFlashOn }) {
-                        Icon(
-                            imageVector = if (isFlashOn) Icons.Filled.FlashOn else Icons.Filled.FlashOff,
-                            contentDescription = "Flash",
-                            tint = Color.White,
-                        )
-                    }
-                    IconButton(onClick = { isFocusLockEnabled = !isFocusLockEnabled }) {
-                        Icon(
-                            imageVector = if (isFocusLockEnabled) Icons.Filled.Lock else Icons.Filled.CenterFocusStrong,
-                            contentDescription = if (isFocusLockEnabled) {
-                                "초점·노출 고정(탭한 지점 유지). 다시 누르면 해제"
-                            } else {
-                                "탭 초점. 고정 모드 켜면 탭 후 AF/AE 유지"
-                            },
-                            tint = if (isFocusLockEnabled) Color(0xFFFFAB40) else Color.White,
-                        )
-                    }
+                    Text(
+                        text = "${continuousCapturedCount} / $CONTINUOUS_CAPTURE_MAX_SHOTS",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .background(
+                                Color(0xFF1565C0).copy(alpha = 0.85f),
+                                RoundedCornerShape(12.dp),
+                            )
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                    )
                 }
             }
         }
@@ -1380,25 +1393,6 @@ fun CameraScreen(
             )
             }
         
-        if (captureMode == CaptureMode.CONTINUOUS &&
-            (isContinuousBurstActive || continuousCapturedCount > 0)
-        ) {
-            Text(
-                text = "연속 촬영 ${continuousCapturedCount} / $CONTINUOUS_CAPTURE_MAX_SHOTS · 간격 ${CONTINUOUS_CAPTURE_INTERVAL_MS / 1000}초",
-                color = Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 190.dp)
-                    .background(
-                        Color(0xFF1565C0).copy(alpha = 0.75f),
-                        RoundedCornerShape(12.dp),
-                    )
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
-            )
-        }
-
         // 하단 컨트롤 바
         Row(
             modifier = Modifier
@@ -1643,6 +1637,11 @@ fun CameraScreen(
                                             }
                                             continuousBurstJob?.cancel()
                                             continuousBurstSessionFiles.clear()
+                                            // 연속 촬영 세션별 데이터셋 폴더 생성
+                                            val burstDatasetDir = File(
+                                                context.getExternalFilesDir(null),
+                                                "datasets/연속촬영_${SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.US).format(Date())}"
+                                            ).also { it.mkdirs() }
                                             // 사고 현장: 한 번의 연속 촬영 세션 동안만 격자 공유 → 세션 시작 시 초기화
                                             if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
                                                 scanCoverage.reset()
@@ -1656,23 +1655,27 @@ fun CameraScreen(
                                                 continuousBurstUserStop.set(false)
                                                 var arcoreFailAccum = 0
                                                 var n = 0
+                                                val cap = withContext(Dispatchers.Main) { imageCapture }
+                                                    ?: run {
+                                                        withContext(Dispatchers.Main) {
+                                                            isContinuousBurstActive = false
+                                                        }
+                                                        return@launch
+                                                    }
+                                                val camReady = withContext(Dispatchers.Main) { isCameraReady }
+                                                if (!camReady) {
+                                                    withContext(Dispatchers.Main) {
+                                                        isContinuousBurstActive = false
+                                                        Toast.makeText(context, "카메라 준비 중입니다.", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                    return@launch
+                                                }
+                                                val arcoreActive = useArcoreMeta
+                                                val isMobileSpace = cameraEntryMode == CameraEntryMode.MOBILE_SPACE
                                                 try {
                                                     while (isActive && n < CONTINUOUS_CAPTURE_MAX_SHOTS) {
-                                                        val cap =
-                                                            withContext(Dispatchers.Main) { imageCapture }
-                                                                ?: break
-                                                        val camReady =
-                                                            withContext(Dispatchers.Main) { isCameraReady }
-                                                        if (!camReady) {
-                                                            delay(100)
-                                                            continue
-                                                        }
-                                                        withContext(Dispatchers.Main) {
-                                                            SoftShutterSound.play(volume = 0.3f)
-                                                        }
-                                                        val shot = withContext(Dispatchers.Main) {
-                                                            takePhotoSuspend(context, cap)
-                                                        }
+                                                        if (continuousBurstUserStop.get()) break
+                                                        val shot = takePhotoSuspend(context, cap, burstDatasetDir)
                                                         if (shot == null) {
                                                             withContext(Dispatchers.Main) {
                                                                 Toast.makeText(
@@ -1684,9 +1687,15 @@ fun CameraScreen(
                                                             break
                                                         }
                                                         val (uri, file) = shot
+
+                                                        continuousBurstSessionFiles.add(file)
+
+                                                        n++
                                                         withContext(Dispatchers.Main) {
-                                                            onImageCaptured(uri)
-                                                            if (cameraEntryModeState.value == CameraEntryMode.MOBILE_SPACE) {
+                                                            if (!arcoreActive) {
+                                                                SoftShutterSound.play(volume = 0.1f)
+                                                            }
+                                                            if (isMobileSpace) {
                                                                 mobileSpaceSession.recordAcceptedSample(
                                                                     azimuthForGrid,
                                                                     effectivePitchDegrees,
@@ -1698,12 +1707,6 @@ fun CameraScreen(
                                                                 )
                                                                 mobileSpaceUiRev++
                                                             }
-                                                        }
-
-                                                        continuousBurstSessionFiles.add(file)
-
-                                                        n++
-                                                        withContext(Dispatchers.Main) {
                                                             continuousCapturedCount = n
                                                         }
 
@@ -1717,7 +1720,6 @@ fun CameraScreen(
                                                             }
                                                             break
                                                         }
-                                                        delay(CONTINUOUS_CAPTURE_INTERVAL_MS)
                                                     }
                                                 } catch (e: CancellationException) {
                                                     val silent =
@@ -1774,34 +1776,15 @@ fun CameraScreen(
                                                                 }
                                                             }
                                                             try {
-                                                                val ds = copyContinuousBurstImageFilesToDatasetFolder(
-                                                                    context.applicationContext,
-                                                                    batch,
-                                                                )
-                                                                withContext(Dispatchers.Main) {
-                                                                    if (ds.successCount > 0) {
-                                                                        Toast.makeText(
-                                                                            context.applicationContext,
-                                                                            ds.message,
-                                                                            Toast.LENGTH_SHORT,
-                                                                        ).show()
-                                                                    } else {
-                                                                        Toast.makeText(
-                                                                            context.applicationContext,
-                                                                            ds.message,
-                                                                            Toast.LENGTH_LONG,
-                                                                        ).show()
-                                                                    }
-                                                                }
-                                                            } catch (e: Exception) {
-                                                                e.printStackTrace()
                                                                 withContext(Dispatchers.Main) {
                                                                     Toast.makeText(
                                                                         context.applicationContext,
-                                                                        "연속 촬영: 데이터셋 저장 오류",
-                                                                        Toast.LENGTH_SHORT,
+                                                                        "연속 촬영 ${n}장을 데이터셋「연속촬영_${burstDatasetDir.name.substringAfter("연속촬영_")}」에 저장했습니다.",
+                                                                        Toast.LENGTH_LONG,
                                                                     ).show()
                                                                 }
+                                                            } catch (e: Exception) {
+                                                                e.printStackTrace()
                                                             }
                                                         }
                                                     }
@@ -2299,24 +2282,23 @@ fun TopMenuSegmentedTriple(
 ) {
     Row(
         modifier = Modifier
-            .height(34.dp)
-            .clip(RoundedCornerShape(18.dp))
+            .height(30.dp)
+            .clip(RoundedCornerShape(15.dp))
             .background(Color.Black)
-            .border(1.dp, Color.White, RoundedCornerShape(18.dp)),
+            .border(1.dp, Color.White, RoundedCornerShape(15.dp)),
     ) {
         Box(
             modifier = Modifier
-                .weight(1f)
                 .fillMaxHeight()
                 .background(if (selectedIndex == 0) Color.White else Color.Black)
                 .clickable { onLeftClick() }
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 10.dp),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 text = leftText,
                 color = if (selectedIndex == 0) Color.Black else Color.White,
-                fontSize = 12.sp,
+                fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
             )
         }
@@ -2328,11 +2310,10 @@ fun TopMenuSegmentedTriple(
         )
         Box(
             modifier = Modifier
-                .weight(1f)
                 .fillMaxHeight()
                 .background(if (selectedIndex == 1) Color.White else Color.Black)
                 .clickable { onMidClick() }
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 10.dp),
             contentAlignment = Alignment.Center,
         ) {
             Text(
@@ -2340,8 +2321,6 @@ fun TopMenuSegmentedTriple(
                 color = if (selectedIndex == 1) Color.Black else Color.White,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
             )
         }
         Box(
@@ -2352,17 +2331,16 @@ fun TopMenuSegmentedTriple(
         )
         Box(
             modifier = Modifier
-                .weight(1f)
                 .fillMaxHeight()
                 .background(if (selectedIndex == 2) Color.White else Color.Black)
                 .clickable { onRightClick() }
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 10.dp),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 text = rightText,
                 color = if (selectedIndex == 2) Color.Black else Color.White,
-                fontSize = 12.sp,
+                fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
             )
         }

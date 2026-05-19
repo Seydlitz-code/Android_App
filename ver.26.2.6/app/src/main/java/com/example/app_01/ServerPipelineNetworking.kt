@@ -70,11 +70,6 @@ internal const val SERVER_PIPELINE_WAKE_MAX_MS = 4L * 60L * 60L * 1000L
  */
 internal const val SERVER_STATUS_POLL_MAX_SILENCE_MS = 10L * 60L * 1000L
 
-/** DA3 완료 후 3DGS 상태 폴링 최대 대기 시간 (ms) */
-internal const val SERVER_GS_POLL_TIMEOUT_MS = 20L * 60L * 1000L
-/** 3DGS 상태 폴링 간격 (ms) */
-internal const val SERVER_GS_POLL_INTERVAL_MS = 5_000L
-
 /** FastAPI `POST /upload` 의 `file_pc: UploadFile = File(...)` 필드명 */
 internal const val SERVER_PIPELINE_PART_PC = "file_pc"
 /** FastAPI `file_gs: Optional[UploadFile] = File(None)` — 3DGS·보조 ZIP(선택) */
@@ -96,8 +91,6 @@ private const val PREF_USE_HTTPS = "use_https"
  * 소켓 버퍼·OkHttp·Okio 세그먼트와 조화를 이루도록 설정합니다.
  */
 private const val SERVER_DOWNLOAD_STREAM_BUFFER_BYTES = 2 * 1024 * 1024
-
-private const val SERVER_DOWNLOAD_FILE_OUT_BUFFER_BYTES = 2 * 1024 * 1024
 
 /** 코루틴 yield 간격 — 16 MiB 마다 UI·다른 코루틴에 CPU 회복 기회 제공 */
 private const val SERVER_DOWNLOAD_YIELD_INTERVAL_BYTES = 16 * 1024 * 1024
@@ -200,7 +193,7 @@ internal fun getServerDownloadOkHttpClient(useHttps: Boolean): OkHttpClient {
             .readTimeout(0, TimeUnit.SECONDS)
             .writeTimeout(0, TimeUnit.SECONDS)
             .callTimeout(0, TimeUnit.SECONDS)
-            .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
+                .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
             .retryOnConnectionFailure(true)
             .build()
         cache.set(c)
@@ -1268,7 +1261,7 @@ internal suspend fun runServer3dgsAnalysisInBackground(
     pending: Pending3dgsServerAutoSend
 ): Boolean {
     val imageBase64List = withContext(Dispatchers.IO) {
-        val uris = evenlySampleListForLlm(pending.imageUris)
+        val uris = pending.imageUris
         uris.mapNotNull { uri ->
             try {
                 decodeBitmapWithMaxDimension(context, uri, 1280)
@@ -1317,7 +1310,8 @@ internal suspend fun runServer3dgsAnalysisInBackground(
 internal fun buildPoliceInsurance3dgsPayload(
     context: Context,
     bundle: ServerPipelineResultBundle,
-    basePrompt: String = "해당 파일을 바탕으로 PLY, 3DGS 파일을 분석해 경찰, 보험사에서 사용가능한 텍스트 형식으로 분석 출력해줘",
+    basePrompt: String = "첨부된 PLY·3DGS·JSON 분석 파일과 사고 현장 이미지를 바탕으로, 사고 현장 분석 보고서를 작성하세요. 보고서는 표지(1페이지)·목차(2페이지)·본문(3페이지 이후) 구조로, 사고 현장 개요, 사고 형태 분석, 사고 원인 추론, 차량별 파손 부위 및 수리 견적 표(6열), 종합 수리 견적 요약, 법적 면책 정보를 포함하세요. 모든 표는 table.cell(정수행, 정수열).text = \"…\" 로 채우고, 섹션마다 page_break로 분리하며 차트를 2-3개 포함하세요. 한국어 python-docx 스크립트(단일 ```python 블록)로만 출력하세요.",
+    galleryImageUris: List<Uri> = emptyList(),
 ): Pair<String, List<Uri>> {
     val sb = StringBuilder(basePrompt)
     sb.append("\n\n--- 서버 결과 메타 ---\n")
@@ -1370,17 +1364,22 @@ internal fun buildPoliceInsurance3dgsPayload(
     }
 
     val imageExts = setOf("png", "jpg", "jpeg", "webp")
+    val uris = ArrayList<Uri>()
+
+    if (galleryImageUris.isNotEmpty()) {
+        uris.addAll(galleryImageUris)
+    }
+
     val preferredOrder = listOf("topview", "sideview", "quality_png")
     val seen = HashSet<String>()
-    val uris = ArrayList<Uri>()
     fun addFile(f: File) {
-        val path = f.absolutePath
-        if (path in seen || !f.exists() || !f.isFile) return
-        if (f.extension.lowercase() !in imageExts) return
-        uriToShareableContentUri(context, Uri.fromFile(f))?.let {
-            seen.add(path)
-            uris.add(it)
-        }
+    val path = f.absolutePath
+    if (path in seen || !f.exists() || !f.isFile) return
+    if (f.extension.lowercase() !in imageExts) return
+    uriToShareableContentUri(context, Uri.fromFile(f))?.let {
+        seen.add(path)
+        uris.add(it)
+    }
     }
     for (k in preferredOrder) {
         bundle.filesByKey[k]?.let(::addFile)

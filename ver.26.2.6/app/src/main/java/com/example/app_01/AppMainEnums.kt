@@ -25,6 +25,8 @@ enum class LibraryTab {
     JSON_LIBRARY,
     /** ARCore용 에셋(모델·설정 등) 로컬 저장소 */
     AR_CORE_LIBRARY,
+    /** 서버 파이프라인 GLB 모델 저장소 */
+    GLB_LIBRARY,
 }
 
 enum class LibraryDetailScreen {
@@ -35,6 +37,7 @@ enum class LibraryDetailScreen {
     MODEL_3D_PLY_LIST,
     MODEL_3D_OBJ_LIST,
     GS3D_WEBVIEW,
+    GLB_VIEWER,
 }
 
 enum class CameraEntryMode {
