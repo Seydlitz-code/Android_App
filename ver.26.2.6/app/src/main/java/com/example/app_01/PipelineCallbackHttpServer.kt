@@ -59,6 +59,14 @@ internal class PipelineCallbackHttpServer(
         File(System.getProperty("java.io.tmpdir") ?: "/tmp", "pp_cb_parts").also { it.mkdirs() }
     }
 
+    override fun stop() {
+        pushPartsDir.listFiles()?.forEach {
+            try { it.delete() } catch (_: Exception) {}
+        }
+        try { pushPartsDir.delete() } catch (_: Exception) {}
+        super.stop()
+    }
+
     override fun serve(session: IHTTPSession): Response {
         if (session.method != Method.POST) {
             return newFixedLengthResponse(

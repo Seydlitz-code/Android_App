@@ -249,6 +249,8 @@ internal fun buildOkHttpClientBase(useHttps: Boolean): OkHttpClient {
         .connectTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
+        .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
+        .retryOnConnectionFailure(true)
 
     if (useHttps) {
         val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
@@ -1339,11 +1341,16 @@ internal suspend fun runServer3dgsAnalysisInBackground(
     val imageBase64List = withContext(Dispatchers.IO) {
         val uris = pending.imageUris
         uris.mapNotNull { uri ->
+            var bitmap: android.graphics.Bitmap? = null
             try {
-                decodeBitmapWithMaxDimension(context, uri, 1280)
-                    ?.let { ClaudeChatClient.bitmapToBase64ForLlm(it) }
+                bitmap = decodeBitmapWithMaxDimension(context, uri, 1280)
+                bitmap?.let { ClaudeChatClient.bitmapToBase64ForLlm(it) }
             } catch (_: Exception) {
                 null
+            } finally {
+                bitmap?.let { bmp ->
+                    try { if (!bmp.isRecycled) bmp.recycle() } catch (_: Exception) {}
+                }
             }
         }
     }
@@ -1518,19 +1525,16 @@ internal suspend fun sam2RemoveBackground(
 
         onProgress(35, "SAM2 객체 감지 및 세그멘테이션 중...$itemLabel")
 
-        val response = client.newCall(httpRequest).execute()
-
-        if (!response.isSuccessful) {
-            val errBody = response.body?.string() ?: ""
-            android.util.Log.e("SAM2", "서버 오류 ${response.code}: $errBody")
-            response.close()
-            return@withContext null
+        val pngBytes: ByteArray?
+        client.newCall(httpRequest).execute().use { response ->
+            if (!response.isSuccessful) {
+                val errBody = response.body?.string() ?: ""
+                android.util.Log.e("SAM2", "서버 오류 ${response.code}: $errBody")
+                return@withContext null
+            }
+            onProgress(85, "결과 수신 중...$itemLabel")
+            pngBytes = response.body?.bytes()
         }
-
-        onProgress(85, "결과 수신 중...$itemLabel")
-
-        val pngBytes = response.body?.bytes()
-        response.close()
         if (pngBytes == null || pngBytes.isEmpty()) return@withContext null
 
         onProgress(93, "앱 라이브러리 저장 중...$itemLabel")

@@ -7,6 +7,7 @@ import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -189,6 +190,45 @@ object ArcoreLibrary {
             )
         }
         return zip
+    }
+
+    private val ZIP_SCAN_IMAGE_EXT =
+        setOf("jpg", "jpeg", "png", "webp", "heic", "heif")
+
+    /** 요약 없는 ZIP은 엔트리 이름만 보고 센다(`arcore_archive_summary.json` 제외). */
+    private fun scanZipEntryImageJsonCounts(zipFile: File): Pair<Int, Int> {
+        if (!zipFile.isFile || !zipFile.name.endsWith(".zip", ignoreCase = true)) return 0 to 0
+        return runCatching {
+            ZipFile(zipFile).use { zf ->
+                var images = 0
+                var jsons = 0
+                val it = zf.entries()
+                while (it.hasMoreElements()) {
+                    val e = it.nextElement()
+                    if (e.isDirectory) continue
+                    val path = e.name.trim().trimStart('/')
+                    if (path.startsWith("__MACOSX/", ignoreCase = true)) continue
+                    val leaf = path.substringAfterLast('/')
+                    if (leaf.equals("arcore_archive_summary.json", ignoreCase = true)) continue
+                    val lower = leaf.lowercase(Locale.US)
+                    val ext = lower.substringAfterLast('.', "")
+                    when {
+                        ext == "json" -> jsons++
+                        ext in ZIP_SCAN_IMAGE_EXT -> images++
+                    }
+                }
+                images to jsons
+            }
+        }.getOrElse { 0 to 0 }
+    }
+
+    /**
+     * ARCore 라이브러리 ZIP 미리보기용: 이미지·JSON 개수.
+     * [`arcore_archive_summary.json`]이 있으면 그 값을 쓰고, 없으면 ZIP 엔트리를 스캔한다.
+     */
+    fun summarizeZipMediaCounts(zipFile: File): Pair<Int, Int> {
+        readArchiveSummaryCounts(zipFile)?.let { return it }
+        return scanZipEntryImageJsonCounts(zipFile)
     }
 
     /** ARCore 라이브러리 그리드 표시용: ZIP 안의 `arcore_archive_summary.json`에서 개수를 읽는다. */

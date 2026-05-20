@@ -700,15 +700,12 @@ fun ClaudeChatScreen(
                 ) {
                     DropdownMenuItem(
                         text = {
-                            Column {
-                                Text("클로드 AI LLM", color = palette.onBackground, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                Text(
-                                    "자연어 입력을 기반으로 답변을 생성합니다.",
-                                    color = palette.onBackground.copy(alpha = 0.65f),
-                                    fontSize = 11.sp,
-                                    lineHeight = 14.sp
-                                )
-                            }
+                            Text(
+                                "클로드 AI LLM",
+                                color = palette.onBackground,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                            )
                         },
                         onClick = {
                             aiTabMode = AiChatTabMode.CLAUDE
@@ -717,15 +714,12 @@ fun ClaudeChatScreen(
                     )
                     DropdownMenuItem(
                         text = {
-                            Column {
-                                Text("AI CAD", color = palette.onBackground, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                Text(
-                                    "OpenSCAD로 곡면·라운딩을 포함한 형상을 생성합니다.",
-                                    color = palette.onBackground.copy(alpha = 0.65f),
-                                    fontSize = 11.sp,
-                                    lineHeight = 14.sp
-                                )
-                            }
+                            Text(
+                                "AI CAD",
+                                color = palette.onBackground,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                            )
                         },
                         onClick = {
                             aiTabMode = AiChatTabMode.AI_CAD
@@ -734,15 +728,12 @@ fun ClaudeChatScreen(
                     )
                     DropdownMenuItem(
                         text = {
-                            Column {
-                                Text("DA3 분석", color = palette.onBackground, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                Text(
-                                    "DA3 분석: 첨부(갤러리·데이터셋·서버 DA3 분석 이미지·DA3 품질평가 JSON·기타 JSON/PLY·GLB·ARCore 등)를 바탕으로 보험·경찰 제출용 틀에 맞춘 한국어 Word(.docx) python-docx 스크립트를 출력합니다. 도식이 필요하면 스크립트에서 PNG 생성 후 add_picture·분석 문단 순으로 포함합니다.",
-                                    color = palette.onBackground.copy(alpha = 0.65f),
-                                    fontSize = 11.sp,
-                                    lineHeight = 14.sp
-                                )
-                            }
+                            Text(
+                                "DA3 분석",
+                                color = palette.onBackground,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                            )
                         },
                         onClick = {
                             aiTabMode = AiChatTabMode.MOBILE_3DGS
@@ -751,15 +742,12 @@ fun ClaudeChatScreen(
                     )
                     DropdownMenuItem(
                         text = {
-                            Column {
-                                Text("파손부위 분석", color = palette.onBackground, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                Text(
-                                    "사고 차량 사진을 바탕으로 모델 유추·파손 부위 분석·피해 규모 추정·수리 견적·결론까지 담은 정교한 python-docx Word 스크립트를 출력합니다. 삽화가 필요하면 PNG 생성 후 add_picture와 분석 텍스트를 함께 넣습니다.",
-                                    color = palette.onBackground.copy(alpha = 0.65f),
-                                    fontSize = 11.sp,
-                                    lineHeight = 14.sp
-                                )
-                            }
+                            Text(
+                                "파손부위 분석",
+                                color = palette.onBackground,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                            )
                         },
                         onClick = {
                             aiTabMode = AiChatTabMode.DAMAGE_ANALYSIS
@@ -1104,11 +1092,16 @@ fun ClaudeChatScreen(
 
                 scope.launch {
                     val imageBase64List = imagesForLlm.mapNotNull { uri ->
+                        var bitmap: android.graphics.Bitmap? = null
                         try {
-                            decodeBitmapWithMaxDimension(context, uri, 1280)
-                                ?.let { ClaudeChatClient.bitmapToBase64ForLlm(it) }
+                            bitmap = decodeBitmapWithMaxDimension(context, uri, 1280)
+                            bitmap?.let { ClaudeChatClient.bitmapToBase64ForLlm(it) }
                         } catch (e: Exception) {
                             null
+                        } finally {
+                            bitmap?.let { bmp ->
+                                try { if (!bmp.isRecycled) bmp.recycle() } catch (_: Exception) {}
+                            }
                         }
                     }
                     val dataAppendix = if (aiTabMode == AiChatTabMode.MOBILE_3DGS && auxSnap.isNotEmpty()) {
@@ -2833,7 +2826,7 @@ private fun parseMarkdownBlocks(text: String): List<MarkdownBlock> {
 }
 
 /** 인라인 마크다운 파싱 (Bold, Italic, InlineCode) → AnnotatedString */
-private fun buildInlineAnnotated(text: String): AnnotatedString = buildAnnotatedString {
+private fun buildInlineAnnotated(text: String, baseColor: Color): AnnotatedString = buildAnnotatedString {
     var i = 0
     while (i < text.length) {
         when {
@@ -2869,8 +2862,8 @@ private fun buildInlineAnnotated(text: String): AnnotatedString = buildAnnotated
                 if (end != -1) {
                     withStyle(SpanStyle(
                         fontFamily = FontFamily.Monospace,
-                        background = Color(0xFF2A2A2A),
-                        color = Color(0xFF9CD83B),
+                        background = baseColor.copy(alpha = 0.14f),
+                        color = baseColor,
                         fontSize = 13.sp
                     )) { append(text.substring(i + 1, end)) }
                     i = end + 1
@@ -2914,7 +2907,7 @@ private fun MarkdownText(
                     val headingWeight = if (block.level <= 2) FontWeight.Bold else FontWeight.SemiBold
                     val headingTopPad = when (block.level) { 1 -> 10.dp; 2 -> 8.dp; else -> 6.dp }
                     Text(
-                        text = buildInlineAnnotated(block.text),
+                        text = buildInlineAnnotated(block.text, resolvedColor),
                         color = resolvedColor,
                         fontSize = headingSize,
                         fontWeight = headingWeight,
@@ -2931,7 +2924,7 @@ private fun MarkdownText(
                             modifier = Modifier.padding(end = 8.dp, top = 1.dp)
                         )
                         Text(
-                            text = buildInlineAnnotated(block.text),
+                            text = buildInlineAnnotated(block.text, resolvedColor),
                             color = resolvedColor,
                             fontSize = fontSize,
                             lineHeight = (fontSize.value * 1.5).sp,
@@ -2948,7 +2941,7 @@ private fun MarkdownText(
                             modifier = Modifier.width(26.dp).padding(top = 1.dp)
                         )
                         Text(
-                            text = buildInlineAnnotated(block.text),
+                            text = buildInlineAnnotated(block.text, resolvedColor),
                             color = resolvedColor,
                             fontSize = fontSize,
                             lineHeight = (fontSize.value * 1.5).sp,
@@ -2975,7 +2968,7 @@ private fun MarkdownText(
                 }
                 is MarkdownBlock.Paragraph -> {
                     Text(
-                        text = buildInlineAnnotated(block.text),
+                        text = buildInlineAnnotated(block.text, resolvedColor),
                         color = resolvedColor,
                         fontSize = fontSize,
                         lineHeight = (fontSize.value * 1.6).sp

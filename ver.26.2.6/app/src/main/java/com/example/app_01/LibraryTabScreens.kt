@@ -1244,6 +1244,50 @@ private fun LibraryAlbumHubGrid(
     }
 }
 
+@Composable
+private fun DatasetArcoreZipPickerRow(
+    zipFile: File,
+    palette: AppUiPalette,
+    onPick: () -> Unit,
+) {
+    val pathKey = remember(zipFile.absolutePath, zipFile.lastModified()) {
+        "${zipFile.absolutePath}\u0000${zipFile.lastModified()}"
+    }
+    var counts by remember(pathKey) { mutableStateOf<Pair<Int, Int>?>(null) }
+    LaunchedEffect(pathKey) {
+        counts = withContext(Dispatchers.IO) {
+            ArcoreLibrary.summarizeZipMediaCounts(zipFile)
+        }
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onPick)
+            .padding(horizontal = 12.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = zipFile.name,
+                color = palette.onBackground,
+                fontSize = 14.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = counts?.let { (img, json) ->
+                    "이미지 ${img}장 · JSON ${json}개"
+                } ?: "개수 확인 중…",
+                color = palette.onBackgroundMuted,
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun GalleryScreen(
@@ -2101,12 +2145,12 @@ fun GalleryScreen(
                     ) {
                         Text(
                             text = "확인",
-                            color = Color(0xFF9CD83B),
+                            color = palette.onBackground,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(12.dp))
-                                .border(1.dp, Color(0xFF9CD83B), RoundedCornerShape(12.dp))
+                                .border(1.dp, palette.divider, RoundedCornerShape(12.dp))
                                 .clickable {
                                     when (pendingGalleryMenuAction) {
                                         PendingGalleryMenuAction.BackgroundRemove -> {
@@ -2159,12 +2203,12 @@ fun GalleryScreen(
                     ) {
                         Text(
                             text = "확인",
-                            color = Color(0xFF9CD83B),
+                            color = palette.onBackground,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(12.dp))
-                                .border(1.dp, Color(0xFF9CD83B), RoundedCornerShape(12.dp))
+                                .border(1.dp, palette.divider, RoundedCornerShape(12.dp))
                                 .clickable {
                                     when (pendingDatasetMenuAction) {
                                         PendingDatasetMenuAction.BackgroundRemove -> {
@@ -4536,11 +4580,12 @@ fun GalleryScreen(
                                     contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = "PLY 분석",
+                                    text = "사고 현장\n분석 보고서",
                                     color = completionBtnFg,
-                                    fontSize = 13.sp,
+                                    fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
-                                    textAlign = TextAlign.Center
+                                    textAlign = TextAlign.Center,
+                                    lineHeight = 15.sp,
                                 )
                             }
                             val top = spb.filesByKey["topview"]
@@ -4785,14 +4830,14 @@ fun GalleryScreen(
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = "MediaPipe Image Segmentation",
-                            color = Color(0xFF9CD83B),
+                            color = palette.onBackgroundMuted,
                             fontSize = 11.sp
                         )
                         Spacer(modifier = Modifier.height(16.dp))
                         // 퍼센트 숫자
                         Text(
                             text = "${sam3ProgressPercent.coerceIn(0, 100)}%",
-                            color = Color(0xFF9CD83B),
+                            color = palette.onBackground,
                             fontSize = 32.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -4808,7 +4853,10 @@ fun GalleryScreen(
                                 modifier = Modifier
                                     .fillMaxHeight()
                                     .fillMaxWidth(fraction)
-                                    .background(Color(0xFF9CD83B), RoundedCornerShape(6.dp))
+                                    .background(
+                                        palette.onBackground.copy(alpha = 0.85f),
+                                        RoundedCornerShape(6.dp),
+                                    )
                             )
                         }
                         Spacer(modifier = Modifier.height(12.dp))
@@ -5412,8 +5460,8 @@ fun GalleryScreen(
                     Column {
                         Text(
                             text = "서버 전송",
-                            color = Color(0xFF9CD83B),
-                            fontSize = 12.sp,
+                            color = palette.onBackground,
+                            fontSize = 16.sp,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(4.dp))
@@ -5428,12 +5476,6 @@ fun GalleryScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "ARCore ZIP (선택) · poses.json 등이 포함된 ZIP (없으면 미디어 ZIP만 전송)",
-                            color = palette.onBackground.copy(alpha = 0.85f),
-                            fontSize = 13.sp,
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
                         val arcoreZipLabel = pending3DArcoreZipUriForDataset?.let { u ->
                                 if (u.scheme == ContentResolver.SCHEME_FILE || u.scheme.isNullOrEmpty()) {
                                     u.path?.let { p -> File(p).name }
@@ -5485,13 +5527,6 @@ fun GalleryScreen(
                                     )
                                 }
                             }
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "텍스트 입력 없이 데이터셋 ZIP(file_pc)을 서버로 전송합니다. ARCore ZIP(file_gs)이 있으면 함께 전송됩니다.",
-                                color = palette.onBackground.copy(alpha = 0.62f),
-                                fontSize = 12.sp,
-                                lineHeight = 16.sp,
-                            )
                         Spacer(modifier = Modifier.height(16.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -5830,12 +5865,6 @@ fun GalleryScreen(
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Bold,
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "전송에 사용할 ZIP을 선택하세요.",
-                            color = palette.onBackgroundMuted,
-                            fontSize = 14.sp,
-                        )
                         Spacer(modifier = Modifier.height(12.dp))
                         if (datasetArcoreZipChoices.isEmpty()) {
                             Text(
@@ -5852,25 +5881,14 @@ fun GalleryScreen(
                                 verticalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
                                 items(datasetArcoreZipChoices, key = { it.absolutePath }) { f ->
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .clickable {
-                                                pending3DArcoreZipUriForDataset = Uri.fromFile(f)
-                                                showDatasetArcoreLibraryPicker = false
-                                            }
-                                            .padding(horizontal = 12.dp, vertical = 14.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        Text(
-                                            text = f.name,
-                                            color = palette.onBackground,
-                                            fontSize = 14.sp,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
+                                    DatasetArcoreZipPickerRow(
+                                        zipFile = f,
+                                        palette = palette,
+                                        onPick = {
+                                            pending3DArcoreZipUriForDataset = Uri.fromFile(f)
+                                            showDatasetArcoreLibraryPicker = false
+                                        },
+                                    )
                                 }
                             }
                         }

@@ -663,7 +663,9 @@ object BackgroundRemovalProcessor {
         if (!hasU2NetModel(context)) return null
         return try {
             val bytes = context.assets.open(U2NET_MODEL).use { it.readBytes() }
-            val opts = OrtSession.SessionOptions()
+            val opts = OrtSession.SessionOptions().apply {
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
+            }
             OrtEnvironment.getEnvironment()
                 .createSession(bytes, opts)
                 .also { ortSession = it }
@@ -713,7 +715,10 @@ object BackgroundRemovalProcessor {
         return try {
             val env = OrtEnvironment.getEnvironment()
             val bytes = context.assets.open(MOBILE_SAM_ENCODER).readBytes()
-            env.createSession(bytes).also { mobileSamEncoderSession = it }
+            val opts = OrtSession.SessionOptions().apply {
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
+            }
+            env.createSession(bytes, opts).also { mobileSamEncoderSession = it }
         } catch (e: Throwable) {
             Log.e(TAG, "MobileSAM Encoder 로드 실패", e)
             null
@@ -725,7 +730,10 @@ object BackgroundRemovalProcessor {
         return try {
             val env = OrtEnvironment.getEnvironment()
             val bytes = context.assets.open(MOBILE_SAM_DECODER).readBytes()
-            env.createSession(bytes).also { mobileSamDecoderSession = it }
+            val opts = OrtSession.SessionOptions().apply {
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
+            }
+            env.createSession(bytes, opts).also { mobileSamDecoderSession = it }
         } catch (e: Throwable) {
             Log.e(TAG, "MobileSAM Decoder 로드 실패", e)
             null
