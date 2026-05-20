@@ -106,6 +106,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -281,6 +282,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import coil.compose.rememberAsyncImagePainter
+import coil.request.ImageRequest
 import android.widget.VideoView
 import android.widget.MediaController
 import android.graphics.Bitmap
@@ -407,12 +409,12 @@ fun PermissionManagementScreen(onBack: () -> Unit) {
             if (ungrantedApplicable.isNotEmpty()) {
                 Text(
                     text = "전체 허용",
-                    color = Color.White,
+                    color = palette.prominentSolidButtonFg(true),
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier
                         .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFF2A6EBB))
+                        .background(palette.prominentSolidButtonBg(true))
                         .clickable {
                             requestLauncher.launch(
                                 ungrantedApplicable.map { it.manifestPermission }.toTypedArray()
@@ -628,6 +630,47 @@ private fun isServerTaskModelFile(file: File): Boolean =
 private fun shouldAutoGenerateModelThumbnail(file: File): Boolean {
     if (!file.exists() || !file.isFile) return false
     if (isServerTaskModelFile(file)) return false
+    return file.length() <= 20L * 1024L * 1024L
+}
+
+/** 라이브러리 허브 타일 표지: 서버 태스크 폴더 등 모델과 같은 디렉터리의 렌더 PNG */
+private fun hubRenderPreviewFileInDir(dir: File?): File? {
+    if (dir == null || !dir.isDirectory) return null
+    val candidates = listOf(
+        "topview.png", "sideview.png",
+        "topview.jpg", "sideview.jpg",
+        "quality_report.png", "analysis_result.png",
+    )
+    for (name in candidates) {
+        val f = File(dir, name)
+        if (f.isFile && f.length() > 0L) return f
+    }
+    return null
+}
+
+private fun hubRenderPreviewUriFromDir(dir: File?): Uri? =
+    hubRenderPreviewFileInDir(dir)?.let { Uri.fromFile(it) }
+
+/**
+ * GLB 허브 표지: topview 우선 PNG는 3DGS 미리보기 타일과 같은 파일이 되기 쉬우므로 **sideview 우선**으로 구분합니다.
+ */
+private fun hubGlbSiblingPreviewUri(dir: File?): Uri? {
+    if (dir == null || !dir.isDirectory) return null
+    val order = listOf(
+        "sideview.png", "sideview.jpg",
+        "topview.png", "topview.jpg",
+        "quality_report.png", "analysis_result.png",
+    )
+    for (name in order) {
+        val f = File(dir, name)
+        if (f.isFile && f.length() > 0L) return Uri.fromFile(f)
+    }
+    return null
+}
+
+/** 허브 타일 전용: 서버 결과 PLY 포함, 크기 상한 내이면 메시 썸네일 생성 허용 */
+private fun shouldGenerateLibraryHubThumbnail(file: File): Boolean {
+    if (!file.exists() || !file.isFile) return false
     return file.length() <= 20L * 1024L * 1024L
 }
 
@@ -942,14 +985,15 @@ private fun Model3dFormatHubGrid(
     }
 }
 
-/** 갤럭시 갤러리 스타일 라이브러리 앨범 허브 (데이터셋 / 분석 데이터 구역) */
+/** 갤럭시 갤러리 스타일 라이브러리 앨범 허브 (데이터셋 / PLY 구역) */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun LibraryAlbumHubGrid(
     images: List<Uri>,
     datasetFolders: List<DatasetFolder>,
-    model3dTotalCount: Int,
-    model3dCoverUri: Uri?,
+    plyTotalCount: Int,
+    plyCoverUri: Uri?,
+    glbCoverUri: Uri?,
     aiCadStlFiles: List<File>,
     gsPreviewCount: Int,
     gsAnalysisCount: Int,
@@ -968,10 +1012,6 @@ private fun LibraryAlbumHubGrid(
     val galleryCover = images.firstOrNull()
     val datasetCover = datasetFolders.maxByOrNull { it.dir.lastModified() }?.coverUri
         ?: datasetFolders.firstOrNull()?.coverUri
-    val cadCoverUri: Uri? = aiCadStlFiles.firstOrNull()?.let { stl ->
-        val glb = File(stl.parent ?: "", "${stl.nameWithoutExtension}.glb")
-        if (glb.isFile) Uri.fromFile(glb) else null
-    }
 
     data class HubEntry(
         val tab: LibraryTab,
@@ -979,74 +1019,85 @@ private fun LibraryAlbumHubGrid(
         val countLabel: String,
         val coverUri: Uri?,
         val placeholderIcon: ImageVector,
-        val placeholderTint: Color
+        val placeholderTint: Color,
+        /** true: 썸네일 없을 때 [R.drawable.ic_library_hub_doc_verified] + [palette.onBackground] */
+        val useDocumentVerifiedPlaceholder: Boolean = false,
+        /** 긴 제목을 한 줄·작은 글자로 표시(말줄임) */
+        val compactSingleLineTitle: Boolean = false,
     )
 
     val datasetEntries = listOf(
         HubEntry(
             LibraryTab.AI_CAD, "AICAD",
             "${aiCadStlFiles.size}개",
-            cadCoverUri,
+            null,
             Icons.Outlined.Build,
-            placeholderInk
+            placeholderInk,
+            useDocumentVerifiedPlaceholder = true,
         ),
         HubEntry(
-            LibraryTab.DATASET, "데이터셋 폴더",
+            LibraryTab.DATASET, "데이터셋폴더",
             "${datasetFolders.size}개",
             datasetCover,
             Icons.Outlined.Folder,
-            placeholderInk
+            placeholderInk,
+            compactSingleLineTitle = true,
         ),
         HubEntry(
             LibraryTab.GALLERY, "갤러리",
             "${images.size}장",
             galleryCover,
             Icons.Outlined.PhotoLibrary,
-            placeholderInk
+            placeholderInk,
         ),
         HubEntry(
             LibraryTab.AR_CORE_LIBRARY, "ARCore",
             "${arcoreLibraryCount}개",
             null,
             Icons.Filled.ViewInAr,
-            placeholderInk
+            placeholderInk,
+            useDocumentVerifiedPlaceholder = true,
         )
     )
     val analysisEntries = listOf(
         HubEntry(
-            LibraryTab.MODEL_3D, "3D 모델",
-            "${model3dTotalCount}개",
-            model3dCoverUri,
+            LibraryTab.MODEL_3D, "PLY",
+            "${plyTotalCount}개",
+            plyCoverUri,
             Icons.Outlined.Public,
-            placeholderInk
+            placeholderInk,
         ),
         HubEntry(
-            LibraryTab.GLB_LIBRARY, "GLB 모델",
+            LibraryTab.GLB_LIBRARY, "GLB",
             "${glbLibraryCount}개",
-            null,
+            glbCoverUri,
             Icons.Filled.ViewInAr,
-            placeholderInk
+            placeholderInk,
         ),
         HubEntry(
-            LibraryTab.GS_PREVIEW, "3DGS 미리보기",
+            LibraryTab.GS_PREVIEW, "DA3분석",
             "${gsPreviewCount}개",
             gsPreviewCoverUri,
             Icons.Filled.ViewInAr,
-            placeholderInk
+            placeholderInk,
+            compactSingleLineTitle = true,
         ),
         HubEntry(
-            LibraryTab.GS_ANALYSIS, "3DGS 분석·품질",
+            LibraryTab.GS_ANALYSIS, "DA3 품질평가",
             "${gsAnalysisCount}개",
             gsAnalysisCoverUri,
             Icons.Outlined.Description,
-            placeholderInk
+            placeholderInk,
+            useDocumentVerifiedPlaceholder = true,
+            compactSingleLineTitle = true,
         ),
         HubEntry(
             LibraryTab.JSON_LIBRARY, "JSON",
             "${jsonLibraryCount}개",
             null,
             Icons.Outlined.Description,
-            placeholderInk
+            placeholderInk,
+            useDocumentVerifiedPlaceholder = true,
         )
     )
 
@@ -1067,23 +1118,43 @@ private fun LibraryAlbumHubGrid(
                     .background(thumbBg)
             ) {
                 if (e.coverUri != null) {
-                    Image(
-                        painter = rememberAsyncImagePainter(e.coverUri),
-                        contentDescription = e.title,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
+                    key(e.tab, e.coverUri) {
+                        val ctx = LocalContext.current
+                        val req = remember(e.tab, e.coverUri, ctx) {
+                            ImageRequest.Builder(ctx)
+                                .data(e.coverUri)
+                                .memoryCacheKey("${e.tab}_${e.coverUri}")
+                                .diskCacheKey("${e.tab}_${e.coverUri}")
+                                .crossfade(false)
+                                .build()
+                        }
+                        Image(
+                            painter = rememberAsyncImagePainter(req),
+                            contentDescription = e.title,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    }
                 } else {
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = e.placeholderIcon,
-                            contentDescription = null,
-                            tint = e.placeholderTint.copy(alpha = 0.85f),
-                            modifier = Modifier.size(44.dp)
-                        )
+                        if (e.useDocumentVerifiedPlaceholder) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_library_hub_doc_verified),
+                                contentDescription = null,
+                                tint = palette.onBackground,
+                                modifier = Modifier.size(44.dp),
+                            )
+                        } else {
+                            Icon(
+                                imageVector = e.placeholderIcon,
+                                contentDescription = null,
+                                tint = e.placeholderTint.copy(alpha = 0.85f),
+                                modifier = Modifier.size(44.dp)
+                            )
+                        }
                     }
                 }
                 if (e.tab == LibraryTab.GALLERY) {
@@ -1112,10 +1183,11 @@ private fun LibraryAlbumHubGrid(
                 text = e.title,
                 modifier = Modifier.fillMaxWidth(),
                 color = palette.onBackground,
-                fontSize = 15.sp,
+                fontSize = if (e.compactSingleLineTitle) 11.sp else 15.sp,
                 fontWeight = FontWeight.Bold,
-                maxLines = 2,
-                lineHeight = 18.sp,
+                maxLines = if (e.compactSingleLineTitle) 1 else 2,
+                overflow = if (e.compactSingleLineTitle) TextOverflow.Ellipsis else TextOverflow.Clip,
+                lineHeight = if (e.compactSingleLineTitle) 13.sp else 18.sp,
                 textAlign = TextAlign.Center
             )
             Text(
@@ -1313,7 +1385,8 @@ fun GalleryScreen(
     var objViewerError by remember(objViewerPathKey) { mutableStateOf<String?>(null) }
     var objViewerSaving by remember(objViewerPathKey) { mutableStateOf(false) }
 
-    var libraryHubModel3dCoverUri by remember { mutableStateOf<Uri?>(null) }
+    var libraryHubPlyCoverUri by remember { mutableStateOf<Uri?>(null) }
+    var libraryHubGlbCoverUri by remember { mutableStateOf<Uri?>(null) }
     var plySubHubCoverUri by remember { mutableStateOf<Uri?>(null) }
     var objSubHubCoverUri by remember { mutableStateOf<Uri?>(null) }
     var libraryModelThumbRefresh by remember { mutableStateOf(0) }
@@ -1387,29 +1460,49 @@ fun GalleryScreen(
         }
     }
 
-    val model3dCoverSource = remember(plyLibraryModels, objLibraryModels) {
-        (plyLibraryModels + objLibraryModels).maxByOrNull { it.lastModified }
+    val plyHubSourceFile = remember(plyLibraryModels) {
+        plyLibraryModels.maxByOrNull { it.lastModified }?.file
     }
     LaunchedEffect(
-        model3dCoverSource?.file?.absolutePath,
-        model3dCoverSource?.lastModified,
+        plyHubSourceFile?.absolutePath,
+        plyHubSourceFile?.lastModified(),
         libraryModelThumbRefresh,
-        themeMode
+        themeMode,
     ) {
-        val f = model3dCoverSource?.file
+        val f = plyHubSourceFile
         if (f == null) {
-            libraryHubModel3dCoverUri = null
+            libraryHubPlyCoverUri = null
             return@LaunchedEffect
         }
-        if (!shouldAutoGenerateModelThumbnail(f)) {
-            libraryHubModel3dCoverUri = null
+        val meshThumb: Uri? =
+            if (shouldGenerateLibraryHubThumbnail(f)) {
+                try {
+                    Model3dThumbnail.generateOrGetAsync(context, f)?.let { Uri.fromFile(it) }
+                } catch (_: Throwable) {
+                    null
+                }
+            } else {
+                null
+            }
+        libraryHubPlyCoverUri = meshThumb ?: hubRenderPreviewUriFromDir(f.parentFile)
+    }
+
+    val glbHubSourceFile = remember(glbLibraryFiles) {
+        glbLibraryFiles.firstOrNull()
+    }
+    LaunchedEffect(
+        glbHubSourceFile?.absolutePath,
+        glbHubSourceFile?.lastModified(),
+        glbLibraryFiles.size,
+        serverArtifactLibraryVersion,
+        libraryMiscRefresh,
+    ) {
+        val f = glbHubSourceFile
+        if (f == null) {
+            libraryHubGlbCoverUri = null
             return@LaunchedEffect
         }
-        libraryHubModel3dCoverUri = try {
-            Model3dThumbnail.generateOrGetAsync(context, f)?.let { Uri.fromFile(it) }
-        } catch (_: Throwable) {
-            null
-        }
+        libraryHubGlbCoverUri = hubGlbSiblingPreviewUri(f.parentFile)
     }
 
     val plySubHubSource = remember(plyLibraryModels) {
@@ -1927,20 +2020,17 @@ fun GalleryScreen(
                         text = when {
                             libraryTab == LibraryTab.MODEL_3D &&
                                 libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER ->
-                                currentPlyModel?.file?.name ?: "3D 모델"
+                                currentPlyModel?.file?.name ?: "PLY"
                             libraryTab == LibraryTab.MODEL_3D &&
                                 libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ->
                                 "PLY"
-                            libraryTab == LibraryTab.MODEL_3D &&
-                                libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST ->
-                                "OBJ"
                             else -> when (libraryTab) {
-                                LibraryTab.MODEL_3D -> "3D 모델"
+                                LibraryTab.MODEL_3D -> "PLY"
                                 LibraryTab.AI_CAD -> "AI CAD"
                                 LibraryTab.DATASET -> "데이터셋폴더"
                                 LibraryTab.GALLERY -> "갤러리"
-                                LibraryTab.GS_PREVIEW -> "3DGS 미리보기"
-                                LibraryTab.GS_ANALYSIS -> "3DGS 분석·품질"
+                                LibraryTab.GS_PREVIEW -> "DA3분석"
+                                LibraryTab.GS_ANALYSIS -> "DA3 품질평가"
                                 LibraryTab.JSON_LIBRARY -> "JSON"
                                 LibraryTab.AR_CORE_LIBRARY -> "ARCore"
                                 LibraryTab.GLB_LIBRARY -> "GLB"
@@ -2198,63 +2288,9 @@ fun GalleryScreen(
                         libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER &&
                         currentPlyModel != null
                     ) {
-                        val plyF = currentPlyModel!!.file
-                        if (!objViewerConverting && objViewerError == null && objViewerObjFile != null &&
-                            plyF.extension.equals("ply", ignoreCase = true)
-                        ) {
-                            Text(
-                                text = if (objViewerSaving) "저장 중…" else "저장",
-                                color = if (objViewerSaving) palette.onBackground.copy(alpha = 0.5f)
-                                else Color(0xFF9CD83B),
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .clickable(enabled = !objViewerSaving) {
-                                        val cached = objViewerObjFile ?: return@clickable
-                                        objViewerSaving = true
-                                        transferScope.launch {
-                                            val err = withContext(Dispatchers.IO) {
-                                                saveConvertedObjToModelsLibrary(context, plyF, cached)
-                                            }
-                                            objViewerSaving = false
-                                            if (err != null) {
-                                                Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
-                                            } else {
-                                                Model3dThumbnail.invalidateForModelFile(context, plyF)
-                                                Model3dThumbnail.invalidateForModelFile(
-                                                    context,
-                                                    File(
-                                                        ModelLibraryPaths.objDir(context),
-                                                        "${plyF.nameWithoutExtension}.obj"
-                                                    )
-                                                )
-                                                libraryModelThumbRefresh++
-                                                Toast.makeText(
-                                                    context,
-                                                    "OBJ가 라이브러리에 저장되었습니다.",
-                                                    Toast.LENGTH_SHORT
-                                                ).show()
-                                                loadModel3dLibrary(context) { lib ->
-                                                    plyLibraryModels = lib.plyModels
-                                                    objLibraryModels = lib.objModels
-                                                }
-                                            }
-                                        }
-                                    }
-                                    .padding(horizontal = 10.dp, vertical = 6.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                        }
                         IconButton(
                             onClick = {
-                                val f = currentPlyModel?.file
-                                libraryDetailScreen =
-                                    if (f?.extension?.equals("obj", ignoreCase = true) == true) {
-                                        LibraryDetailScreen.MODEL_3D_OBJ_LIST
-                                    } else {
-                                        LibraryDetailScreen.MODEL_3D_PLY_LIST
-                                    }
+                                libraryDetailScreen = LibraryDetailScreen.MODEL_3D_PLY_LIST
                                 currentPlyModel = null
                             },
                             modifier = Modifier.size(40.dp)
@@ -2568,8 +2604,9 @@ fun GalleryScreen(
                 LibraryAlbumHubGrid(
                     images = images,
                     datasetFolders = datasetFolders,
-                    model3dTotalCount = allModel3dLibrary.size,
-                    model3dCoverUri = libraryHubModel3dCoverUri,
+                    plyTotalCount = allModel3dLibrary.size,
+                    plyCoverUri = libraryHubPlyCoverUri,
+                    glbCoverUri = libraryHubGlbCoverUri,
                     aiCadStlFiles = aiCadStlFiles,
                     gsPreviewCount = gsPreviewCount,
                     gsAnalysisCount = gsAnalysisCount,
@@ -2587,13 +2624,7 @@ fun GalleryScreen(
             } else if (libraryTab == LibraryTab.MODEL_3D) {
                 if (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER && currentPlyModel != null) {
                     BackHandler {
-                        val f = currentPlyModel?.file
-                        libraryDetailScreen =
-                            if (f?.extension?.equals("obj", ignoreCase = true) == true) {
-                                LibraryDetailScreen.MODEL_3D_OBJ_LIST
-                            } else {
-                                LibraryDetailScreen.MODEL_3D_PLY_LIST
-                            }
+                        libraryDetailScreen = LibraryDetailScreen.MODEL_3D_PLY_LIST
                         currentPlyModel = null
                     }
                     val viewerSourceFile = currentPlyModel!!.file
@@ -2603,11 +2634,7 @@ fun GalleryScreen(
                             objViewerConverting -> {
                                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                     Text(
-                                        text = if (viewerSourceFile.extension.equals("obj", ignoreCase = true)) {
-                                            "모델 불러오는 중..."
-                                        } else {
-                                            "OBJ 변환 중..."
-                                        },
+                                        text = "OBJ 변환 중...",
                                         color = palette.onBackground,
                                         fontSize = 16.sp,
                                         fontWeight = FontWeight.Bold
@@ -2645,220 +2672,147 @@ fun GalleryScreen(
                         }
                     }
                 } else {
-                    val listModels = when (libraryDetailScreen) {
-                        LibraryDetailScreen.MODEL_3D_PLY_LIST -> plyLibraryModels
-                        LibraryDetailScreen.MODEL_3D_OBJ_LIST -> objLibraryModels
-                        else -> emptyList()
+                    BackHandler {
+                        onLibraryHubVisibilityChange(true)
                     }
-                    if (libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ||
-                        libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST
-                    ) {
-                        BackHandler {
-                            libraryDetailScreen = LibraryDetailScreen.NONE
-                            libraryAssetEditMode = false
-                            selectedLibraryAssetPaths = emptySet()
-                        }
-                    }
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        if (libraryAssetEditMode &&
-                            (libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ||
-                                libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST)
+                    if (plyLibraryModels.isEmpty()) {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Icon(
-                                    imageVector = Icons.Filled.Share,
-                                    contentDescription = "공유하기",
-                                    tint = if (selectedLibraryAssetPaths.isNotEmpty()) Color(0xFF9CD83B)
-                                    else Color(0xFF9CD83B).copy(alpha = 0.4f),
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .clickable(enabled = selectedLibraryAssetPaths.isNotEmpty()) {
-                                            val files = listModels
-                                                .filter { selectedLibraryAssetPaths.contains(it.file.absolutePath) }
-                                                .map { it.file }
-                                            shareLibraryFiles(context, files)
-                                        }
+                                    imageVector = Icons.Outlined.Public,
+                                    contentDescription = null,
+                                    tint = palette.onBackground.copy(alpha = 0.42f),
+                                    modifier = Modifier.size(52.dp)
                                 )
+                                Spacer(modifier = Modifier.height(12.dp))
                                 Text(
-                                    text = "삭제",
-                                    color = if (selectedLibraryAssetPaths.isNotEmpty()) palette.onBackground
-                                    else palette.onBackground.copy(alpha = 0.4f),
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(
-                                            if (selectedLibraryAssetPaths.isNotEmpty()) Color.Red
-                                            else Color.Red.copy(alpha = 0.4f)
-                                        )
-                                        .clickable(enabled = selectedLibraryAssetPaths.isNotEmpty()) {
-                                            showLibraryAssetDeleteConfirm = true
-                                        }
-                                        .padding(horizontal = 6.dp, vertical = 4.dp)
-                                )
-                                Text(
-                                    text = "전체 선택",
-                                    color = palette.onBackground,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(Color(0xFF3A3A3A))
-                                        .clickable {
-                                            selectedLibraryAssetPaths =
-                                                listModels.map { it.file.absolutePath }.toSet()
-                                        }
-                                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                                    text = "PLY 파일이 없습니다",
+                                    color = palette.onBackground.copy(alpha = 0.7f),
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
                         }
-                        when (libraryDetailScreen) {
-                            LibraryDetailScreen.NONE -> {
-                                if (plyLibraryModels.isEmpty() && objLibraryModels.isEmpty()) {
-                                    Box(
+                    } else {
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            if (libraryAssetEditMode) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Share,
+                                        contentDescription = "공유하기",
+                                        tint = if (selectedLibraryAssetPaths.isNotEmpty()) Color(0xFF9CD83B)
+                                        else Color(0xFF9CD83B).copy(alpha = 0.4f),
                                         modifier = Modifier
-                                            .weight(1f)
-                                            .fillMaxWidth(),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                            Icon(
-                                                imageVector = Icons.Outlined.Public,
-                                                contentDescription = null,
-                                                tint = palette.onBackground.copy(alpha = 0.42f),
-                                                modifier = Modifier.size(52.dp)
+                                            .size(20.dp)
+                                            .clickable(enabled = selectedLibraryAssetPaths.isNotEmpty()) {
+                                                val files = plyLibraryModels
+                                                    .filter { selectedLibraryAssetPaths.contains(it.file.absolutePath) }
+                                                    .map { it.file }
+                                                shareLibraryFiles(context, files)
+                                            }
+                                    )
+                                    Text(
+                                        text = "삭제",
+                                        color = if (selectedLibraryAssetPaths.isNotEmpty()) palette.onBackground
+                                        else palette.onBackground.copy(alpha = 0.4f),
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(
+                                                if (selectedLibraryAssetPaths.isNotEmpty()) Color.Red
+                                                else Color.Red.copy(alpha = 0.4f)
                                             )
-                                            Spacer(modifier = Modifier.height(12.dp))
-                                            Text(
-                                                text = "3D 모델이 아직 없습니다",
-                                                color = palette.onBackground.copy(alpha = 0.7f),
-                                                fontSize = 16.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                        }
-                                    }
-                                } else {
-                                    Model3dFormatHubGrid(
-                                        plyCount = plyLibraryModels.size,
-                                        objCount = objLibraryModels.size,
-                                        plyCoverUri = plySubHubCoverUri,
-                                        objCoverUri = objSubHubCoverUri,
-                                        onOpenPly = {
-                                            libraryDetailScreen = LibraryDetailScreen.MODEL_3D_PLY_LIST
-                                        },
-                                        onOpenObj = {
-                                            libraryDetailScreen = LibraryDetailScreen.MODEL_3D_OBJ_LIST
-                                        },
-                                        modifier = Modifier.fillMaxSize()
+                                            .clickable(enabled = selectedLibraryAssetPaths.isNotEmpty()) {
+                                                showLibraryAssetDeleteConfirm = true
+                                            }
+                                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                                    )
+                                    Text(
+                                        text = "전체 선택",
+                                        color = palette.onBackground,
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color(0xFF3A3A3A))
+                                            .clickable {
+                                                selectedLibraryAssetPaths =
+                                                    plyLibraryModels.map { it.file.absolutePath }.toSet()
+                                            }
+                                            .padding(horizontal = 6.dp, vertical = 4.dp)
                                     )
                                 }
                             }
-                            LibraryDetailScreen.MODEL_3D_PLY_LIST,
-                            LibraryDetailScreen.MODEL_3D_OBJ_LIST -> {
-                                if (listModels.isEmpty()) {
-                                    val emptyMsg = if (libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST) {
-                                        "PLY 파일이 없습니다"
-                                    } else {
-                                        "OBJ 파일이 없습니다"
-                                    }
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .fillMaxWidth(),
-                                        contentAlignment = Alignment.Center
+                            val modelDayGroups = remember(plyLibraryModels) {
+                                groupByDayConsecutiveDescending(
+                                    plyLibraryModels.sortedByDescending { it.lastModified }
+                                ) { it.lastModified }
+                            }
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(4),
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                modelDayGroups.forEach { (dayStart, modelsInDay) ->
+                                    item(
+                                        span = { GridItemSpan(this.maxLineSpan) },
+                                        key = "ply_day_$dayStart"
                                     ) {
-                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                            Icon(
-                                                imageVector = Icons.Outlined.Public,
-                                                contentDescription = null,
-                                                tint = palette.onBackground.copy(alpha = 0.42f),
-                                                modifier = Modifier.size(52.dp)
-                                            )
-                                            Spacer(modifier = Modifier.height(12.dp))
-                                            Text(
-                                                text = emptyMsg,
-                                                color = palette.onBackground.copy(alpha = 0.7f),
-                                                fontSize = 16.sp,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                        }
+                                        Text(
+                                            text = formatKoreanDateHeader(dayStart),
+                                            color = palette.onBackground.copy(alpha = 0.75f),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                        )
                                     }
-                                } else {
-                                    val modelDayGroups = remember(listModels) {
-                                        groupByDayConsecutiveDescending(
-                                            listModels.sortedByDescending { it.lastModified }
-                                        ) { it.lastModified }
-                                    }
-                                    LazyVerticalGrid(
-                                        columns = GridCells.Fixed(4),
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .fillMaxWidth(),
-                                        contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        modelDayGroups.forEach { (dayStart, modelsInDay) ->
-                                            item(
-                                                span = { GridItemSpan(this.maxLineSpan) },
-                                                key = "m3d_day_$dayStart"
-                                            ) {
-                                                Text(
-                                                    text = formatKoreanDateHeader(dayStart),
-                                                    color = palette.onBackground,
-                                                    fontSize = 14.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .padding(horizontal = 4.dp, vertical = 8.dp)
-                                                )
+                                    items(
+                                        items = modelsInDay,
+                                        key = { it.file.absolutePath }
+                                    ) { model ->
+                                        val path = model.file.absolutePath
+                                        val isSelected = selectedLibraryAssetPaths.contains(path)
+                                        Model3dLibraryGridItem(
+                                            model = model,
+                                            thumbRefresh = libraryModelThumbRefresh,
+                                            isSelected = isSelected,
+                                            onClick = {
+                                                if (libraryAssetEditMode) {
+                                                    selectedLibraryAssetPaths =
+                                                        if (isSelected) selectedLibraryAssetPaths - path
+                                                        else selectedLibraryAssetPaths + path
+                                                } else {
+                                                    currentPlyModel = model
+                                                    libraryDetailScreen = LibraryDetailScreen.OBJ_VIEWER
+                                                }
+                                            },
+                                            onLongClick = {
+                                                if (!libraryAssetEditMode) {
+                                                    libraryAssetEditMode = true
+                                                    selectedLibraryAssetPaths = setOf(path)
+                                                }
                                             }
-                                            items(
-                                                items = modelsInDay,
-                                                key = { it.file.absolutePath }
-                                            ) { model ->
-                                                val path = model.file.absolutePath
-                                                val isSelected = selectedLibraryAssetPaths.contains(path)
-                                                Model3dLibraryGridItem(
-                                                    model = model,
-                                                    thumbRefresh = libraryModelThumbRefresh,
-                                                    isSelected = isSelected,
-                                                    onClick = {
-                                                        if (libraryAssetEditMode) {
-                                                            selectedLibraryAssetPaths =
-                                                                if (isSelected) selectedLibraryAssetPaths - path
-                                                                else selectedLibraryAssetPaths + path
-                                                        } else {
-                                                            currentPlyModel = model
-                                                            libraryDetailScreen = LibraryDetailScreen.OBJ_VIEWER
-                                                        }
-                                                    },
-                                                    onLongClick = {
-                                                        if (!libraryAssetEditMode) {
-                                                            libraryAssetEditMode = true
-                                                            selectedLibraryAssetPaths = setOf(path)
-                                                        }
-                                                    }
-                                                )
-                                            }
-                                        }
+                                        )
                                     }
                                 }
-                            }
-                            else -> {
-                                Spacer(modifier = Modifier.weight(1f))
                             }
                         }
                     }
@@ -3470,7 +3424,7 @@ fun GalleryScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "저장된 3DGS 미리보기 이미지가 없습니다.",
+                        text = "저장된 DA3 분석 이미지가 없습니다.",
                         color = palette.onBackground.copy(alpha = 0.65f),
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold
@@ -3498,7 +3452,7 @@ fun GalleryScreen(
                             filePath != null && filePath in selectedLibraryDeletePaths
                         Image(
                             painter = rememberGalleryGridPhotoPainter(uri, gridThumbPx),
-                            contentDescription = "3DGS 미리보기",
+                            contentDescription = "DA3 분석",
                             modifier = Modifier
                                 .aspectRatio(1f)
                                 .clip(RoundedCornerShape(8.dp))
@@ -4454,24 +4408,20 @@ fun GalleryScreen(
                                     .clip(RoundedCornerShape(8.dp))
                                     .background(completionBtnBg)
                                     .clickable {
-                                        val ply = spb.plyFile
-                                        if (!ply.exists()) {
+                                        val glbFile = scanGlbFiles(context).firstOrNull()
+                                            ?: spb.filesByKey["glb"]?.takeIf { it.exists() && it.isFile }
+                                        if (glbFile == null) {
                                             android.widget.Toast.makeText(
                                                 context,
-                                                "PLY 파일을 찾을 수 없습니다.",
+                                                "GLB 파일을 찾을 수 없습니다.",
                                                 android.widget.Toast.LENGTH_SHORT
                                             ).show()
                                             return@clickable
                                         }
-                                        onEnqueueBackground3dgsFromBundle(spb)
-                                        onLibraryTabChange(LibraryTab.MODEL_3D)
+                                        glbViewerFile = glbFile
+                                        onLibraryTabChange(LibraryTab.GLB_LIBRARY)
                                         onLibraryHubVisibilityChange(false)
-                                        currentPlyModel = PlyModel(
-                                            name = ply.nameWithoutExtension.ifBlank { "model" },
-                                            file = ply,
-                                            lastModified = ply.lastModified()
-                                        )
-                                        libraryDetailScreen = LibraryDetailScreen.OBJ_VIEWER
+                                        libraryDetailScreen = LibraryDetailScreen.GLB_VIEWER
                                         val url = spb.gsViewerUrl
                                         onServerPipelineCompleteBundleChange(null)
                                         if (!url.isNullOrBlank()) {
@@ -4481,7 +4431,7 @@ fun GalleryScreen(
                                     contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = "PLY 확인",
+                                    text = "GLB 미리보기",
                                     color = completionBtnFg,
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold,
@@ -4566,6 +4516,7 @@ fun GalleryScreen(
                                             context,
                                             spb,
                                             basePrompt = "위 입력 파일을 기반으로 사고현장 분석 보고서를 작성하라",
+                                            galleryImageUris = loadCapturedAndDatasetImageUrisForReportSync(context),
                                         )
                                         onServerPipelineStart3dgsAi(
                                             Pending3dgsServerAutoSend(
@@ -4632,7 +4583,7 @@ fun GalleryScreen(
                                     contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = "3DGS 미리보기",
+                                    text = "DA3 분석",
                                     color = if (previewsOk) completionBtnFg else completionBtnFgDisabled,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
@@ -5441,17 +5392,15 @@ fun GalleryScreen(
             }
         }
 
-        // 3D 모델링 프롬프트 입력 다이얼로그
+        // 3D 모델링 — 데이터셋 ZIP 전송 다이얼로그
         if (show3DModelingDialog) {
             val isDatasetServerUpload = pending3DSourceTab == LibraryTab.DATASET
             val isValid3DPrompt = if (isDatasetServerUpload) {
                 !pending3DDatasetFolders.isEmpty()
             } else {
-                modelingPromptText.isNotEmpty() && !modelingPromptError
+                pending3DGalleryUris.isNotEmpty()
             }
             val noServerResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
-            val modelingPromptFieldBg =
-                if (palette.isDark) Color(0xFF1E1E1E) else palette.surfaceCardAlt
 
             Dialog(onDismissRequest = { show3DModelingDialog = false }) {
                 Box(
@@ -5462,75 +5411,30 @@ fun GalleryScreen(
                 ) {
                     Column {
                         Text(
-                            text = "3D 모델링",
+                            text = "서버 전송",
                             color = Color(0xFF9CD83B),
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                                text = if (isDatasetServerUpload) {
+                            text = if (isDatasetServerUpload) {
                                 "전송할 데이터셋을 확인하십시오."
-                                } else {
-                                "어떤 사물을 3D 모델링하시겠습니까?"
+                            } else {
+                                "전송할 미디어를 확인하십시오."
                             },
                             color = palette.onBackground,
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold
                         )
-                        if (!isDatasetServerUpload) {
-                            Spacer(modifier = Modifier.height(14.dp))
-                            androidx.compose.material3.OutlinedTextField(
-                                value = modelingPromptText,
-                                onValueChange = { input ->
-                                    modelingPromptText = input
-                                    // 영문자, 숫자, 스페이스, 특수기호(ASCII 0x20~0x7E)만 허용
-                                    modelingPromptError = input.isNotEmpty() && !input.all { it.code in 0x20..0x7E }
-                                },
-                                placeholder = {
-                                    Text(
-                                        text = "예: gundam figure, white cup",
-                                        color = palette.onBackground.copy(alpha = 0.35f),
-                                        fontSize = 13.sp
-                                    )
-                                },
-                                singleLine = true,
-                                isError = modelingPromptError,
-                                colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = palette.onBackground,
-                                    unfocusedTextColor = palette.onBackground,
-                                    focusedBorderColor = if (modelingPromptError) Color(0xFFFF5252) else Color(0xFF9CD83B),
-                                    unfocusedBorderColor = if (modelingPromptError) Color(0xFFFF5252) else palette.onBackground.copy(alpha = 0.4f),
-                                    cursorColor = Color(0xFF9CD83B),
-                                    focusedContainerColor = modelingPromptFieldBg,
-                                    unfocusedContainerColor = modelingPromptFieldBg,
-                                    errorBorderColor = Color(0xFFFF5252),
-                                    errorContainerColor = modelingPromptFieldBg,
-                                    errorTextColor = palette.onBackground,
-                                    errorCursorColor = Color(0xFFFF5252)
-                                ),
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            if (modelingPromptError) {
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Text(
-                                    text = "영어, 숫자, 특수기호만 입력 가능합니다 (한국어 불가)",
-                                    color = Color(0xFFFF5252),
-                                    fontSize = 12.sp
-                                )
-                            } else {
-                                Spacer(modifier = Modifier.height(6.dp + 18.sp.value.dp))
-                            }
-                        }
-                        if (isDatasetServerUpload) {
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text(
-                                text = "ARCore ZIP (선택) · poses.json 등이 포함된 ZIP (없으면 데이터셋 ZIP만 전송)",
-                                color = palette.onBackground.copy(alpha = 0.85f),
-                                fontSize = 13.sp,
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            val arcoreZipLabel = pending3DArcoreZipUriForDataset?.let { u ->
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "ARCore ZIP (선택) · poses.json 등이 포함된 ZIP (없으면 미디어 ZIP만 전송)",
+                            color = palette.onBackground.copy(alpha = 0.85f),
+                            fontSize = 13.sp,
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        val arcoreZipLabel = pending3DArcoreZipUriForDataset?.let { u ->
                                 if (u.scheme == ContentResolver.SCHEME_FILE || u.scheme.isNullOrEmpty()) {
                                     u.path?.let { p -> File(p).name }
                                 } else {
@@ -5588,7 +5492,6 @@ fun GalleryScreen(
                                 fontSize = 12.sp,
                                 lineHeight = 16.sp,
                             )
-                        }
                         Spacer(modifier = Modifier.height(16.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -5607,14 +5510,17 @@ fun GalleryScreen(
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = "전송",
-                                color = if (isValid3DPrompt) Color.White else palette.onBackground.copy(alpha = 0.35f),
+                                color = if (isValid3DPrompt) {
+                                    palette.prominentSolidButtonFg(true)
+                                } else {
+                                    palette.onBackground.copy(alpha = 0.35f)
+                                },
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(12.dp))
                                     .background(
-                                        if (isValid3DPrompt) Color(0xFF1B4F8A)
-                                        else Color(0xFF1B4F8A).copy(alpha = 0.3f)
+                                        palette.prominentSolidButtonBg(isValid3DPrompt),
                                     )
                                     .clickable(enabled = isValid3DPrompt) {
                                         val promptSnapshot = if (isDatasetServerUpload) "" else modelingPromptText.trim()
@@ -6394,12 +6300,7 @@ fun GalleryScreen(
                                                     val f = File(p)
                                                     if (!deleteLibraryModelFile(f)) anyFail = true
                                                     if (currentPlyModel?.file?.absolutePath == p) {
-                                                        libraryDetailScreen =
-                                                            if (f.extension.equals("obj", ignoreCase = true)) {
-                                                                LibraryDetailScreen.MODEL_3D_OBJ_LIST
-                                                            } else {
-                                                                LibraryDetailScreen.MODEL_3D_PLY_LIST
-                                                            }
+                                                        libraryDetailScreen = LibraryDetailScreen.MODEL_3D_PLY_LIST
                                                         currentPlyModel = null
                                                     }
                                                 }

@@ -399,22 +399,20 @@ APP CONTEXT (keep the script's narrative aligned with the real app):
 - **COLMAP path**: User can import `cameras.bin`, `images.bin`, `points3D.bin` (SAF). Viewer prefers **points3D**; cameras/images may be skipped if parsing fails.
 - **Photo-only path**: Many gallery images drive an on-device heuristic / depth-style pipeline when COLMAP is absent.
 - **Rendering**: GLES point-sprite splat viewer on the phone — not desktop CUDA training.
-- User goal is **materials that insurance companies or police can use as *templates*** (not legal advice): structured **tables**, **evidence mapping**, and a **measured, cautious conclusion** section with explicit limitations.
+- User goal is **materials that insurance companies or police can use as *templates*** (not legal advice): structured **text paragraphs**, evidence mapping, and a **measured, cautious conclusion** section with explicit limitations.
 - **The in-app PDF renderer (no Python on device)** extracts, **in source order**, string literals from these python-docx compatible patterns:
   - `add_heading("…", level=…)`
   - `add_paragraph("…")`
   - `add_run("…")`
-  - `식별자.cell(row, col).text = "…"` (**row/col must be integer literals**, same identifier as `add_table` result)
-  - other `…text = "…"` assignments (e.g. `row.cells[i].text`) when not part of `.cell(r,c).text`
   - `doc.add_page_break()` for page breaks
-  **Every heading, paragraph, table cell text, and page break MUST use exactly these patterns.** Scripts using `reportlab` API (`Paragraph()`, `story.append`, `TableStyle`) or other libraries will produce **empty PDF output** because the app cannot parse those patterns.
-- The extracted content is **rendered as a native PDF** (not Word) — with crisp table grid-lines, header-row highlighting (blue background), alternating row backgrounds (light blue), multi-line cell text wrapping, automatic page numbering, and professional colour themes.
+  **Every heading, paragraph, and page break MUST use exactly these patterns.** Do NOT use `doc.add_table()` or table cell patterns — the app's PDF renderer cannot render tables correctly. Use `add_paragraph()` with clear text structure (colons, dashes, line breaks) instead. Scripts using `reportlab` API (`Paragraph()`, `story.append`, `TableStyle`) or other libraries will produce **empty PDF output** because the app cannot parse those patterns.
+- The extracted content is **rendered as a native PDF** (not Word) — with crisp text layout, automatic page numbering, and professional colour themes.
 - **Do not** break Korean sentences across lines **inside** one string literal (no arbitrary `\\n` in the middle of a sentence). Use **one long string** per `add_paragraph`, or call `add_paragraph` **multiple times** for separate paragraphs. The renderer collapses single `\\n` inside a literal to a space so lines are not chopped mid-sentence.
 
 GUI REPORT READABILITY (LLM should configure these for best visual quality):
-- The PDF renderer supports heading sizes (22/18/16/14pt for levels 1-4), body text (11pt), table text (9pt), and chart labels (8pt).
-- CORE COLOR SCHEME: Primary colour #1B4F8A (navy blue), text #1A1A1A (dark), table header background #E8F0FE (light blue), alternating row background #F5F8FC (pale blue), grid lines #CCCCCC (grey). Charts use palette: #1B4F8A, #2E7D32, #C62828, #EF6C00, #6A1B9A, #00838F, #4527A0, #AD1457.
-- Tables are the PRIMARY visualization tool. Use them for ALL structured data. The PDF renderer draws professional grid-lined tables with header highlighting and alternating row colours automatically.
+- The PDF renderer supports heading sizes (22/18/16/14pt for levels 1-4), body text (11pt).
+- CORE COLOR SCHEME: Primary colour #1B4F8A (navy blue), text #1A1A1A (dark).
+- Use `add_paragraph()` with structured text for ALL content. Use bullet points (• or -), colons, and indentation patterns to organize information clearly within paragraphs. Do NOT use tables — they render incorrectly in the mobile PDF viewer.
 - Use `doc.add_page_break()` strategically: after the cover page, after the table of contents, and between each major body section. This ensures each section starts on a fresh page for maximum readability.
 
 PRIMARY OUTPUT (mandatory):
@@ -435,58 +433,52 @@ REQUIRED REPORT STRUCTURE (3-page system: cover / TOC / body):
 
 **제2페이지 — 목차 (Table of Contents, must be a standalone page):**
 - `add_heading("목차", level=1)`.
-- Use a compact table for TOC entries (2 columns: section number/title, page number). Example:
-  ```
-  table = doc.add_table(rows=8, cols=2)
-  table.cell(0, 0).text = "구분"
-  table.cell(0, 1).text = "페이지"
-  table.cell(1, 0).text = "1. 표지"
-  table.cell(1, 1).text = "1"
-  table.cell(2, 0).text = "2. 목차"
-  table.cell(2, 1).text = "2"
-  table.cell(3, 0).text = "3. 사고 현장 개요"
-  table.cell(3, 1).text = "3"
-  ...
-  ```
+- Use `add_paragraph()` for each TOC entry, e.g.:
+  `add_paragraph("1. 표지 — 1페이지")`
+  `add_paragraph("2. 목차 — 2페이지")`
+  `add_paragraph("3. 사고 현장 개요 — 3페이지")`
+  `add_paragraph("4. 사고 발생 형태 분석 — 4페이지")`
+  `add_paragraph("5. 사고 발생 원인 추론 — 5페이지")`
+  `add_paragraph("6. 차량별 파손 부위 및 수리 견적 — 6페이지")`
+  `add_paragraph("7. 종합 수리 견적 요약 — 7페이지")`
+  `add_paragraph("8. 법적 면책 정보 — 8페이지")`
 - Then `doc.add_page_break()`.
 
 **제3페이지 이후 — 본문 (Body, each major section starts on a fresh page):**
-Use `add_heading` for titles, `add_paragraph` for narrative text ONLY when no structured data is presented. For ALL structured data you **MUST** use `doc.add_table(rows=n, cols=m)` + `table.cell(r,c).text = "…"` with inline headings between tables:
+Use `add_heading` for titles, `add_paragraph` for narrative text. For structured data, use well-formatted text paragraphs with clear labels, colons, and newlines — do NOT use `doc.add_table()` as tables render incorrectly.
 
   **3) 사고 현장 개요 (Accident Scene Overview):**
   - `add_heading("사고 현장 개요", level=1)`.
   - Accident timestamp: `add_paragraph("보고서 작성 시각: YYYY년 MM월 DD일 HH시 MM분")`.
-  - Scene description table (5-7 rows, 2 cols): 항목(발생 일시 추정, 장소 유형, 날씨/조명 상태, 도로 상태, 촬영 매수), 내용.
-  - If images show vehicles: table summarizing each vehicle (차량 번호/식별자, 차종 유추, 색상, 위치, 상태 개요).
+  - Scene description in structured paragraphs:
+    `add_paragraph("발생 일시 추정: ... | 장소 유형: ... | 날씨/조명 상태: ... | 도로 상태: ... | 촬영 매수: ...장")`
+  - If images show vehicles: `add_paragraph("차량 식별자: 차량 A | 차종 유추: ... | 색상: ... | 위치: ... | 상태 개요: ...")`
   - `doc.add_page_break()`.
 
   **4) 사고 발생 형태 분석 (Accident Type Analysis):**
   - `add_heading("사고 발생 형태 분석", level=1)`.
   - Based on vehicle positions, damage patterns, and scene layout: describe the accident type (추돌/접촉/전복/단독/다중 충돌 등).
-  - Table (3+ rows, 2 cols): 분석 항목, 관찰 내용 — (충돌 유형, 충돌 방향, 접촉 지점, 2차 충돌 여부).
+  - Structured paragraph: `add_paragraph("분석 항목: 충돌 유형 | 관찰 내용: ...")` for each item.
   - `doc.add_page_break()`.
 
   **5) 사고 발생 원인 추론 (Accident Cause Inference):**
   - `add_heading("사고 발생 원인 추론", level=1)`.
-  - Table (4+ rows, 3 cols): 추론 항목, 관찰 근거, 신뢰도 — (1차 원인 가설, 기여 요인, 인적 요인 가능성, 환경적 요인).
+  - Structured paragraphs: `add_paragraph("추론 항목: 1차 원인 가설 | 관찰 근거: ... | 신뢰도: ...")`.
   - `add_paragraph("※ 상기 원인 추론은 첨부된 이미지와 데이터에 기반한 가설적 분석이며, 실제 사고 원인은 공식 조사 기관의 감정 결과에 따릅니다.")`.
-  - Use a bar or pie chart (차트:bar or 차트:pie) to visualize contributing factor distribution if data supports it.
   - `doc.add_page_break()`.
 
   **6) 차량별 파손 부위 및 수리 견적 (Vehicle Damage & Repair Estimate):**
   - `add_heading("차량별 파손 부위 및 수리 견적", level=1)`.
   - For EACH identified vehicle, create a heading like `add_heading("차량 A 파손 분석", level=2)`.
-  - Damage table (at least 5-8 rows, 6 cols): 파손 부위, 파손 유형(찌그러짐/긁힘/파열/이탈), 파손 깊이 추정(cm 또는 상대 등급), 파손 면적 추정, 예상 수리 방법, 예상 수리 비용(만원 범위).
-  - The table MUST use these 6 column headers exactly: `["파손 부위", "파손 유형", "파손 깊이(추정)", "파손 면적(추정)", "수리 방법", "예상 비용(만원)"]`.
-  - After each vehicle's damage table, add a pie chart (차트:pie:차량A 파손 부위별 비용 분포) showing the cost distribution.
+  - For each damage point, use a structured paragraph:
+    `add_paragraph("파손 부위: ... | 파손 유형: ... | 파손 깊이(추정): ... | 파손 면적(추정): ... | 수리 방법: ... | 예상 비용(만원): ...")`
   - `add_paragraph("※ 수리 견적은 시중 공임 기준 참고치이며, 실제 수리 비용은 정비소 실측 견적에 따릅니다.")`.
   - `doc.add_page_break()`.
 
   **7) 종합 수리 견적 요약 (Repair Estimate Summary):**
   - `add_heading("종합 수리 견적 요약", level=1)`.
-  - Summary table (3+ rows, 4 cols): 차량 구분, 파손 부위 수, 총 예상 수리 비용(만원), 예상 수리 기간(일).
+  - Structured paragraph: `add_paragraph("차량 구분: ... | 파손 부위 수: ... | 총 예상 수리 비용(만원): ... | 예상 수리 기간(일): ...")`.
   - `add_paragraph("※ 상기 견적은 이미지 기반 시각 추정이며, 실측 및 3D 스캔 기반이 아닙니다. 보험사 확정 금액이 아니며, 시장 일반 공임 수준을 참고한 추정치입니다.")`.
-  - Bar chart (차트:bar:차량별 수리 비용 비교) for comparing costs across vehicles.
   - `doc.add_page_break()`.
 
   **8) 법적 면책 정보 (Legal Disclaimer):**
@@ -499,18 +491,20 @@ Use `add_heading` for titles, `add_paragraph` for narrative text ONLY when no st
   - `add_paragraph("보고서 생성 시각: YYYY년 MM월 DD일 HH시 MM분 (KST)")` (use the actual current time).
   - `add_paragraph("분석 대상 이미지 매수: N장")` (state the actual image count).
 
-CHART & GRAPH SUPPORT (use liberally — at least 2-4 charts per report):
-- **Charts are defined as special tables** whose first cell starts with a chart marker. The app detects these and renders them as native bar/pie/line charts in the PDF.
-- **Bar chart**: first cell = `차트:bar:차트제목`.
-- **Pie chart**: first cell = `차트:pie:차트제목`.
-- **Line chart**: first cell = `차트:line:차트제목`.
-- Charts render with coloured bars/slices, axis labels, legends, and grid-lines automatically. Place charts right after the data table they visualize.
-- Use charts for damage severity distribution, repair cost breakdown, vehicle comparison, and contributing factor visualization.
+ILLUSTRATIVE IMAGES (보고서에 그림이 필요할 때 — 생성 후 본문에 삽입):
+- 도식·비교도·사고 개요 스케치 등이 필요하면 스크립트에서 **먼저** matplotlib 또는 PIL로 **PNG 파일을 생성**하고, `document.add_picture(파일경로, width=Inches(...))`로 삽입한 뒤, **바로 이어서** `add_paragraph()`로 해당 그림을 해석하는 **한국어 분석 문단**을 작성합니다.
+- 기기 앱의 PDF 변환기는 **`add_picture` 비트맵을 넣지 않고** `add_heading` / `add_paragraph` / `add_run` 문자열만 추출합니다. 따라서 그림이 있으면 **반드시** 인접 문단에 그림의 요지·분석 결론을 **텍스트로도** 남깁니다.
+- PC에서 스크립트를 실행하면 Word(.docx)에 PNG가 포함됩니다.
+- 앱 전용 가짜 차트 태그(`차트:bar` 등)는 사용하지 마세요. matplotlib로 만든 PNG + `add_picture`는 허용됩니다.
+
+CHART & GRAPH: Do NOT use charts. They render incorrectly in the mobile PDF viewer. Present all data as structured text paragraphs only.
 
 STRICTLY FORBIDDEN:
 - No second code block. No OpenSCAD or STL. No claiming you ran COLMAP, police systems, or insurance IT systems.
 - No definitive liability / criminal / final claim wording; use 관찰·추정·권고·한계 terminology.
 - **DO NOT** use `reportlab`, `fpdf`, `weasyprint`, or any PDF library. The script must use **`python-docx`** API patterns only.
+- **DO NOT** use `doc.add_table()` or table cell patterns — the in-app PDF renderer displays tables incorrectly.
+- **DO NOT** use chart markers (`차트:bar`, `차트:pie`, `차트:line`).
 - Do NOT generate lengthy narrative descriptions of individual images. The report is about the ACCIDENT SCENE analysis, not image-by-image description.
 
 OUTSIDE THE ```python``` BLOCK:
@@ -527,7 +521,7 @@ LLM RUNTIME:
 - There is **NO LIMIT** on the number of attached images; analyze ALL provided images to produce a comprehensive report.
 
 ROLE:
-- From **attached photos** (and optional user text), produce a **detailed, structured** script using **`python-docx`** compatible patterns **focused on vehicle damage analysis** — identify every damaged part, assess damage scale per part (type, severity, depth, area), recommend repair methods, and estimate repair costs (labor + parts). Model identification and cause inference are secondary supporting analysis only. On PC the script generates a `.docx`; on Android the app extracts string literals and renders them as a **native PDF** with professional table/chart layout.
+- From **attached photos** (and optional user text), produce a **detailed, structured** script using **`python-docx`** compatible patterns **focused on vehicle damage analysis** — identify every damaged part, assess damage scale per part (type, severity, depth, area), recommend repair methods, and estimate repair costs (labor + parts). Model identification and cause inference are secondary supporting analysis only. On PC the script generates a `.docx`; on Android the app extracts string literals and renders them as a **native PDF** with professional text layout.
 - Combine **what is clearly visible** with clearly labeled **estimates / hypotheses / ranges**. Never present estimates as **certified measurements** or **final claim amounts**.
 
 DAMAGE ANALYSIS METHODOLOGY (CRITICAL — apply rigorously):
@@ -541,15 +535,15 @@ CRITICAL — ANDROID PDF EXTRACTION (no Python on device):
   - `add_heading("…", level=…)`
   - `add_paragraph("…")`
   - `add_run("…")`
-  - `식별자.cell(INT, INT).text = "…"` (from `add_table` result variable)
   - `doc.add_page_break()`
 - **Every piece of content MUST use EXACTLY these patterns.** Do NOT use `reportlab`, `fpdf`, `weasyprint`, or any other PDF library APIs. Using non-compatible APIs will produce empty output.
-- The extracted content is rendered as a native PDF with grid-lined tables, header highlighting (blue background), alternating rows (light blue), multi-line text, and charts.
+- **Do NOT** use `doc.add_table()` or table cell patterns (`table.cell(r,c).text`) — the in-app PDF renderer displays tables incorrectly. Use `add_paragraph()` with well-structured text instead.
+- The extracted content is rendered as a native PDF with professional text layout.
 
 GUI REPORT READABILITY (LLM should configure these for best visual quality):
-- The PDF renderer supports heading sizes (22/18/16/14pt), body text (11pt), table text (9pt), chart labels (8pt).
-- CORE COLOR SCHEME: Primary #1B4F8A (navy blue), text #1A1A1A (dark), table header bg #E8F0FE (light blue), alt row bg #F5F8FC (pale blue), grid #CCCCCC (grey). Charts palette: #1B4F8A, #2E7D32, #C62828, #EF6C00, #6A1B9A, #00838F, #4527A0, #AD1457.
-- Tables are the PRIMARY visualization tool. The PDF renderer draws professional grid-lined tables with header highlighting and alternating row colours automatically.
+- The PDF renderer supports heading sizes (22/18/16/14pt), body text (11pt).
+- CORE COLOR SCHEME: Primary #1B4F8A (navy blue), text #1A1A1A (dark).
+- Use `add_paragraph()` with structured text for ALL content. Use bullet points (• or -), colons, and indentation patterns to organize information clearly within paragraphs.
 - Use `doc.add_page_break()` strategically: after cover, after TOC, and between each major body section.
 
 PRIMARY OUTPUT (mandatory):
@@ -570,39 +564,40 @@ REQUIRED REPORT STRUCTURE (3-page system: cover / TOC / body):
 
 **제2페이지 — 목차 (Table of Contents, standalone):**
 - `add_heading("목차", level=1)`.
-- TOC table (2 cols: 구분, 페이지) with rows for each section.
+- TOC entries as paragraphs: `add_paragraph("1. 표지 — 1페이지")`, `add_paragraph("2. 목차 — 2페이지")`, etc.
 - Then `doc.add_page_break()`.
 
 **제3페이지 이후 — 본문 (Body sections on fresh pages):**
 
-  1) **차량 모델 정보** — `add_heading("차량 모델 정보", level=1)`. Table (4+ rows, 2 cols): 브랜드/제조사, 차급 유추, 모델/세대 유추, 연식 추정, 차량 색상, 번호판 가시 여부. `add_paragraph`로 관찰 근거와 불확실성 명시. Keep this section concise — it is supporting context, not the primary analysis. `doc.add_page_break()`.
+  1) **차량 모델 정보** — `add_heading("차량 모델 정보", level=1)`. Structured paragraph: `add_paragraph("브랜드/제조사: ... | 차급 유추: ... | 모델/세대 유추: ... | 연식 추정: ... | 차량 색상: ... | 번호판 가시 여부: ...")`. Use `add_paragraph`로 관찰 근거와 불확실성 명시. Keep this section concise. `doc.add_page_break()`.
 
-  2) **사고 발생 형태 분석** — `add_heading("사고 발생 형태 분석", level=1)`. Based on damage patterns across the vehicle: table (4+ rows, 2 cols) describing 충돌 유형(정면/측면/후방/다중), 충돌 방향, 접촉 지점, 2차 피해 여부. Use a pie chart (차트:pie:충돌 유형 분포). `doc.add_page_break()`.
+  2) **사고 발생 형태 분석** — `add_heading("사고 발생 형태 분석", level=1)`. Based on damage patterns: structured paragraph `add_paragraph("충돌 유형: ... | 충돌 방향: ... | 접촉 지점: ... | 2차 피해 여부: ...")`. `doc.add_page_break()`.
 
-  3) **파손 부위 정리 표** — `add_heading("파손 부위 정리 표", level=1)`. This is a **CORE** analysis section — the most important table in the report. Table (minimum 6-12 rows covering every visible damage point individually, 6 cols with headers: `["파손 부위", "파손 유형", "심각도", "파손 깊이(추정)", "파손 면적(추정)", "비고"]`). Each row = one distinct damage location. If 6+ damage points are visible, document ALL of them. Damage types: 찌그러짐/긁힘/파열/이탈/유리파손/램프파손. Severity: 경미/중간/심각/심대. Depth estimates as cm ranges (e.g. "1~3cm", "5~10cm"). Area estimates as descriptive dimensions (e.g. "가로 30cm×세로 50cm", "범퍼 전면의 약 1/3"). Use a bar chart (차트:bar:부위별 파손 심각도) and a pie chart (차트:pie:파손 유형 분포). `doc.add_page_break()`.
+  3) **파손 부위 정리** — `add_heading("파손 부위 정리", level=1)`. This is a **CORE** analysis section. For each distinct damage location, use a structured paragraph: `add_paragraph("파손 부위: ... | 파손 유형: ... | 심각도: ... | 파손 깊이(추정): ... | 파손 면적(추정): ... | 비고: ...")`. Cover every visible damage point. Damage types: 찌그러짐/긁힘/파열/이탈/유리파손/램프파손. Severity: 경미/중간/심각/심대. Depth: cm ranges. Area: descriptive dimensions. `doc.add_page_break()`.
 
-  4) **파손 깊이 상세 분석 표** — `add_heading("파손 깊이 상세 분석", level=1)`. Table (4+ rows, 5 cols: `["파손 부위", "추정 깊이(cm)", "변형 형태", "주변 부품 영향", "측정 방법 한계"]`). Describe deformation geometry (국부적 함몰/광범위 주름/패널 단차). `add_paragraph("※ 모든 깊이 수치는 사진 기반 시각 추정이며, 실측 및 3D 스캔 측정이 아닙니다. 실제 수리 시 정비소에서 정밀 측정이 필요합니다.")`. Use a bar chart (차트:bar:부위별 파손 깊이 비교). `doc.add_page_break()`.
+  4) **파손 깊이 상세 분석** — `add_heading("파손 깊이 상세 분석", level=1)`. Structured paragraphs: `add_paragraph("파손 부위: ... | 추정 깊이(cm): ... | 변형 형태: ... | 주변 부품 영향: ... | 측정 방법 한계: ...")`. Describe deformation geometry (국부적 함몰/광범위 주름/패널 단차). `add_paragraph("※ 모든 깊이 수치는 사진 기반 시각 추정이며, 실측 및 3D 스캔 측정이 아닙니다. 실제 수리 시 정비소에서 정밀 측정이 필요합니다.")`. `doc.add_page_break()`.
 
-  5) **수리 예상 견적 표** — `add_heading("수리 예상 견적", level=1)`. This is a **CORE** analysis section. Table (6+ rows covering each damaged part, 6 cols: `["파손 부위", "수리 방법", "예상 공임(만원)", "예상 부품비(만원)", "총 예상 비용(만원)", "예상 기간(영업일)"]`). Repair methods: 판금·도색/부품교환/덴트복원/램프교환/유리교환/범퍼교환. Cost ranges in 10만원 increments with realistic market pricing. Add a totals row. `add_paragraph("※ 상기 견적은 시중 공임 및 부품 가격 기준 참고치이며, 실제 수리 비용은 정비소 실측 견적에 따릅니다. 보험사 확정 금액이 아닙니다.")`. Pie chart (차트:pie:부위별 수리 비용 분포), bar chart (차트:bar:부위별 수리 비용 비교), and line chart (차트:line:수리 비용 누적). `doc.add_page_break()`.
+  5) **수리 예상 견적** — `add_heading("수리 예상 견적", level=1)`. This is a **CORE** analysis section. For each damaged part: `add_paragraph("파손 부위: ... | 수리 방법: ... | 예상 공임(만원): ... | 예상 부품비(만원): ... | 총 예상 비용(만원): ... | 예상 기간(영업일): ...")`. Repair methods: 판금·도색/부품교환/덴트복원/램프교환/유리교환/범퍼교환. Cost ranges in 10만원 increments with realistic market pricing. Include a totals paragraph. `add_paragraph("※ 상기 견적은 시중 공임 및 부품 가격 기준 참고치이며, 실제 수리 비용은 정비소 실측 견적에 따릅니다. 보험사 확정 금액이 아닙니다.")`. `doc.add_page_break()`.
 
-  6) **사고 원인 추론** — `add_heading("사고 발생 원인 추론", level=1)`. Table (4+ rows, 3 cols: 추론 항목, 관찰 근거, 신뢰도). 1차 원인 가설, 기여 요인, 인적 요인, 환경적 요인. Keep this section concise. `add_paragraph("※ 상기 원인 추론은 차량 파손 패턴에 기반한 가설적 분석이며, 실제 사고 원인은 공식 조사 기관의 감정 결과에 따릅니다.")`. `doc.add_page_break()`.
+  6) **사고 발생 원인 추론** — `add_heading("사고 발생 원인 추론", level=1)`. Structured paragraphs: `add_paragraph("추론 항목: ... | 관찰 근거: ... | 신뢰도: ...")`. 1차 원인 가설, 기여 요인, 인적 요인, 환경적 요인. `add_paragraph("※ 상기 원인 추론은 차량 파손 패턴에 기반한 가설적 분석이며, 실제 사고 원인은 공식 조사 기관의 감정 결과에 따릅니다.")`. `doc.add_page_break()`.
 
   7) **법적 면책 정보** — `add_heading("법적 면책 정보", level=1)`. This section MUST be on its own page. `add_paragraph("본 보고서는 AI(인공지능)가 첨부된 차량 사진을 분석하여 자동 생성한 기술적 분석 템플릿입니다.")`. `add_paragraph("본 보고서의 모든 분석 내용(차량 모델 유추, 파손 평가, 수리 견적, 사고 원인 추론 등)은 AI의 시각적 관찰과 추정에 기반한 참고 자료일 뿐, 법적 효력이 없습니다.")`. `add_paragraph("본 보고서는 법원 제출용 공식 증거, 보험사 보상 금액의 확정적 근거, 형사/민사 책임 판단 근거, 차량 수리 비용의 최종 견적으로 사용될 수 없습니다.")`. `add_paragraph("실제 사고 처리, 보험 청구, 법적 분쟁 해결을 위해서는 반드시 공인된 사고 조사 기관, 정비 전문가, 법률 전문가의 공식 감정 및 자문을 받으시기 바랍니다.")`. `add_paragraph("보고서 생성 시각: YYYY년 MM월 DD일 HH시 MM분 (KST)")`. `add_paragraph("분석 대상 이미지 매수: N장")`.
 
-CHART & GRAPH SUPPORT (use liberally — at least 4-6 charts per report):
-- **Charts are defined as special tables** whose first cell starts with a chart marker.
-- **Bar chart**: `table.cell(0,0).text = "차트:bar:부위별 수리 비용 비교"`. Use for depth comparison, cost comparison, severity distribution.
-- **Pie chart**: `table.cell(0,0).text = "차트:pie:심각도 분포"`. Use for damage type distribution, cost proportion by part.
-- **Line chart**: `table.cell(0,0).text = "차트:line:견적 추이"`. Use for cumulative cost trends.
-- Place charts right after the data table they visualize. Charts render with coloured bars/slices, axis labels, and legends automatically.
-- Spread charts across sections 2-6; do not cluster all charts in one section. Each major analysis section (damage summary, depth analysis, cost estimate) must include at least 1 chart.
+ILLUSTRATIVE IMAGES (보고서에 그림이 필요할 때):
+- 파손 부위 도식, 수리 구역 비교, 충돌 방향 개요 등 **삽화가 필요하면** 스크립트에서 matplotlib/PIL로 **PNG를 먼저 생성**하고 `document.add_picture(경로, width=Inches(...))`로 넣은 다음, **연속으로** `add_paragraph`에 그림에 대한 **분석·해석**을 한국어로 작성합니다.
+- 모바일 앱 PDF는 `add_picture` 이미지를 렌더링하지 않으므로, **그림 내용과 결론은 반드시 인접 `add_paragraph`에 텍스트로 병기**합니다.
+- PC에서 스크립트 실행 시 .docx에 그림이 포함됩니다. 가짜 차트 태그(`차트:bar` 등)는 금지.
+
+CHART & GRAPH: Do NOT use charts. They render incorrectly in the mobile PDF viewer. Present all data as structured text paragraphs only.
 
 STRICTLY FORBIDDEN:
 - **ABSOLUTELY NO image-by-image commentary.** Do NOT enumerate photos, describe "이미지 1", "사진 2", "첨부된 첫 번째 사진", or any per-image narrative. Synthesize ALL images into a single vehicle damage profile.
 - No second code block. No OpenSCAD/STL. No `reportlab`, `fpdf`, `weasyprint`, or any PDF library.
+- **DO NOT** use `doc.add_table()` or table cell patterns.
+- **DO NOT** use chart markers (`차트:bar`, `차트:pie`, `차트:line`).
 - No claim that you **measured** deformation in mm in the field, **certified** OEM procedures, or **guaranteed** repair cost for a specific insurer.
 - No definitive 형사·민사 책임 or 보험금 지급 확정 표현.
-- Do NOT generate lengthy narrative descriptions or commentary. Prefer structured data (tables, charts) with brief supporting paragraphs.
+- Do NOT generate lengthy narrative descriptions or commentary. Prefer structured text with brief supporting paragraphs.
 
 OUTSIDE THE ```python``` BLOCK:
 - **At most two short Korean sentences** (e.g. `pip install python-docx` and how to run). No other Markdown.

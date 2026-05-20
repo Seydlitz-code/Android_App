@@ -92,6 +92,7 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -147,7 +148,6 @@ import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.Settings
@@ -588,19 +588,6 @@ fun CameraApp(modifier: Modifier = Modifier) {
 
     val rootPalette = LocalAppUiPalette.current
 
-    // 카메라 허브 픽토그램: 밝은/어두운 테마용 잉크를 모두 미리 빌드해 전환·진입 시 딜레이 완화
-    LaunchedEffect(Unit) {
-        val appCtx = context.applicationContext
-        coroutineScope {
-            launch(Dispatchers.Default) {
-                CameraEntryPictogramCache.warmup(appCtx, Color.White)
-            }
-            launch(Dispatchers.Default) {
-                CameraEntryPictogramCache.warmup(appCtx, Color.Black)
-            }
-        }
-    }
-
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -825,7 +812,9 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                     server3dgsLlmAutoHandledTaskIds =
                                         server3dgsLlmAutoHandledTaskIds + bundle.taskId
                                     val payload = buildPoliceInsurance3dgsPayload(
-                                        context, bundle,
+                                        context,
+                                        bundle,
+                                        galleryImageUris = loadCapturedAndDatasetImageUrisForReportSync(context),
                                     )
                                     val jobPayload = Pending3dgsServerAutoSend(
                                         nonce = System.nanoTime(),
@@ -1044,6 +1033,7 @@ fun MediaDetailScreen(
     onGalleryUpdated: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val palette = LocalAppUiPalette.current
     val scope = rememberCoroutineScope()
     // 내부 변경 가능한 리스트 (삭제 시 즉시 반영)
     val mutableMediaList = remember(mediaList) { mediaList.toMutableStateList() }
@@ -1296,7 +1286,11 @@ fun MediaDetailScreen(
                                     .clip(RoundedCornerShape(6.dp))
                                     .border(
                                         width = if (isCurrent) 2.dp else 0.dp,
-                                        color = if (isCurrent) Color(0xFF9CD83B) else Color.Transparent,
+                                        color = if (isCurrent) {
+                                            if (palette.isDark) Color.White else Color.Black
+                                        } else {
+                                            Color.Transparent
+                                        },
                                         shape = RoundedCornerShape(6.dp)
                                     )
                                     .clickable(
@@ -1392,33 +1386,6 @@ fun MediaDetailScreen(
                 }
                 // 구분선
                 Box(modifier = Modifier.width(0.5.dp).height(28.dp).background(Color(0xFF444444)))
-                // 프레임 분할 (동영상 전용)
-                if (isVideo) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null
-                            ) { currentMediaUri?.let { launchFrameSplit(it) } },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(
-                                imageVector = Icons.Default.Videocam,
-                                contentDescription = "프레임 분할",
-                                tint = Color.White,
-                                modifier = Modifier.size(24.dp)
-                            )
-                            Text(
-                                "분할",
-                                color = Color.White,
-                                fontSize = 10.sp
-                            )
-                        }
-                    }
-                    Box(modifier = Modifier.width(0.5.dp).height(28.dp).background(Color(0xFF444444)))
-                }
                 // 이미지 삭제 (휴지통 아이콘)
                 Box(
                     modifier = Modifier
@@ -1436,6 +1403,31 @@ fun MediaDetailScreen(
                         modifier = Modifier.size(26.dp)
                     )
                 }
+            }
+        }
+
+        // 동영상: 프레임 분할 — 우측 상단 텍스트만 (하단 편집 바에서는 제외)
+        if (isVideo && currentMediaUri != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(top = 8.dp, end = 12.dp)
+            ) {
+                Text(
+                    text = "분할",
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color.White.copy(alpha = 0.22f))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { launchFrameSplit(currentMediaUri!!) }
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                )
             }
         }
 
@@ -1470,7 +1462,8 @@ fun MediaDetailScreen(
 
     // 프레임 분할 진행도 다이얼로그
     if (showFrameSplitDialog) {
-        val palette = LocalAppUiPalette.current
+        val splitBarColor = if (palette.isDark) Color.White else Color.Black
+        val splitTrackColor = palette.onBackground.copy(alpha = 0.14f)
         AlertDialog(
             onDismissRequest = {
                 if (frameSplitResultMsg != null) showFrameSplitDialog = false
@@ -1481,11 +1474,14 @@ fun MediaDetailScreen(
                     LinearProgressIndicator(
                         progress = { frameSplitProgress },
                         modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                        color = splitBarColor,
+                        trackColor = splitTrackColor,
                     )
                     Spacer(Modifier.height(12.dp))
                     Text(
                         "${(frameSplitProgress * 100).toInt()}%",
                         fontSize = 16.sp, fontWeight = FontWeight.Bold,
+                        color = splitBarColor,
                         modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                     )
                     Spacer(Modifier.height(4.dp))
@@ -3834,7 +3830,6 @@ internal fun loadModel3dLibrary(
 ) {
     ModelLibraryPaths.migrateFlatModelsIfNeeded(context)
     val plyD = ModelLibraryPaths.plyDir(context)
-    val objD = ModelLibraryPaths.objDir(context)
     val plyList = collectPlyFilesForLibrary(plyD).map { f ->
         PlyModel(
             name = displayNameForPlyLibraryEntry(f, plyD),
@@ -3842,17 +3837,7 @@ internal fun loadModel3dLibrary(
             lastModified = f.lastModified()
         )
     }
-    val objList = (objD.listFiles { f -> f.isFile && f.name.endsWith(".obj", ignoreCase = true) }
-        ?: emptyArray())
-        .map { f ->
-            PlyModel(
-                name = f.nameWithoutExtension,
-                file = f,
-                lastModified = f.lastModified()
-            )
-        }
-        .sortedByDescending { it.lastModified }
-    onLoaded(Model3dSplitLibrary(plyList, objList))
+    onLoaded(Model3dSplitLibrary(plyList, emptyList()))
 }
 
 /**
@@ -3990,6 +3975,56 @@ internal fun loadCapturedImageUrisOnlySync(context: Context): List<Uri> {
         path.endsWith(".jpg") || path.endsWith(".jpeg") || path.endsWith(".png") ||
             path.endsWith(".webp") || path.endsWith(".heic") || path.endsWith(".heif")
     }
+}
+
+/** 서버 3DGS·보고서 LLM으로 보낼 이미지 개수 상한 (비전 API 부담·요청 크기 완화) */
+internal const val MAX_SCENE_IMAGES_FOR_3DGS_PAYLOAD = 48
+
+private fun isLocalReportImageFile(file: File): Boolean {
+    if (!file.isFile) return false
+    return when (file.extension.lowercase(Locale.ROOT)) {
+        "jpg", "jpeg", "png", "webp", "heic", "heif" -> true
+        else -> false
+    }
+}
+
+/**
+ * 3DGS 분석 보고서 첨부용 이미지 URI: **메인 갤러리** + **`datasets/` 하위** 사고·촬영 폴더.
+ *
+ * [loadCapturedMediaSync]는 의도적으로 `datasets/`를 스캔에서 빼므로, 그대로만 쓰면 데이터셋에만 있는
+ * 사고 현장 사진이 LLM 시각 입력에서 빠집니다. 서버에서 내려준 topview/sideview 등은
+ * [buildPoliceInsurance3dgsPayload]에서 별도로 붙습니다.
+ */
+internal fun loadCapturedAndDatasetImageUrisForReportSync(
+    context: Context,
+    maxCount: Int = MAX_SCENE_IMAGES_FOR_3DGS_PAYLOAD,
+): List<Uri> {
+    val capped = maxCount.coerceIn(8, 96)
+    val entries = mutableListOf<Pair<Uri, Long>>()
+    for (uri in loadCapturedMediaSync(context)) {
+        val path = uri.path ?: continue
+        val f = File(path)
+        if (!isLocalReportImageFile(f)) continue
+        entries.add(uri to mediaSortTimeMillis(f))
+    }
+    val mediaDir = context.getExternalFilesDir(null)
+    if (mediaDir != null) {
+        val dsRoot = File(mediaDir, "datasets")
+        if (dsRoot.isDirectory) {
+            dsRoot.walkTopDown()
+                .filter { isLocalReportImageFile(it) }
+                .forEach { file ->
+                    entries.add(Uri.fromFile(file) to mediaSortTimeMillis(file))
+                }
+        }
+    }
+    return entries
+        .distinctBy { p ->
+            runCatching { File(p.first.path!!).canonicalPath }.getOrDefault(p.first.toString())
+        }
+        .sortedByDescending { it.second }
+        .take(capped)
+        .map { it.first }
 }
 
 internal fun resolveDisplayName(context: Context, uri: Uri): String? {
@@ -4243,20 +4278,11 @@ internal suspend fun uploadZipAndRunPipeline(
         val starter = startPipelineCallbackServer(pushChannel)
         pushServer = starter?.first
         val cbPort = starter?.second
-        val callbackUrl = if (!lanIp.isNullOrBlank() && cbPort != null) {
-            "http://$lanIp:$cbPort/pipeline/callback"
-        } else {
-            null
-        }
+        val callbackUrl = resolvePipelineCallbackUrlForUpload(appCtx, lanIp, cbPort)
 
         // 2) 업로드 -> task_id 확보
         emitProgress(
-            5,
-            if (callbackUrl != null && cbPort != null && lanIp != null) {
-                "파일 업로드 중… (${formatPipelineCallbackHint(lanIp, cbPort)})"
-            } else {
-                "파일 업로드 중… (콜백 없음 — 동일 Wi-Fi IPv4·포트 확보 시 자동 사용)"
-            },
+            5, "파일 업로드 중…",
         )
         val noResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
         val startResult = startServerTaskWithZip(
@@ -5265,7 +5291,7 @@ fun ServerSettingsScreen(
             value = serverAddress,
             onValueChange = { serverAddress = it },
             label = { Text("서버 주소 (IP 또는 도메인)", color = palette.onBackground) },
-            placeholder = { Text("예: 192.168.0.88 또는 example.com", color = Color.LightGray) },
+            placeholder = { Text("예: fifth-theatrics-bulldog.ngrok-free.dev", color = Color.LightGray) },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             colors = fieldColors
@@ -5281,7 +5307,7 @@ fun ServerSettingsScreen(
                 }
             },
             label = { Text("포트 번호", color = palette.onBackground) },
-            placeholder = { Text("예: 8000", color = Color.LightGray) },
+            placeholder = { Text("예: 443", color = Color.LightGray) },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             colors = fieldColors
@@ -5337,9 +5363,8 @@ fun ServerSettingsScreen(
         Spacer(modifier = Modifier.height(8.dp))
 
         val portValue = serverPort.toIntOrNull() ?: DEFAULT_SERVER_PORT
-        val protocol = if (useHttps) "https" else "http"
         val previewUrl = if (serverAddress.isNotBlank() && serverPort.isNotBlank()) {
-            "$protocol://$serverAddress:$portValue$UPLOAD_ENDPOINT"
+            buildServerOriginFromParts(serverAddress.trim(), portValue, useHttps) + UPLOAD_ENDPOINT
         } else {
             ""
         }

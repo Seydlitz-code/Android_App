@@ -43,6 +43,7 @@ internal fun normalizeMobileServerArtifactKey(key: String, filename: String = ""
         name.endsWith(".glb") -> "glb"
         name == "quality_report.json" -> "quality_json"
         name == "analysis_result.json" -> "analysis_json"
+        name == "analysis_result.png" || name == "analysis.png" -> "analysis_png"
         name == "topview.png" -> "topview"
         name == "sideview.png" -> "sideview"
         name == "vehicle_analysis.csv" -> "vehicle_csv"
@@ -150,19 +151,23 @@ internal fun scanServerTaskManifestInfos(context: Context): List<ServerTaskManif
         val map = mutableMapOf<String, File>()
         for (f in files) {
             val lower = f.name.lowercase()
+            val rasterExt = lower.endsWith(".png") || lower.endsWith(".jpg") ||
+                lower.endsWith(".jpeg") || lower.endsWith(".webp")
             when {
-                lower.contains("top") && (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg")) ->
-                    map["topview"] = f
-                lower.contains("side") && (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg")) ->
-                    map["sideview"] = f
                 lower.endsWith(".json") && (lower.contains("quality_report") || lower == "quality_report.json") ->
                     map["quality_json"] = f
-                lower.contains("quality") || lower.contains("analysis") ->
-                    if (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
-                        map["quality_png"] = f
-                    }
+                rasterExt && (lower.contains("quality") || lower.contains("analysis")) ->
+                    map["quality_png"] = f
+                lower.contains("top") && rasterExt ->
+                    map["topview"] = f
+                lower.contains("side") && rasterExt ->
+                    map["sideview"] = f
             }
         }
+        files.firstOrNull { it.name.equals("quality_report.txt", ignoreCase = true) }
+            ?.let { map["quality_txt"] = it }
+        files.firstOrNull { it.name.equals("analysis_result.json", ignoreCase = true) }
+            ?.let { map["analysis_json"] = it }
         return if (map.isNotEmpty()) ServerTaskManifestInfo(taskId, dir, map) else null
     }
 
@@ -213,12 +218,11 @@ internal fun previewUrisForServerTasks(infos: List<ServerTaskManifestInfo>): Lis
     return out.distinct()
 }
 
-internal fun analysisImageUrisForServerTasks(infos: List<ServerTaskManifestInfo>): List<Uri> {
-    /** 레거시 PNG 분석 이미지 — [quality_json] 은 이미지가 아니므로 제외 */
-    val keys = listOf("quality_png", "analysis_png", "quality", "analysis_json")
+internal fun da3AnalysisRasterUrisForServerTasks(infos: List<ServerTaskManifestInfo>): List<Uri> {
+    val rasterKeys = listOf("quality_png", "analysis_png")
     val out = ArrayList<Uri>()
     for (info in infos) {
-        for (k in keys) {
+        for (k in rasterKeys) {
             val f = info.filesByKey[k] ?: continue
             if (!f.exists()) continue
             val ext = f.extension.lowercase()
@@ -230,6 +234,46 @@ internal fun analysisImageUrisForServerTasks(infos: List<ServerTaskManifestInfo>
     return out.distinct()
 }
 
+/**
+ * AI 파일 선택 팝업용: 라이브러리 「DA3분석」에 해당하는 래스터를 한 목록으로 합칩니다.
+ * (top/side 미리보기 + quality/analysis PNG 등). 동일 파일은 canonical 경로 기준 한 번만 유지합니다.
+ */
+internal fun da3MergedRasterUrisForAiPicker(infos: List<ServerTaskManifestInfo>): List<Uri> {
+    val previews = previewUrisForServerTasks(infos)
+    val analysis = da3AnalysisRasterUrisForServerTasks(infos)
+    val seen = LinkedHashSet<String>()
+    val out = ArrayList<Uri>()
+    for (u in previews + analysis) {
+        val path = u.path ?: continue
+        val key = runCatching { File(path).canonicalPath }.getOrNull() ?: path
+        if (seen.add(key)) out.add(u)
+    }
+    return out
+}
+
+/** DA3 품질평가 탭(AI 파일 선택): 품질·평가 결과 JSON만 */
+internal fun da3QualityJsonUrisForServerTasks(infos: List<ServerTaskManifestInfo>): List<Uri> {
+    val preferredKeys = listOf("quality_json", "analysis_json")
+    val preferredSet = preferredKeys.toSet()
+    val seen = LinkedHashSet<String>()
+    val out = ArrayList<Uri>()
+    fun tryAdd(f: File) {
+        if (!f.exists() || !f.isFile || !f.extension.equals("json", ignoreCase = true)) return
+        val pathKey = runCatching { f.canonicalPath }.getOrNull() ?: f.absolutePath
+        if (seen.add(pathKey)) out.add(Uri.fromFile(f))
+    }
+    for (info in infos) {
+        for (k in preferredKeys) {
+            info.filesByKey[k]?.let(::tryAdd)
+        }
+        for ((k, f) in info.filesByKey) {
+            if (k in preferredSet) continue
+            if (!k.contains("quality", ignoreCase = true)) continue
+            tryAdd(f)
+        }
+    }
+    return out
+}
 internal fun countPreviewTasks(infos: List<ServerTaskManifestInfo>): Int =
     infos.count { info ->
         listOf("topview", "sideview", "top_view", "side_view").any { k -> info.filesByKey[k]?.exists() == true }

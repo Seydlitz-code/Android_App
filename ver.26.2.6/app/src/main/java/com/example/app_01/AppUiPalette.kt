@@ -155,6 +155,22 @@ fun appUiPaletteFor(mode: AppUiThemeMode): AppUiPalette = when (mode) {
     )
 }
 
+/** 단색 채움형 주요 버튼 배경 (구 파랑·네이비 버튼 대체): 다크 흰 / 라이트 검 */
+fun AppUiPalette.prominentSolidButtonBg(enabled: Boolean = true): Color =
+    if (enabled) {
+        if (isDark) Color.White else Color.Black
+    } else {
+        if (isDark) Color.White.copy(alpha = 0.28f) else Color.Black.copy(alpha = 0.28f)
+    }
+
+/** [prominentSolidButtonBg] 위 전경색 */
+fun AppUiPalette.prominentSolidButtonFg(enabled: Boolean = true): Color =
+    if (enabled) {
+        if (isDark) Color.Black else Color.White
+    } else {
+        if (isDark) Color.Black.copy(alpha = 0.38f) else Color.White.copy(alpha = 0.38f)
+    }
+
 val LocalAppUiPalette = staticCompositionLocalOf { appUiPaletteFor(AppUiThemeMode.DARK) }
 val LocalAppUiThemeMode = staticCompositionLocalOf { AppUiThemeMode.DARK }
 val LocalSetAppUiThemeMode = staticCompositionLocalOf<(AppUiThemeMode) -> Unit> { { } }

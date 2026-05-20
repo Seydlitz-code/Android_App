@@ -184,7 +184,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -206,9 +205,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material.icons.filled.Lightbulb
@@ -2112,18 +2109,16 @@ fun CameraEntryScreen(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(gridGap)
             ) {
-                CameraEntryPictogramTile(
+                CameraEntryTextTile(
                     label = "경차 촬영",
-                    pictogramRes = R.drawable.ic_camera_mode_object,
                     isSelected = selectedMode == CameraEntryMode.OBJECT,
                     onClick = { onModeSelected(CameraEntryMode.OBJECT) },
                     modifier = Modifier
                         .weight(1f)
                         .aspectRatio(1f)
                 )
-                CameraEntryPictogramTile(
+                CameraEntryTextTile(
                     label = "중형 차량 촬영",
-                    pictogramRes = R.drawable.ic_camera_mode_space_2d,
                     isSelected = selectedMode == CameraEntryMode.SPACE_2D,
                     onClick = { onModeSelected(CameraEntryMode.SPACE_2D) },
                     modifier = Modifier
@@ -2136,18 +2131,16 @@ fun CameraEntryScreen(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(gridGap)
             ) {
-                CameraEntryPictogramTile(
+                CameraEntryTextTile(
                     label = "대형 차량 촬영",
-                    pictogramRes = R.drawable.ic_camera_mode_space_3d,
                     isSelected = selectedMode == CameraEntryMode.SPACE_3D,
                     onClick = { onModeSelected(CameraEntryMode.SPACE_3D) },
                     modifier = Modifier
                         .weight(1f)
                         .aspectRatio(1f)
                 )
-                CameraEntryPictogramTile(
+                CameraEntryTextTile(
                     label = "사고 현장 촬영",
-                    pictogramRes = R.drawable.ic_camera_mode_mobile_space,
                     isSelected = selectedMode == CameraEntryMode.MOBILE_SPACE,
                     onClick = { onModeSelected(CameraEntryMode.MOBILE_SPACE) },
                     modifier = Modifier
@@ -2160,38 +2153,8 @@ fun CameraEntryScreen(
 }
 
 @Composable
-private fun CameraEntryPictogramImage(
-    pictogramRes: Int,
-    ink: Color,
-    contentDescription: String,
-    modifier: Modifier = Modifier,
-    contentScale: ContentScale = ContentScale.Fit,
-) {
-    val context = LocalContext.current
-    val bmp by produceState<ImageBitmap?>(
-        initialValue = CameraEntryPictogramCache.peek(pictogramRes, ink),
-        key1 = pictogramRes,
-        key2 = ink,
-    ) {
-        value = CameraEntryPictogramCache.ensureLoaded(context, pictogramRes, ink)
-    }
-    val bitmap = bmp
-    if (bitmap != null) {
-        Image(
-            painter = remember(bitmap) {
-                BitmapPainter(bitmap, filterQuality = FilterQuality.Low)
-            },
-            contentDescription = contentDescription,
-            modifier = modifier,
-            contentScale = contentScale,
-        )
-    }
-}
-
-@Composable
-private fun CameraEntryPictogramTile(
+private fun CameraEntryTextTile(
     label: String,
-    pictogramRes: Int,
     isSelected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -2206,42 +2169,26 @@ private fun CameraEntryPictogramTile(
         else -> Color.Black.copy(alpha = 0.55f)
     }
     val outerBorder = BorderStroke(if (isSelected) 2.dp else 1.dp, borderColor)
-    Column(
+    Box(
         modifier = modifier
             .fillMaxSize()
             .border(outerBorder, shape)
             .clip(shape)
             .background(cardBg, shape)
             .clickable(onClick = onClick)
-            .padding(start = 12.dp, end = 12.dp, top = 14.dp, bottom = 12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.SpaceBetween
+            .padding(horizontal = 12.dp, vertical = 14.dp),
+        contentAlignment = Alignment.Center
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            contentAlignment = Alignment.Center
-        ) {
-            CameraEntryPictogramImage(
-                pictogramRes = pictogramRes,
-                ink = ink,
-                contentDescription = label,
-                modifier = Modifier
-                    .fillMaxWidth(0.88f)
-                    .wrapContentHeight(),
-                contentScale = ContentScale.Fit,
-            )
-        }
         Text(
             text = label,
             color = ink,
-            fontSize = 12.sp,
+            fontSize = 14.sp,
             fontWeight = FontWeight.Bold,
             textAlign = TextAlign.Center,
-            maxLines = 2,
-            lineHeight = 15.sp,
-            modifier = Modifier.padding(top = 6.dp)
+            maxLines = 4,
+            lineHeight = 18.sp,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth()
         )
     }
 }

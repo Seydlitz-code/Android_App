@@ -32,6 +32,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import okhttp3.ConnectionPool
+import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.Call
@@ -56,9 +57,13 @@ internal const val DOWNLOAD_ENDPOINT = "/download"
 /** FastAPI `GET /results/{task_id}` — 결과 파일 목록 + 개별 다운로드 URL */
 internal const val RESULTS_ENDPOINT = "/results"
 
-internal const val DEFAULT_SERVER_ADDRESS = "192.168.0.88"
-internal const val DEFAULT_SERVER_PORT = 8000
-internal const val DEFAULT_USE_HTTPS = false
+/** Jetson DA3 파이프라인 기본 호스트(새 설치·설정 초기화 시 사용). HTTPS + 443 */
+internal const val DEFAULT_SERVER_ADDRESS = "fifth-theatrics-bulldog.ngrok-free.dev"
+internal const val DEFAULT_SERVER_PORT = 443
+internal const val DEFAULT_USE_HTTPS = true
+
+/** 업로드 시 `callback_url` 경로 — 베이스는 [buildServerOrigin]과 동일해야 함. */
+private const val PIPELINE_CALLBACK_PATH = "/pipeline/callback"
 
 /** 파이프라인 대기용 웨이크락 최대 시간 (uploadZipAndRunPipeline 등) */
 internal const val SERVER_PIPELINE_WAKE_MAX_MS = 4L * 60L * 60L * 1000L
@@ -134,6 +139,89 @@ internal fun saveServerSettings(context: Context, address: String, port: Int, us
         .apply()
 }
 
+/**
+ * DA3 서버 오리진 (`https://host` … 비표준 포트만 `:포트` 포함).
+ * 기본(HTTPS·443)이면 호스트만 두어 `https://fifth-theatrics-bulldog.ngrok-free.dev/upload` 형태와 맞춥니다.
+ */
+internal fun buildServerOriginFromParts(address: String, port: Int, useHttps: Boolean): String {
+    val protocol = if (useHttps) "https" else "http"
+    val host = address.trim()
+    val omitPort = (useHttps && port == 443) || (!useHttps && port == 80)
+    return if (omitPort) "$protocol://$host" else "$protocol://$host:$port"
+}
+
+internal fun buildServerOrigin(context: Context): String =
+    buildServerOriginFromParts(
+        getServerAddress(context),
+        getServerPort(context),
+        getUseHttps(context),
+    )
+
+/** `POST /upload`의 `callback_url` — FastAPI(ngrok) 쪽 자체 엔드포인트용. [resolvePipelineCallbackUrlForUpload] 가 우선합니다. */
+internal fun getPipelineCallbackUrl(context: Context): String =
+    buildServerOrigin(context) + PIPELINE_CALLBACK_PATH
+
+/**
+ * 업로드 폼의 `callback_url`.
+ *
+ * **원인:** [getPipelineCallbackUrl] 만 쓰면 값이 `https://…ngrok…/pipeline/callback` 이 되어,
+ * Jetson 워커는 **원격 서버**로만 POST 하고, 휴대폰에서 띄운 [PipelineCallbackHttpServer]에는 도달하지 않습니다.
+ * 같은 Wi‑Fi에서는 `http://(휴대폰 IPv4):(NanoHTTPd포트)/pipeline/callback` 을 넘겨야 푸시가 기기로 옵니다.
+ *
+ * LAN 주소·포트를 쓸 수 없으면 원격 URL로 폴백(앱은 `/status` 폴링·결과 HTTP 다운로드로 완료 처리).
+ */
+internal fun resolvePipelineCallbackUrlForUpload(
+    context: Context,
+    lanIpv4: String?,
+    localNanoHttpdPort: Int?,
+): String {
+    val lip = lanIpv4?.trim().orEmpty()
+    val p = localNanoHttpdPort
+    if (lip.isNotEmpty() && p != null && p in 1..65535) {
+        val url = "http://$lip:$p$PIPELINE_CALLBACK_PATH"
+        android.util.Log.i(
+            "ServerPipeline",
+            "callback_url → 기기 LAN 수신 ($url). Jetson/PC와 휴대폰 동일 LAN 필요.",
+        )
+        return url
+    }
+    val remote = getPipelineCallbackUrl(context)
+    android.util.Log.i(
+        "ServerPipeline",
+        "callback_url → 원격 ($remote). LAN 미수신 — 푸시는 서버가 처리, 앱은 폴링·다운로드.",
+    )
+    return remote
+}
+
+/**
+ * ngrok 무료 터널(`*.ngrok-free.dev` / `*.ngrok-free.app` 등)은 기본적으로
+ * **브라우저 경고 HTML** 또는 비 JSON 응답을 끼워 넣을 수 있어 `POST /upload` 가 실패하는데,
+ * `GET /docs` 같은 가벼운 요청은 200으로 통과해 「연결 성공」만 뜨는 불일치가 납니다.
+ * 공식 우회 헤더로 경고 페이지 건너뛰기.
+ *
+ * @see [ngrok docs — Skip browser warning](https://ngrok.com/docs/errors/http-403-permission/)
+ */
+private object NgrokFreeBrowserWarningInterceptor : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val req = chain.request()
+        if (!isNgrokFreeStyleHost(req.url.host)) {
+            return chain.proceed(req)
+        }
+        val next = req.newBuilder()
+            .header("ngrok-skip-browser-warning", "true")
+            .build()
+        return chain.proceed(next)
+    }
+
+    private fun isNgrokFreeStyleHost(host: String): Boolean {
+        val h = host.lowercase(Locale.US)
+        return h.endsWith(".ngrok-free.dev") ||
+            h.endsWith(".ngrok-free.app") ||
+            h.endsWith(".ngrok.app") ||
+            h.endsWith(".ngrok.io")
+    }
+}
+
 private val okHttpBaseLock = Any()
 @Volatile
 private var okHttpBasePlain: OkHttpClient? = null
@@ -157,6 +245,7 @@ internal fun createOkHttpClient(useHttps: Boolean = DEFAULT_USE_HTTPS): OkHttpCl
 
 internal fun buildOkHttpClientBase(useHttps: Boolean): OkHttpClient {
     val builder = OkHttpClient.Builder()
+        .addInterceptor(NgrokFreeBrowserWarningInterceptor)
         .connectTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
@@ -350,8 +439,6 @@ internal suspend fun startServerTaskWithZip(
 ): ServerUploadStartResult {
     return withContext(Dispatchers.IO) {
         try {
-            val serverAddress = getServerAddress(context)
-            val serverPort = getServerPort(context)
             val useHttps = getUseHttps(context)
             val client = createOkHttpClient(useHttps).newBuilder()
                 .connectTimeout(60, TimeUnit.SECONDS)
@@ -422,8 +509,7 @@ internal suspend fun startServerTaskWithZip(
             }
             val requestBody = multipartBuilder.build()
 
-            val protocol = if (useHttps) "https" else "http"
-            val url = "$protocol://$serverAddress:$serverPort$UPLOAD_ENDPOINT"
+            val url = buildServerOrigin(context) + UPLOAD_ENDPOINT
             val request = Request.Builder()
                 .url(url)
                 .post(requestBody)
@@ -518,8 +604,6 @@ internal data class ServerTaskStatus(
 internal suspend fun fetchServerTaskStatus(context: Context, taskId: String): ServerTaskStatus? {
     return withContext(Dispatchers.IO) {
         try {
-            val serverAddress = getServerAddress(context)
-            val serverPort = getServerPort(context)
             val useHttps = getUseHttps(context)
             // 장시간 동기 단계(노이즈 제거 등)에서 서버가 /status 응답을 늦출 수 있음.
             // 기존 callTimeout 60초는 단일 폴링이 그 한도를 넘기며 실패 → 연속 null → 짧은 침묵 한도로 오판 종료를 유발했다.
@@ -531,8 +615,7 @@ internal suspend fun fetchServerTaskStatus(context: Context, taskId: String): Se
                 .retryOnConnectionFailure(true)
                 .build()
 
-            val protocol = if (useHttps) "https" else "http"
-            val url = "$protocol://$serverAddress:$serverPort$STATUS_ENDPOINT/$taskId"
+            val url = buildServerOrigin(context) + "$STATUS_ENDPOINT/$taskId"
             val request = Request.Builder().url(url).get().build()
             // response.use: 예외 발생 시에도 커넥션이 반드시 닫히도록 보장 (커넥션 누수 방지)
             client.newCall(request).execute().use { response ->
@@ -671,12 +754,9 @@ private fun parseResultsFilesRootStreaming(
 internal suspend fun fetchServerResultsJson(context: Context, taskId: String): JSONObject? {
     return withContext(Dispatchers.IO) {
         try {
-            val serverAddress = getServerAddress(context)
-            val serverPort = getServerPort(context)
             val useHttps = getUseHttps(context)
             val client = getServerDownloadOkHttpClient(useHttps)
-            val protocol = if (useHttps) "https" else "http"
-            val url = "$protocol://$serverAddress:$serverPort$RESULTS_ENDPOINT/$taskId"
+            val url = buildServerOrigin(context) + "$RESULTS_ENDPOINT/$taskId"
             val request = Request.Builder().url(url).get().build()
             // response.use: 예외/조기 반환 시에도 커넥션이 반드시 닫히도록 보장
             client.newCall(request).execute().use { response ->
@@ -1196,11 +1276,7 @@ private suspend fun downloadPlyResultToDirectory(
     outDir: File,
     onDownloadProgress: ((progressPercent: Int, message: String) -> Unit)? = null,
 ): File? {
-    val serverAddress = getServerAddress(context)
-    val serverPort = getServerPort(context)
-    val useHttps = getUseHttps(context)
-    val protocol = if (useHttps) "https" else "http"
-    val url = "$protocol://$serverAddress:$serverPort$DOWNLOAD_ENDPOINT/$taskId?format=ply"
+    val url = buildServerOrigin(context) + "$DOWNLOAD_ENDPOINT/$taskId?format=ply"
     val outFile = File(outDir, "result_${taskId}.ply")
 
     val maxAttempts = 3
@@ -1310,7 +1386,7 @@ internal suspend fun runServer3dgsAnalysisInBackground(
 internal fun buildPoliceInsurance3dgsPayload(
     context: Context,
     bundle: ServerPipelineResultBundle,
-    basePrompt: String = "첨부된 PLY·3DGS·JSON 분석 파일과 사고 현장 이미지를 바탕으로, 사고 현장 분석 보고서를 작성하세요. 보고서는 표지(1페이지)·목차(2페이지)·본문(3페이지 이후) 구조로, 사고 현장 개요, 사고 형태 분석, 사고 원인 추론, 차량별 파손 부위 및 수리 견적 표(6열), 종합 수리 견적 요약, 법적 면책 정보를 포함하세요. 모든 표는 table.cell(정수행, 정수열).text = \"…\" 로 채우고, 섹션마다 page_break로 분리하며 차트를 2-3개 포함하세요. 한국어 python-docx 스크립트(단일 ```python 블록)로만 출력하세요.",
+    basePrompt: String = "첨부된 PLY·3DGS·JSON 분석 파일과 사고 현장 이미지를 바탕으로, 사고 현장 분석 보고서를 작성하세요. 보고서에 도식 등 시각 자료가 필요하면 matplotlib/PIL로 PNG를 생성한 뒤 document.add_picture로 삽입하고, 바로 이어 add_paragraph로 분석 텍스트를 작성하세요(모바일 PDF는 문자열만 추출하므로 그림 요지는 반드시 문단에 적습니다). 보고서는 표지(1페이지)·목차(2페이지)·본문(3페이지 이후) 구조로, 사고 현장 개요, 사고 형태 분석, 사고 원인 추론, 차량별 파손 부위 및 수리 견적, 종합 수리 견적 요약, 법적 면책 정보를 포함하세요. 모든 데이터는 add_paragraph()로만 표현하고 table.cell과 앱 전용 차트 표식은 사용하지 마세요. 섹션마다 page_break로 분리하세요. 한국어 python-docx 스크립트(단일 ```python 블록)로만 출력하세요.",
     galleryImageUris: List<Uri> = emptyList(),
 ): Pair<String, List<Uri>> {
     val sb = StringBuilder(basePrompt)
@@ -1370,16 +1446,15 @@ internal fun buildPoliceInsurance3dgsPayload(
         uris.addAll(galleryImageUris)
     }
 
-    val preferredOrder = listOf("topview", "sideview", "quality_png")
+    val preferredOrder = listOf("topview", "sideview", "quality_png", "analysis_png")
     val seen = HashSet<String>()
     fun addFile(f: File) {
-    val path = f.absolutePath
-    if (path in seen || !f.exists() || !f.isFile) return
-    if (f.extension.lowercase() !in imageExts) return
-    uriToShareableContentUri(context, Uri.fromFile(f))?.let {
+        val path = f.absolutePath
+        if (path in seen || !f.exists() || !f.isFile) return
+        if (f.extension.lowercase() !in imageExts) return
+        val u = uriToShareableContentUri(context, Uri.fromFile(f)) ?: Uri.fromFile(f)
         seen.add(path)
-        uris.add(it)
-    }
+        uris.add(u)
     }
     for (k in preferredOrder) {
         bundle.filesByKey[k]?.let(::addFile)
@@ -1478,11 +1553,7 @@ internal suspend fun downloadPlyResult(
     taskId: String,
     onDownloadProgress: ((progressPercent: Int, message: String) -> Unit)? = null,
 ): File? {
-    val serverAddress = getServerAddress(context)
-    val serverPort = getServerPort(context)
-    val useHttps = getUseHttps(context)
-    val protocol = if (useHttps) "https" else "http"
-    val url = "$protocol://$serverAddress:$serverPort$DOWNLOAD_ENDPOINT/$taskId?format=ply"
+    val url = buildServerOrigin(context) + "$DOWNLOAD_ENDPOINT/$taskId?format=ply"
     val modelsDir = ModelLibraryPaths.plyDir(context)
     val outFile = File(modelsDir, "3d_model_$taskId.ply")
 
@@ -1526,8 +1597,8 @@ internal suspend fun testServerConnection(
                 .readTimeout(10, TimeUnit.SECONDS)
                 .build()
 
-            val protocol = if (useHttps) "https" else "http"
-            val url = "$protocol://$serverAddress:$serverPort$SERVER_CONNECTIVITY_GET_PATH"
+            val url =
+                buildServerOriginFromParts(serverAddress.trim(), serverPort, useHttps) + SERVER_CONNECTIVITY_GET_PATH
             val request = Request.Builder()
                 .url(url)
                 .get()

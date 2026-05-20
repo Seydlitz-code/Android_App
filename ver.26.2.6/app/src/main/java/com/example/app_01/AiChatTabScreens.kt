@@ -106,7 +106,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -320,29 +319,34 @@ private const val MAX_3DGS_AUX_ATTACHMENTS = 12
 
 private const val GLTF_MAGIC = 0x46546C67
 
+/** 시각 자료·분석 문단 같이 쓰기 — 모바일 PDF는 문자열만 추출하므로 그림 설명은 반드시 add_paragraph에 병기 */
+private const val REPORT_IMAGE_WORKFLOW_HINT =
+    "보고서에 도식·비교 그림·파손 개요 도면 등 시각 자료가 필요하면 다음 순서를 따르세요: " +
+        "(1) 분석 관점에서 어떤 그림이 필요한지 먼저 정한 뒤, 스크립트 안에서 matplotlib 또는 PIL로 PNG 파일을 생성합니다. " +
+        "(2) 같은 스크립트에서 `document.add_picture(생성된_png_경로, width=Inches(...))` 등으로 본문 적절한 위치에 삽입합니다(PC에서 python-docx 실행 시 Word에 포함). " +
+        "(3) 바로 이어서 `add_paragraph()`로 해당 그림을 설명·해석하는 한국어 분석 텍스트를 작성합니다. " +
+        "모바일 앱은 주로 add_paragraph·add_heading 문자열만 PDF로 추출하므로, 그림의 핵심 내용·결론은 반드시 인접 문단에 텍스트로도 남겨 주세요. " +
+        "앱에서 인식하지 않는 '차트:bar' 등 표식은 사용하지 마세요."
+
 /** 파손 분석 모드: 텍스트가 비어 있고 이미지만 보낼 때 LLM에 넣는 기본 요청 */
 private const val DAMAGE_ANALYSIS_DEFAULT_PROMPT =
     "첨부된 사고 차량 사진을 종합 분석하여, 한국어 python-docx 스크립트(단일 ```python 블록)를 출력하세요. " +
+        REPORT_IMAGE_WORKFLOW_HINT + " " +
         "이미지 개별 설명은 절대 금지 — 모든 사진을 하나의 통합 차량 파손 데이터셋으로 분석합니다. " +
         "보고서는 다음 구조로 작성합니다: " +
         "【제1페이지: 표지】 보고서 제목·부제·생성일시·작성도구·면책 문구 포함. " +
-        "【제2페이지: 목차】 2열(구분·페이지) 표. " +
+        "【제2페이지: 목차】 add_paragraph()로 각 항목 표시 (표 사용 금지). " +
         "【제3페이지 이후: 본문】 아래 섹션을 각각 page_break로 분리: " +
         "(1) 차량 모델 정보 — 브랜드·차급·모델·연식·색상·번호판 유추 (간결하게), " +
-        "(2) 사고 발생 형태 분석 — 충돌 유형·방향·접촉 지점·2차 피해, 파이 차트 포함, " +
-        "(3) 【핵심】파손 부위 정리 표 — 모든 가시 파손 부위를 개별 행으로(6~12행 이상), " +
-        "6열: [파손 부위 | 파손 유형 | 심각도 | 파손 깊이(추정) | 파손 면적(추정) | 비고], " +
-        "막대 차트(차트:bar:부위별 파손 심각도) 및 파이 차트(차트:pie:파손 유형 분포) 포함, " +
-        "(4) 파손 깊이 상세 분석 표 — 5열: [파손 부위 | 추정 깊이(cm) | 변형 형태 | 주변 부품 영향 | 측정 한계], " +
-        "막대 차트(차트:bar:부위별 파손 깊이 비교) 포함, " +
-        "(5) 【핵심】수리 예상 견적 표 — 각 파손 부위별 개별 행(6행 이상), " +
-        "6열: [파손 부위 | 수리 방법 | 예상 공임(만원) | 예상 부품비(만원) | 총 예상 비용(만원) | 예상 기간(영업일)], " +
-        "합계 행·파이 차트(차트:pie:부위별 수리 비용 분포)·막대 차트(차트:bar:부위별 수리 비용 비교)·선 차트(차트:line:수리 비용 누적) 포함, " +
-        "(6) 사고 원인 추론 — 3열: [추론 항목 | 관찰 근거 | 신뢰도] (간결하게), " +
+        "(2) 사고 발생 형태 분석 — 충돌 유형·방향·접촉 지점·2차 피해, " +
+        "(3) 【핵심】파손 부위 정리 — 모든 가시 파손 부위를 개별 add_paragraph()로 정리, " +
+        "각 항목: [파손 부위 | 파손 유형 | 심각도 | 파손 깊이(추정) | 파손 면적(추정) | 비고], " +
+        "(4) 파손 깊이 상세 분석 — add_paragraph()로 각 부위별 깊이·변형·영향·측정 한계 기록, " +
+        "(5) 【핵심】수리 예상 견적 — add_paragraph()로 각 부위별 수리 방법·공임·부품비·총비용·기간 기록, " +
+        "(6) 사고 원인 추론 — add_paragraph()로 [추론 항목 | 관찰 근거 | 신뢰도] (간결하게), " +
         "(7) 법적 면책 정보 — 면책 문구와 보고서 생성 시각 포함. " +
-        "모든 표는 `doc.add_table(...)` 후 `table.cell(정수행, 정수열).text = \"…\"` 로만 셀을 채우고, " +
-        "각 섹션 사이에 `doc.add_page_break()`를 사용하며, " +
-        "차트(차트:bar, 차트:pie, 차트:line)를 최소 4~6개 포함해 가독성을 극대화하세요. " +
+        "모든 데이터는 add_paragraph()로만 표현하세요 (표·table.cell 사용 금지). " +
+        "차트(차트:bar, 차트:pie, 차트:line)도 사용하지 마세요. " +
         "\"이미지 1에서는\", \"사진에서 보이듯\" 등 개별 사진 언급 표현은 절대 사용하지 말고, " +
         "차량 전체에 대한 통합 파손 분석 보고서로 작성하세요."
 
@@ -368,6 +372,12 @@ private fun Uri.lengthBytesOrNull(context: Context): Long? {
     } catch (_: Exception) {
         null
     }
+}
+
+private fun Uri.looksLikeRasterImagePath(): Boolean {
+    val pl = path?.lowercase(Locale.getDefault()) ?: return false
+    return pl.endsWith(".png") || pl.endsWith(".jpg") || pl.endsWith(".jpeg") ||
+        pl.endsWith(".webp") || pl.endsWith(".heic") || pl.endsWith(".heif")
 }
 
 private fun Uri.isChatPickVideoUri(): Boolean {
@@ -567,8 +577,8 @@ fun ClaudeChatScreen(
     /** 3DGS: JSON·PLY·GLB·ZIP 등 LLM 텍스트 부록용 (비이미지) */
     var attachedAuxUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var imagePickerSession by remember { mutableIntStateOf(0) }
-    var serverPreviewUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    var serverAnalysisUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var serverDa3RasterUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var serverDa3QualityJsonUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var aiTabMode by remember { mutableStateOf(AiChatTabMode.CLAUDE) }
     var aiCadOption by remember { mutableStateOf(ClaudeChatClient.AiCadInputOption.DIMENSIONS_DIRECT) }
     var modeMenuExpanded by remember { mutableStateOf(false) }
@@ -616,12 +626,12 @@ fun ClaudeChatScreen(
     }
 
     LaunchedEffect(serverArtifactLibraryVersion) {
-        val (previews, analyses) = withContext(Dispatchers.IO) {
+        val pair = withContext(Dispatchers.IO) {
             val infos = scanServerTaskManifestInfos(context)
-            previewUrisForServerTasks(infos) to analysisImageUrisForServerTasks(infos)
+            da3MergedRasterUrisForAiPicker(infos) to da3QualityJsonUrisForServerTasks(infos)
         }
-        serverPreviewUris = previews
-        serverAnalysisUris = analyses
+        serverDa3RasterUris = pair.first
+        serverDa3QualityJsonUris = pair.second
     }
 
     // 새 메시지 추가 또는 스트리밍 시작 시 최하단으로 스크롤
@@ -669,7 +679,7 @@ fun ClaudeChatScreen(
                         text = when (aiTabMode) {
                             AiChatTabMode.CLAUDE -> "클로드"
                             AiChatTabMode.AI_CAD -> "AI CAD"
-                            AiChatTabMode.MOBILE_3DGS -> "3DGS 분석"
+                            AiChatTabMode.MOBILE_3DGS -> "DA3 분석"
                             AiChatTabMode.DAMAGE_ANALYSIS -> "파손부위 분석"
                         },
                         color = palette.onBackground,
@@ -725,9 +735,9 @@ fun ClaudeChatScreen(
                     DropdownMenuItem(
                         text = {
                             Column {
-                                Text("3DGS 분석", color = palette.onBackground, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                Text("DA3 분석", color = palette.onBackground, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                                 Text(
-                                    "3DGS 분석: 첨부(갤러리·데이터셋·서버 미리보기/분석·JSON/PLY·GLB·ARCore 등)를 바탕으로 보험·경찰 제출용 틀에 맞춘 한국어 Word(.docx) python-docx 스크립트를 출력합니다.",
+                                    "DA3 분석: 첨부(갤러리·데이터셋·서버 DA3 분석 이미지·DA3 품질평가 JSON·기타 JSON/PLY·GLB·ARCore 등)를 바탕으로 보험·경찰 제출용 틀에 맞춘 한국어 Word(.docx) python-docx 스크립트를 출력합니다. 도식이 필요하면 스크립트에서 PNG 생성 후 add_picture·분석 문단 순으로 포함합니다.",
                                     color = palette.onBackground.copy(alpha = 0.65f),
                                     fontSize = 11.sp,
                                     lineHeight = 14.sp
@@ -744,7 +754,7 @@ fun ClaudeChatScreen(
                             Column {
                                 Text("파손부위 분석", color = palette.onBackground, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                                 Text(
-                                    "사고 차량 사진을 바탕으로 모델 유추·파손 표·피해 규모 추정·수리 견적 참고 표·결론까지 담은 정교한 python-docx Word 스크립트를 출력합니다.",
+                                    "사고 차량 사진을 바탕으로 모델 유추·파손 부위 분석·피해 규모 추정·수리 견적·결론까지 담은 정교한 python-docx Word 스크립트를 출력합니다. 삽화가 필요하면 PNG 생성 후 add_picture와 분석 텍스트를 함께 넣습니다.",
                                     color = palette.onBackground.copy(alpha = 0.65f),
                                     fontSize = 11.sp,
                                     lineHeight = 14.sp
@@ -1107,9 +1117,13 @@ fun ClaudeChatScreen(
                     val defaultImgPrompt = when (aiTabMode) {
                         AiChatTabMode.MOBILE_3DGS -> when {
                             imageBase64List.size > 1 ->
-                                "첨부된 여러 사고 현장 이미지를 근거로, 한국어 python-docx 스크립트(단일 ```python 블록)를 출력하세요. 보고서는 반드시 표지(1페이지)·목차(2페이지)·본문(3페이지 이후) 구조로 작성하고, 다음을 포함하세요: 사고 현장 개요, 사고 발생 형태 분석, 사고 원인 추론, 차량별 파손 부위 및 수리 견적 표(6열), 종합 수리 견적 요약, 법적 면책 정보. 모든 표는 table.cell(정수행, 정수열).text = \"…\" 로 채우고, 섹션마다 page_break로 분리하세요. 차트를 최소 2-3개 포함하고, 이미지별 개별 설명이 아닌 종합 분석을 제공하세요."
+                                "첨부된 여러 사고 현장 이미지를 근거로, 한국어 python-docx 스크립트(단일 ```python 블록)를 출력하세요. " +
+                                    REPORT_IMAGE_WORKFLOW_HINT + " " +
+                                    "보고서는 반드시 표지(1페이지)·목차(2페이지)·본문(3페이지 이후) 구조로 작성하고, 다음을 포함하세요: 사고 현장 개요, 사고 발생 형태 분석, 사고 원인 추론, 차량별 파손 부위 및 수리 견적, 종합 수리 견적 요약, 법적 면책 정보. 모든 데이터는 add_paragraph()로만 표현하고 table.cell은 절대 사용하지 마세요. 앱 전용 차트 표식은 사용하지 마세요. 섹션마다 page_break로 분리하세요. 이미지별 개별 설명이 아닌 종합 분석을 제공하세요."
                             imageBase64List.size == 1 ->
-                                "첨부된 사고 현장 이미지를 근거로, 한국어 python-docx 스크립트(단일 ```python 블록)를 출력하세요. 보고서는 표지·목차·본문 구조로 작성하고, 사고 현장 개요, 사고 형태 분석, 원인 추론, 차량 파손 및 수리 견적 표(6열), 법적 면책 정보를 포함하세요. 모든 표는 table.cell(정수행, 정수열).text = \"…\" 로 채우고, 섹션마다 page_break로 분리하며 차트를 추가하세요."
+                                "첨부된 사고 현장 이미지를 근거로, 한국어 python-docx 스크립트(단일 ```python 블록)를 출력하세요. " +
+                                    REPORT_IMAGE_WORKFLOW_HINT + " " +
+                                    "보고서는 표지·목차·본문 구조로 작성하고, 사고 현장 개요, 사고 형태 분석, 원인 추론, 차량 파손 및 수리 견적, 법적 면책 정보를 포함하세요. 모든 데이터는 add_paragraph()로만 표현하고 table.cell은 절대 사용하지 마세요. 섹션마다 page_break로 분리하세요."
                             else -> ""
                         }
                         AiChatTabMode.DAMAGE_ANALYSIS -> when {
@@ -1146,9 +1160,13 @@ fun ClaudeChatScreen(
                                 when {
                                     imageBase64List.isNotEmpty() -> defaultImgPrompt
                                     dataAppendix.isNotBlank() ->
-                                        "첨부 데이터 파일(JSON·PLY/GLB·ZIP 등)을 반영해 사고 현장 분석 보고서를 작성하세요. 보고서는 표지(1페이지)·목차(2페이지)·본문(3페이지 이후) 구조로, 사고 현장 개요·사고 형태 분석·원인 추론·차량 파손 및 수리 견적 표(6열)·법적 면책 정보를 포함하고, 모든 표는 table.cell(정수행, 정수열).text = \"…\" 로 채우며 섹션마다 page_break로 분리하세요. 차트를 2-3개 이상 포함하고, 한국어 python-docx 스크립트(단일 ```python 블록)로만 출력하세요."
+                                        "첨부 데이터 파일(JSON·PLY/GLB·ZIP 등)을 반영해 사고 현장 분석 보고서를 작성하세요. " +
+                                            REPORT_IMAGE_WORKFLOW_HINT + " " +
+                                            "보고서는 표지(1페이지)·목차(2페이지)·본문(3페이지 이후) 구조로, 사고 현장 개요·사고 형태 분석·원인 추론·차량별 파손 부위 및 수리 견적·종합 수리 견적 요약·법적 면책 정보를 포함하세요. 모든 데이터는 add_paragraph()로만 표현하고 table.cell과 앱 전용 차트 표식은 사용하지 마세요. 섹션마다 page_break로 분리하고, 한국어 python-docx 스크립트(단일 ```python 블록)로만 출력하세요."
                                     else ->
-                                        "이 앱의 Mobile 3DGS 사고 현장 분석 시스템을 위한 보고서 샘플을 작성하세요. 보고서는 표지·목차·본문 구조로, 사고 현장 개요·사고 형태 분석·원인 추론·차량 파손 및 수리 견적 표·법적 면책 정보를 포함한 한국어 python-docx 스크립트(단일 ```python 블록)로 출력하세요. 표는 table.cell(정수행, 정수열).text = \"…\" 로 채우고 섹션마다 page_break로 분리하며 차트를 추가하세요."
+                                        "이 앱의 Mobile 3DGS 사고 현장 분석 시스템을 위한 보고서 샘플을 작성하세요. " +
+                                            REPORT_IMAGE_WORKFLOW_HINT + " " +
+                                            "보고서는 표지·목차·본문 구조로, 사고 현장 개요·사고 형태 분석·원인 추론·차량 파손 및 수리 견적·종합 수리 견적 요약·법적 면책 정보를 포함한 한국어 python-docx 스크립트(단일 ```python 블록)로 출력하세요. 모든 데이터는 add_paragraph()로만 표현하고 table.cell과 앱 전용 차트 표식은 사용하지 마세요. 섹션마다 page_break로 분리하세요."
                                 }
                             }
                             val fullText = if (dataAppendix.isNotBlank()) {
@@ -1170,7 +1188,9 @@ fun ClaudeChatScreen(
                                 if (imageBase64List.isNotEmpty()) {
                                     DAMAGE_ANALYSIS_DEFAULT_PROMPT
                                 } else {
-                                    "사고 차량 사진을 종합 분석하여 표지·목차·본문 구조의 차량 파손 분석 보고서를 한국어 python-docx 스크립트(단일 ```python 블록)로 출력하세요. 이미지 개별 언급 없이, 파손 부위별 정리 표(6~12행·6열)·깊이 분석 표(5열)·수리 견적 표(6행 이상·6열)를 핵심으로 하고, 차량 모델 정보·사고 형태 분석·원인 추론·법적 면책 정보를 보조로 포함하세요. 모든 표는 table.cell(정수행, 정수열).text = \"…\" 로 채우고 섹션마다 page_break로 분리하며 차트(bar/pie/line)를 4~6개 포함하세요."
+                                    "사고 차량 사진을 종합 분석하여 표지·목차·본문 구조의 차량 파손 분석 보고서를 한국어 python-docx 스크립트(단일 ```python 블록)로 출력하세요. " +
+                                        REPORT_IMAGE_WORKFLOW_HINT + " " +
+                                        "이미지 개별 언급 없이, 파손 부위별 정리를 add_paragraph()로 하고, 차량 모델 정보·사고 형태 분석·원인 추론·수리 예상 견적·법적 면책 정보를 포함하세요. 모든 데이터는 add_paragraph()로만 표현하고 table.cell과 앱 전용 차트 표식은 사용하지 마세요. 섹션마다 page_break로 분리하세요."
                                 }
                             }
                             ClaudeChatClient.streamDamageAnalysisReportMessage(
@@ -1384,8 +1404,8 @@ fun ClaudeChatScreen(
                 includeServerLibraryTabs = aiTabMode == AiChatTabMode.MOBILE_3DGS ||
                     aiTabMode == AiChatTabMode.DAMAGE_ANALYSIS,
                 include3dgsFileLibraryTabs = aiTabMode == AiChatTabMode.MOBILE_3DGS,
-                serverPreviewUris = serverPreviewUris,
-                serverAnalysisUris = serverAnalysisUris,
+                serverDa3RasterUris = serverDa3RasterUris,
+                serverDa3QualityJsonUris = serverDa3QualityJsonUris,
                 onPickMedia = { uris ->
                     val (media, aux) = partitionMediaAndAuxUris(context, uris)
                     val auxTrim = if (aux.size > MAX_3DGS_AUX_ATTACHMENTS) {
@@ -1483,8 +1503,8 @@ fun ClaudeChatScreen(
 private enum class ClaudeImageLibraryTab {
     GALLERY,
     DATASET,
-    GS_PREVIEW,
     GS_ANALYSIS,
+    GS_QUALITY_EVAL,
     JSON_LIBRARY,
     MODEL_3D,
     ARCORE_LIBRARY,
@@ -1528,12 +1548,13 @@ private fun ChatPickMediaThumbnail(
     restrictVideoForLlm: Boolean,
     isSelected: Boolean,
     onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val thumbPx = rememberGalleryGridThumbEdgePx(columns = 3)
     val isVid = remember(uri) { uri.isChatPickVideoUri() }
     Box(
-        modifier = Modifier
+        modifier = modifier
             .aspectRatio(1f)
             .clip(RoundedCornerShape(8.dp))
             .clickable {
@@ -1663,8 +1684,8 @@ private fun ClaudeImageSelectDialog(
     includeServerLibraryTabs: Boolean = false,
     /** 3DGS: JSON/PLY·GLB/ARCore 라이브러리 + 기기 다중 파일 탭 */
     include3dgsFileLibraryTabs: Boolean = false,
-    serverPreviewUris: List<Uri> = emptyList(),
-    serverAnalysisUris: List<Uri> = emptyList(),
+    serverDa3RasterUris: List<Uri> = emptyList(),
+    serverDa3QualityJsonUris: List<Uri> = emptyList(),
     onPickMedia: (List<Uri>) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1730,8 +1751,8 @@ private fun ClaudeImageSelectDialog(
             add(ClaudeImageLibraryTab.GALLERY)
             add(ClaudeImageLibraryTab.DATASET)
             if (includeServerLibraryTabs) {
-                add(ClaudeImageLibraryTab.GS_PREVIEW)
                 add(ClaudeImageLibraryTab.GS_ANALYSIS)
+                add(ClaudeImageLibraryTab.GS_QUALITY_EVAL)
             }
             if (include3dgsFileLibraryTabs) {
                 add(ClaudeImageLibraryTab.JSON_LIBRARY)
@@ -1760,7 +1781,7 @@ private fun ClaudeImageSelectDialog(
         Surface(
             modifier = Modifier
                 .fillMaxWidth(0.94f)
-                .height(screenH * 0.74f),
+                .height(screenH * 0.88f),
             shape = RoundedCornerShape(16.dp),
             color = palette.dialogSurface,
         ) {
@@ -1772,7 +1793,7 @@ private fun ClaudeImageSelectDialog(
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Top,
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
@@ -1788,17 +1809,6 @@ private fun ClaudeImageSelectDialog(
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold,
                         )
-                        Text(
-                            text = if (include3dgsFileLibraryTabs) {
-                                "탭을 바꿔도 선택은 유지됩니다. 사진·PLY·ZIP 등을 한 번에 고른 뒤 하단「선택 완료」로 미디어와 데이터 파일이 함께 첨부됩니다."
-                            } else {
-                                "썸네일을 눌러 선택·해제하고, 다른 탭으로 이동해 합칠 수 있습니다. 하단「선택 완료」로 첨부합니다."
-                            },
-                            color = palette.onBackgroundMuted,
-                            fontSize = 11.sp,
-                            lineHeight = 15.sp,
-                            modifier = Modifier.padding(top = 4.dp),
-                        )
                     }
                     Icon(
                         imageVector = Icons.Filled.Close,
@@ -1809,46 +1819,66 @@ private fun ClaudeImageSelectDialog(
                             .clickable { onDismiss() },
                     )
                 }
-                Spacer(modifier = Modifier.height(10.dp))
-                LazyRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                Spacer(modifier = Modifier.height(8.dp))
+                val libraryTabStripScroll = rememberScrollState()
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 200.dp)
+                        .verticalScroll(libraryTabStripScroll),
+                    verticalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
-                    items(visibleTabs.size, key = { visibleTabs[it].name }) { idx ->
-                        val tab = visibleTabs[idx]
-                        val label = when (tab) {
-                            ClaudeImageLibraryTab.GALLERY ->
-                                "갤러리 (${galleryMedia.size})"
-                            ClaudeImageLibraryTab.DATASET ->
-                                "데이터셋 (${datasetFolders.size})"
-                            ClaudeImageLibraryTab.GS_PREVIEW ->
-                                "3DGS 미리보기 (${serverPreviewUris.size})"
-                            ClaudeImageLibraryTab.GS_ANALYSIS ->
-                                "3DGS 분석 (${serverAnalysisUris.size})"
-                            ClaudeImageLibraryTab.JSON_LIBRARY ->
-                                "JSON (${jsonLibFiles.size})"
-                            ClaudeImageLibraryTab.MODEL_3D ->
-                                "PLY/GLB (${model3dLibFiles.size})"
-                            ClaudeImageLibraryTab.ARCORE_LIBRARY ->
-                                "ARCore (${arcoreLibFiles.size})"
-                            ClaudeImageLibraryTab.DEVICE_FILES ->
-                                "기기 파일"
-                        }
-                        val isSel = tab == selectedTab
-                        Text(
-                            text = label,
-                            color = if (isSel) palette.onBrand else palette.onBackground,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(
-                                    if (isSel) palette.brand
-                                    else palette.onBackground.copy(alpha = 0.12f),
+                    visibleTabs.chunked(2).forEach { rowTabs ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            rowTabs.forEach { tab ->
+                                val label = when (tab) {
+                                    ClaudeImageLibraryTab.GALLERY ->
+                                        "갤러리 (${galleryMedia.size})"
+                                    ClaudeImageLibraryTab.DATASET ->
+                                        "데이터셋 (${datasetFolders.size})"
+                                    ClaudeImageLibraryTab.GS_ANALYSIS ->
+                                        "DA3 분석 (${serverDa3RasterUris.size})"
+                                    ClaudeImageLibraryTab.GS_QUALITY_EVAL ->
+                                        "DA3 품질평가 (${serverDa3QualityJsonUris.size})"
+                                    ClaudeImageLibraryTab.JSON_LIBRARY ->
+                                        "JSON (${jsonLibFiles.size})"
+                                    ClaudeImageLibraryTab.MODEL_3D ->
+                                        "PLY/GLB (${model3dLibFiles.size})"
+                                    ClaudeImageLibraryTab.ARCORE_LIBRARY ->
+                                        "ARCore (${arcoreLibFiles.size})"
+                                    ClaudeImageLibraryTab.DEVICE_FILES ->
+                                        "기기 파일"
+                                }
+                                val isSel = tab == selectedTab
+                                Text(
+                                    text = label,
+                                    color = if (isSel) palette.onBrand else palette.onBackground,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(min = 36.dp, max = 44.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(
+                                            if (isSel) palette.brand
+                                            else palette.onBackground.copy(alpha = 0.12f),
+                                        )
+                                        .clickable { selectedTab = tab }
+                                        .padding(horizontal = 8.dp, vertical = 5.dp)
+                                        .wrapContentHeight(Alignment.CenterVertically),
                                 )
-                                .clickable { selectedTab = tab }
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                        )
+                            }
+                            if (rowTabs.size == 1) {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
+                        }
                     }
                 }
                 Spacer(modifier = Modifier.height(10.dp))
@@ -2033,14 +2063,14 @@ private fun ClaudeImageSelectDialog(
                                 }
                             }
                         }
-                        ClaudeImageLibraryTab.GS_PREVIEW -> {
-                            if (serverPreviewUris.isEmpty()) {
+                        ClaudeImageLibraryTab.GS_ANALYSIS -> {
+                            if (serverDa3RasterUris.isEmpty()) {
                                 Box(
                                     Modifier.fillMaxSize(),
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Text(
-                                        "3DGS 미리보기 이미지가 없습니다.\n서버 작업을 내려받은 뒤 다시 시도하세요.",
+                                        "DA3 분석용 이미지가 없습니다.\n상·하향 미리보기·품질·분석 PNG 등이 포함된 작업을 내려받으세요.",
                                         color = palette.onBackgroundMuted,
                                         fontSize = 14.sp,
                                         textAlign = TextAlign.Center,
@@ -2054,7 +2084,7 @@ private fun ClaudeImageSelectDialog(
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     verticalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
-                                    items(serverPreviewUris, key = { it.toString() }) { uri ->
+                                    items(serverDa3RasterUris, key = { it.toString() }) { uri ->
                                         ChatPickMediaThumbnail(
                                             uri = uri,
                                             palette = palette,
@@ -2066,14 +2096,14 @@ private fun ClaudeImageSelectDialog(
                                 }
                             }
                         }
-                        ClaudeImageLibraryTab.GS_ANALYSIS -> {
-                            if (serverAnalysisUris.isEmpty()) {
+                        ClaudeImageLibraryTab.GS_QUALITY_EVAL -> {
+                            if (serverDa3QualityJsonUris.isEmpty()) {
                                 Box(
                                     Modifier.fillMaxSize(),
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Text(
-                                        "3DGS 분석 이미지가 없습니다.\n분석 결과가 포함된 작업을 내려받으세요.",
+                                        "DA3 품질평가용 JSON이 없습니다.\nquality_report 등 JSON이 포함된 작업을 내려받으세요.",
                                         color = palette.onBackgroundMuted,
                                         fontSize = 14.sp,
                                         textAlign = TextAlign.Center,
@@ -2081,20 +2111,22 @@ private fun ClaudeImageSelectDialog(
                                     )
                                 }
                             } else {
-                                LazyVerticalGrid(
-                                    columns = GridCells.Fixed(3),
+                                LazyColumn(
                                     modifier = Modifier.fillMaxSize(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     verticalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
-                                    items(serverAnalysisUris, key = { it.toString() }) { uri ->
-                                        ChatPickMediaThumbnail(
-                                            uri = uri,
-                                            palette = palette,
-                                            restrictVideoForLlm = false,
-                                            isSelected = isPicked(uri),
-                                            onToggle = { togglePick(uri) },
-                                        )
+                                    items(serverDa3QualityJsonUris, key = { it.toString() }) { uri ->
+                                        val path = uri.path
+                                        val file =
+                                            if (path.isNullOrBlank()) null else File(path).takeIf { it.isFile }
+                                        if (file != null) {
+                                            ChatPickAuxFileRow(
+                                                file = file,
+                                                palette = palette,
+                                                isSelected = isPicked(uri),
+                                                onToggle = { togglePick(uri) },
+                                            )
+                                        }
                                     }
                                 }
                             }

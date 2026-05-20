@@ -4,13 +4,14 @@
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
-    <!-- Bold "A" with inner counter (pictogram style); fill uses theme tint in Compose -->
+    <!-- 스파클(사각별): 중앙 메인 별 + 보조 반짝임 — Compose tint 적용 -->
     <path
         android:fillColor="#FF000000"
-        android:fillType="evenOdd"
-        android:pathData="M3.0,19.8 L8.15,3.9 L13.35,19.8 H11.7 L10.45,14.85 H5.55 L4.25,19.8 Z M8.15,8.35 L10.15,13.45 H6.2 Z" />
-    <!-- Bold "I" with rounded ends -->
+        android:pathData="M12,4 L13.85,10.15 L20.5,12 L13.85,13.85 L12,20 L10.15,13.85 L3.5,12 L10.15,10.15 Z" />
     <path
         android:fillColor="#FF000000"
-        android:pathData="M15.65,4.35 L18.85,4.35 Q19.85,4.35 19.85,5.35 L19.85,18.65 Q19.85,19.65 18.85,19.65 L15.65,19.65 Q14.65,19.65 14.65,18.65 L14.65,5.35 Q14.65,4.35 15.65,4.35 Z" />
+        android:pathData="M17.5,5.8 L17.9,7 L19.15,7.22 L17.9,7.45 L17.5,8.65 L17.1,7.45 L15.85,7.22 L17.1,7 Z" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M6.5,15.35 L6.9,16.55 L8.15,16.77 L6.9,17 L6.5,18.2 L6.1,17 L4.85,16.77 L6.1,16.55 Z" />
 </vector>
