@@ -5753,52 +5753,44 @@ fun GalleryScreen(
                                                                     },
                                                                 )
                                                                 pipelineOk = pr != null
-                                                            } else {
-                                                                // ARCore ZIP의 poses.json을 데이터셋 ZIP에 병합 (서버 file_pc 사양)
-                                                                val mergedZip = mergeArcorePosesIntoDatasetZip(
-                                                                    rawDatasetZip, arcoreZipForGs, context,
-                                                                )
-                                                                val datasetUploadZip = mergedZip ?: rawDatasetZip
-                                                                if (mergedZip != null && mergedZip != rawDatasetZip) {
-                                                                    try { rawDatasetZip.delete() } catch (_: Exception) {}
-                                                                }
-                                                                val pr = uploadZipAndRunPipeline(
-                                                                    context = context,
-                                                                    zipFile = datasetUploadZip,
-                                                                    prompt = "",
-                                                                    onProgress = { p, msg ->
-                                                                        uploadProgress = p to 100
-                                                                        uploadMessage = msg
-                                                                    },
-                                                                    gsZipFile = arcoreZipForGs,
-                                                                    contentDispositionFilename = SERVER_PIPELINE_ZIP_NAME_DATASET,
-                                                                    contentDispositionGsFilename = SERVER_PIPELINE_ZIP_NAME_ARCORE,
-                                                                    onDa3Complete = { da3Bundle ->
-                                                                        mainHandler.post {
-                                                                            try {
-                                                                                isUploading = false
-                                                                                pending3DArcoreZipUriForDataset = null
-                                                                                onServerPipelineCompleteBundleChange(da3Bundle)
-                                                                                if (da3Bundle.gsViewerUrl.isNullOrBlank()) {
-                                                                                    onGs3dWaitingChange(true)
-                                                                                }
-                                                                                if (shouldAutoGenerateModelThumbnail(da3Bundle.plyFile)) {
-                                                                                    libraryModelThumbRefresh++
-                                                                                }
-                                                                                selectedDatasetFolders = emptySet()
-                                                                                isDatasetEditMode = false
-                                                                            } catch (t: Throwable) {
-                                                                                logLibraryLoadFailure("데이터셋 DA3 완료 UI 갱신", t)
-                                                                                isUploading = false
-                                                                            }
-                                                                        }
-                                                                    },
-                                                                    onGs3dUrl = { url ->
-                                                                        onShowGs3dPopup(url)
-                                                                        onGs3dWaitingChange(false)
-                                                                    },
-                                                                )
-                                                                pipelineOk = pr != null
+                                                             } else {
+                                                                 val pr = uploadZipAndRunPipeline(
+                                                                     context = context,
+                                                                     zipFile = arcoreZipForGs,
+                                                                     prompt = "",
+                                                                     onProgress = { p, msg ->
+                                                                         uploadProgress = p to 100
+                                                                         uploadMessage = msg
+                                                                     },
+                                                                     gsZipFile = rawDatasetZip,
+                                                                     contentDispositionFilename = SERVER_PIPELINE_ZIP_NAME_DATASET,
+                                                                     contentDispositionGsFilename = SERVER_PIPELINE_ZIP_NAME_ARCORE,
+                                                                     onDa3Complete = { da3Bundle ->
+                                                                         mainHandler.post {
+                                                                             try {
+                                                                                 isUploading = false
+                                                                                 pending3DArcoreZipUriForDataset = null
+                                                                                 onServerPipelineCompleteBundleChange(da3Bundle)
+                                                                                 if (da3Bundle.gsViewerUrl.isNullOrBlank()) {
+                                                                                     onGs3dWaitingChange(true)
+                                                                                 }
+                                                                                 if (shouldAutoGenerateModelThumbnail(da3Bundle.plyFile)) {
+                                                                                     libraryModelThumbRefresh++
+                                                                                 }
+                                                                                 selectedDatasetFolders = emptySet()
+                                                                                 isDatasetEditMode = false
+                                                                             } catch (t: Throwable) {
+                                                                                 logLibraryLoadFailure("데이터셋 DA3 완료 UI 갱신", t)
+                                                                                 isUploading = false
+                                                                             }
+                                                                         }
+                                                                     },
+                                                                     onGs3dUrl = { url ->
+                                                                         onShowGs3dPopup(url)
+                                                                         onGs3dWaitingChange(false)
+                                                                     },
+                                                                 )
+                                                                 pipelineOk = pr != null
                                                             }
                                                         }
                                                         if (!pipelineOk) {
