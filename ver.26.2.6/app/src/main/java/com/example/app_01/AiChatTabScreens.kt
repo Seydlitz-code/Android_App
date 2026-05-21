@@ -674,7 +674,7 @@ fun ClaudeChatScreen(
                         text = when (aiTabMode) {
                             AiChatTabMode.CLAUDE -> "클로드"
                             AiChatTabMode.AI_CAD -> "AI CAD"
-                            AiChatTabMode.MOBILE_3DGS -> "DA3 분석"
+                            AiChatTabMode.MOBILE_3DGS -> "사고 현장 분석"
                             AiChatTabMode.DAMAGE_ANALYSIS -> "파손부위 분석"
                         },
                         color = palette.onBackground,
@@ -724,7 +724,7 @@ fun ClaudeChatScreen(
                     DropdownMenuItem(
                         text = {
                             Text(
-                                "DA3 분석",
+                                "사고 현장 분석",
                                 color = palette.onBackground,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 14.sp,
