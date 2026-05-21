@@ -60,7 +60,6 @@ fun convertPlyToObjCached(context: Context, plyFile: File): ObjConversionResult 
     return try {
         val outDir = File(storageRoot, "models_obj").apply { mkdirs() }
 
-        // OBJ 캐시 크기 제한: 총 256 MB 초과 시 가장 오래된 파일부터 삭제
         pruneObjCacheDir(outDir, maxTotalBytes = 256L * 1024L * 1024L)
 
         val key = "${plyFile.nameWithoutExtension}_${plyFile.lastModified()}_v5"
@@ -94,7 +93,6 @@ fun convertPlyToObjCached(context: Context, plyFile: File): ObjConversionResult 
         val faces = readPlyFacesIfPresent(plyFile)
         val previewMesh = buildPreviewMeshFromPly(points, count, vtxColors, faces)
 
-        // 기존 캐시(같은 nameWithoutExtension) 정리(너무 많이 쌓이는 것 방지)
         outDir.listFiles { f ->
             f.isFile &&
                 f.name.startsWith("${plyFile.nameWithoutExtension}_") &&
@@ -433,7 +431,6 @@ private fun parsePlyHeader(raf: RandomAccessFile): PlyHeader {
     var inFaceSection = false
     val props = ArrayList<PlyProperty>(16)
 
-    // 첫 줄은 보통 "ply"
     val first = raf.readLine() ?: throw IllegalArgumentException("PLY 헤더를 읽을 수 없습니다.")
     if (!first.trim().equals("ply", ignoreCase = true)) {
         throw IllegalArgumentException("PLY 파일이 아닙니다(첫 줄: $first)")
@@ -464,14 +461,12 @@ private fun parsePlyHeader(raf: RandomAccessFile): PlyHeader {
             continue
         }
         if (t.startsWith("element")) {
-            // vertex/face 외 element
             inVertex = false
             inFaceSection = false
             continue
         }
         if (t.startsWith("property") && inVertex) {
             val parts = t.split(Regex("\\s+"))
-            // list property는 미지원 (point cloud 목적)
             if (parts.size >= 5 && parts[1] == "list") {
                 throw IllegalArgumentException("PLY vertex에 list property가 포함되어 있어 지원하지 않습니다: $t")
             }
@@ -1077,13 +1072,11 @@ fun parseStlVertices(file: File): ObjParseResult? {
     if (!file.exists() || file.length() < 15L) return null
     return try {
         val bytes = file.readBytes()
-        // 1) 텍스트 STL: "solid" + "facet" 등 — 바이너리로 잘못 읽으면 깨짐
         if (looksLikeAsciiStl(bytes)) {
             parseStlAscii(String(bytes, StandardCharsets.UTF_8))?.let { return it }
         }
         // 2) 바이너리 STL (헤더·파일 길이 불일치·끝 패딩 허용) — OpenSCAD 등이 내보낸 큰 메쉬에 흔함
         parseStlBinaryRelaxed(bytes)?.let { return it }
-        // 3) 판별 실패 시 마지막으로 ASCII 재시도
         parseStlAscii(String(bytes, StandardCharsets.UTF_8))
     } catch (e: Exception) {
         e.printStackTrace()

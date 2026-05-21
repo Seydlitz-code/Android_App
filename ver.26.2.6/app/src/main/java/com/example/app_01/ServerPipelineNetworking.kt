@@ -292,7 +292,6 @@ internal fun getServerDownloadOkHttpClient(useHttps: Boolean): OkHttpClient {
     }
 }
 
-// #region agent log
 @Suppress("unused")
 private fun debugIngestLoopbackHost(): String {
     val fp = Build.FINGERPRINT ?: ""
@@ -377,7 +376,6 @@ private fun agentDebugHeapSnapshot(
     resultsFilesLen?.let { d.put("resultsFilesLen", it) }
     agentDebugNdjson(context, "OOM", "ServerPipelineNetworking.kt:heap", "heap_snapshot", d)
 }
-// #endregion
 
 /**
  * ZIP 업로드(POST /upload) 직후 서버가 돌려준 task_id 또는 실패 사유.
@@ -764,7 +762,6 @@ internal suspend fun fetchServerResultsJson(context: Context, taskId: String): J
             client.newCall(request).execute().use { response ->
                 val httpCode = response.code
                 if (!response.isSuccessful) {
-                    // #region agent log
                     agentDebugNdjson(
                         context,
                         "H1",
@@ -776,11 +773,9 @@ internal suspend fun fetchServerResultsJson(context: Context, taskId: String): J
                             put("httpCode", httpCode)
                         },
                     )
-                    // #endregion
                     return@withContext null
                 }
                 val body = response.body ?: run {
-                    // #region agent log
                     agentDebugNdjson(
                         context,
                         "H1",
@@ -792,7 +787,6 @@ internal suspend fun fetchServerResultsJson(context: Context, taskId: String): J
                             put("httpCode", httpCode)
                         },
                     )
-                    // #endregion
                     return@withContext null
                 }
                 // OOM 방지: Content-Length 헤더가 있으면 먼저 확인, 없으면(-1) 스트리밍 읽기로 상한 적용.
@@ -802,7 +796,6 @@ internal suspend fun fetchServerResultsJson(context: Context, taskId: String): J
                 val contentLength = body.contentLength()
                 if (contentLength > maxJsonBytes) {
                     android.util.Log.w("fetchServerResultsJson", "결과 JSON이 너무 큼(${contentLength / 1024} KB), 스킵")
-                    // #region agent log
                     agentDebugNdjson(
                         context,
                         "H1",
@@ -815,7 +808,6 @@ internal suspend fun fetchServerResultsJson(context: Context, taskId: String): J
                             put("cap", maxJsonBytes)
                         },
                     )
-                    // #endregion
                     return@withContext null
                 }
                 val jo = parseResultsFilesRootStreaming(body, maxJsonBytes)
@@ -824,7 +816,6 @@ internal suspend fun fetchServerResultsJson(context: Context, taskId: String): J
                         "fetchServerResultsJson",
                         "결과 JSON 스트리밍 파싱 실패 또는 본문 상한(${maxJsonBytes / 1024} KB) 초과",
                     )
-                    // #region agent log
                     agentDebugNdjson(
                         context,
                         "H1",
@@ -836,10 +827,8 @@ internal suspend fun fetchServerResultsJson(context: Context, taskId: String): J
                             put("cap", maxJsonBytes)
                         },
                     )
-                    // #endregion
                     return@withContext null
                 }
-                // #region agent log
                 agentDebugNdjson(
                     context,
                     "H1",
@@ -852,12 +841,10 @@ internal suspend fun fetchServerResultsJson(context: Context, taskId: String): J
                         put("parseMode", "streaming_files_only")
                     },
                 )
-                // #endregion
                 jo
             }
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException) throw t
-            // #region agent log
             agentDebugNdjson(
                 context,
                 "H1",
@@ -869,7 +856,6 @@ internal suspend fun fetchServerResultsJson(context: Context, taskId: String): J
                     put("err", t.javaClass.simpleName)
                 },
             )
-            // #endregion
             t.printStackTrace()
             null
         }
@@ -895,7 +881,6 @@ internal suspend fun downloadHttpUrlToFile(
                 .build()
             client.newCall(request).execute().use { response ->
                 val body = response.body
-                // #region agent log
                 agentDebugNdjson(
                     context,
                     "H2",
@@ -908,7 +893,6 @@ internal suspend fun downloadHttpUrlToFile(
                         put("urlSample", absoluteUrl.take(180))
                     },
                 )
-                // #endregion
                 if (!response.isSuccessful || body == null) {
                     return@withContext false
                 }
@@ -957,7 +941,6 @@ internal suspend fun downloadHttpUrlToFile(
                         "incomplete download: ${partFile.length()} / $contentLength bytes ($absoluteUrl)",
                     )
                     try { partFile.delete() } catch (_: Exception) {}
-                    // #region agent log
                     agentDebugNdjson(
                         context,
                         "H3",
@@ -969,7 +952,6 @@ internal suspend fun downloadHttpUrlToFile(
                             put("urlSample", absoluteUrl.take(180))
                         },
                     )
-                    // #endregion
                     return@withContext false
                 }
                 try {
@@ -981,7 +963,6 @@ internal suspend fun downloadHttpUrlToFile(
                     partFile.delete()
                 }
                 val okFinal = outFile.exists() && outFile.length() > 0L
-                // #region agent log
                 agentDebugNdjson(
                     context,
                     "H3",
@@ -994,13 +975,10 @@ internal suspend fun downloadHttpUrlToFile(
                         put("urlSample", absoluteUrl.take(180))
                     },
                 )
-                // #endregion
                 okFinal
             }
         } catch (t: Throwable) {
-            // CancellationException은 구조적 동시성을 위해 반드시 재투소
             if (t is kotlinx.coroutines.CancellationException) throw t
-            // #region agent log
             agentDebugNdjson(
                 context,
                 "H2",
@@ -1011,7 +989,6 @@ internal suspend fun downloadHttpUrlToFile(
                     put("urlSample", absoluteUrl.take(180))
                 },
             )
-            // #endregion
             android.util.Log.w("downloadHttpUrlToFile", absoluteUrl, t)
             try {
                 outFile.delete()
@@ -1035,7 +1012,6 @@ internal suspend fun downloadServerPipelineArtifacts(
         downloadServerPipelineArtifactsImpl(context, taskId, onProgress)
     } catch (t: Throwable) {
         if (t is kotlinx.coroutines.CancellationException) throw t
-        // #region agent log
         runCatching {
             agentDebugNdjson(
                 context,
@@ -1051,7 +1027,6 @@ internal suspend fun downloadServerPipelineArtifacts(
             )
             agentDebugHeapSnapshot(context, "catch_after_download_error")
         }
-        // #endregion
         android.util.Log.e("downloadServerPipelineArtifacts", "아티팩트 다운로드 중 예기치 못한 오류", t)
         runCatching {
             AppWarningLog.record(
@@ -1078,7 +1053,6 @@ private suspend fun downloadServerPipelineArtifactsImpl(
     } catch (_: Exception) {
     }
     stagingDir.mkdirs()
-    // #region agent log
     agentDebugNdjson(
         context,
         "H5",
@@ -1091,20 +1065,15 @@ private suspend fun downloadServerPipelineArtifactsImpl(
             put("useHttps", getUseHttps(context))
         },
     )
-    // #endregion
-    // #region agent log
     agentDebugHeapSnapshot(context, "pre_fetch_results")
-    // #endregion
     val json = fetchServerResultsJson(context, taskId)
     val filesArr: JSONArray? = json?.optJSONArray("files")
-    // #region agent log
     agentDebugHeapSnapshot(
         context,
         "post_fetch_results",
         resultsJsonNull = json == null,
         resultsFilesLen = filesArr?.length() ?: -1,
     )
-    // #endregion
     val staged = LinkedHashMap<String, File>()
     val progressLock = Any()
     fun safeProgress(p: Int, msg: String) {
@@ -1189,7 +1158,6 @@ private suspend fun downloadServerPipelineArtifactsImpl(
 
         safeProgress(99, "다운로드 검증 중...")
         val published = publishDownloadedServerTask(stagingDir, finalDir)
-        // #region agent log
         agentDebugNdjson(
             context,
             "H4",
@@ -1203,7 +1171,6 @@ private suspend fun downloadServerPipelineArtifactsImpl(
                 )
             },
         )
-        // #endregion
         if (!published) return null
 
         try {
@@ -1220,9 +1187,7 @@ private suspend fun downloadServerPipelineArtifactsImpl(
             directory = finalDir,
             filesByKey = finalMap,
         )
-        // #region agent log
         agentDebugHeapSnapshot(context, "bundle_ready_ok")
-        // #endregion
         return bundle
     } finally {
         try {
@@ -1324,7 +1289,6 @@ internal fun pruneOldServerTaskDirs(
                 f.name != protectedName
         } ?: return
         if (taskDirs.size <= keepLatest) return
-        // 수정 시각 내림차순 정렬 → 오래된 것이 뒤에 위치
         val sorted = taskDirs.sortedByDescending { it.lastModified() }
         sorted.drop(keepLatest).forEach { dir ->
             try {

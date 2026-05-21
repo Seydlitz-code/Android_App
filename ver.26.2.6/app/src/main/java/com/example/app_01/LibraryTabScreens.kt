@@ -128,6 +128,7 @@ import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.outlined.Article
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.Description
@@ -295,11 +296,11 @@ import kotlinx.coroutines.withContext
 import com.example.app_01.ui.theme.App_01Theme
 import java.io.File
 import java.io.FileInputStream
+import java.text.SimpleDateFormat
+import java.util.Locale
 import java.io.FileOutputStream
 import java.util.TimeZone
 import java.io.IOException
-import java.text.SimpleDateFormat
-import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.sqrt
@@ -348,9 +349,6 @@ fun LibraryTabButton(
 }
 
 
-
-
-
 // ── 권한 관리 화면 ─────────────────────────────────────────────────────────────
 
 @Composable
@@ -358,7 +356,6 @@ fun PermissionManagementScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val palette = LocalAppUiPalette.current
 
-    // 권한 상태를 실시간 반영하기 위해 화면이 포커스를 가질 때마다 다시 체크
     var refreshKey by remember { mutableStateOf(0) }
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -371,7 +368,6 @@ fun PermissionManagementScreen(onBack: () -> Unit) {
 
     val permissions = remember(refreshKey) { AppPermissions.list(context) }
 
-    // 미승인 권한 일괄 요청 런처
     val requestLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { refreshKey++ }
@@ -404,7 +400,6 @@ fun PermissionManagementScreen(onBack: () -> Unit) {
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.weight(1f)
             )
-            // 미승인 권한이 있으면 일괄 요청 버튼 표시
             val ungrantedApplicable = permissions.filter { !it.isGranted(context) }
             if (ungrantedApplicable.isNotEmpty()) {
                 Text(
@@ -443,7 +438,6 @@ fun PermissionManagementScreen(onBack: () -> Unit) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            // 앱 설정 화면으로 이동
                             val intent = Intent(
                                 android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                                 Uri.fromParts("package", context.packageName, null)
@@ -453,7 +447,6 @@ fun PermissionManagementScreen(onBack: () -> Unit) {
                         .padding(horizontal = 16.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 상태 아이콘
                     Box(
                         modifier = Modifier
                             .size(36.dp)
@@ -473,7 +466,6 @@ fun PermissionManagementScreen(onBack: () -> Unit) {
 
                     Spacer(modifier = Modifier.width(14.dp))
 
-                    // 권한 이름 + 설명
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = perm.name,
@@ -491,7 +483,6 @@ fun PermissionManagementScreen(onBack: () -> Unit) {
 
                     Spacer(modifier = Modifier.width(8.dp))
 
-                    // 상태 뱃지
                     Text(
                         text = if (granted) "허용됨" else "거부됨",
                         color = if (granted) Color(0xFF4CAF50) else Color(0xFFFF6B6B),
@@ -529,7 +520,6 @@ fun SensorCheckScreen(onBack: () -> Unit) {
         onBack()
     }
 
-    // 어플 구동(공간 촬영 및 기울기 측정)에 필수적인 센서만 구성
     val sensorItems = remember {
         listOf(
             SensorInfo("회전 벡터(게임/일반)", Sensor.TYPE_ROTATION_VECTOR, Icons.Outlined.Explore),
@@ -545,7 +535,6 @@ fun SensorCheckScreen(onBack: () -> Unit) {
             .background(palette.background)
             .padding(16.dp)
     ) {
-        // 헤더
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -567,7 +556,6 @@ fun SensorCheckScreen(onBack: () -> Unit) {
             )
         }
 
-        // 3열 그리드 레이아웃
         LazyVerticalGrid(
             columns = GridCells.Fixed(3),
             modifier = Modifier.fillMaxSize(),
@@ -722,16 +710,13 @@ fun SensorGridItem(name: String, icon: ImageVector, isPresent: Boolean) {
                 modifier = Modifier.size(48.dp)
             )
             
-            // 미보유 시 빨간색 금지 표시 (원 + 사선)
             if (!isPresent) {
                 Canvas(modifier = Modifier.size(48.dp)) {
                     val strokeWidth = 3.dp.toPx()
-                    // 빨간 원
                     drawCircle(
                         color = Color.Red,
                         style = Stroke(width = strokeWidth)
                     )
-                    // 사선
                     drawLine(
                         color = Color.Red,
                         start = Offset(size.width * 0.2f, size.height * 0.2f),
@@ -985,6 +970,98 @@ private fun Model3dFormatHubGrid(
     }
 }
 
+private fun formatLibraryFileSizeLabel(bytes: Long): String {
+    if (bytes < 0L) return "—"
+    val kb = 1024.0
+    val mb = kb * 1024.0
+    val gb = mb * 1024.0
+    return when {
+        bytes >= gb -> String.format(Locale.KOREAN, "%.2f GB", bytes / gb)
+        bytes >= mb -> String.format(Locale.KOREAN, "%.1f MB", bytes / mb)
+        bytes >= kb -> String.format(Locale.KOREAN, "%.1f KB", bytes / kb)
+        else -> "$bytes B"
+    }
+}
+
+private fun formatLibraryFileDateLabel(millis: Long): String =
+    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREAN).format(Date(millis))
+
+/** JSON·품질평가·ARCore 라이브러리 공통 가로형 파일 행 (파일명 / 하단 좌·우 정보) */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun LibraryDocumentFileListRow(
+    fileName: String,
+    detailLeftLabel: String,
+    modifiedMillis: Long,
+    delHighlight: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val palette = LocalAppUiPalette.current
+    val cardShape = RoundedCornerShape(14.dp)
+    val cardBg = if (palette.isDark) {
+        Color(0xFF2C2C2E)
+    } else {
+        Color(0xFFE4E8ED)
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(cardShape)
+            .then(
+                if (delHighlight) {
+                    Modifier.border(2.dp, Color(0xFFFF5252), cardShape)
+                } else {
+                    Modifier
+                },
+            )
+            .background(cardBg)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+    ) {
+        Text(
+            text = fileName,
+            color = palette.onBackground,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Start,
+            lineHeight = 18.sp,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = detailLeftLabel,
+                color = palette.onBackgroundMuted,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Start,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = formatLibraryFileDateLabel(modifiedMillis),
+                color = palette.onBackgroundMuted,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Start,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+private fun formatArcoreZipCountLabel(imageCount: Int, jsonCount: Int): String =
+    "이미지 ${imageCount}장 · JSON ${jsonCount}개"
+
 /** 갤럭시 갤러리 스타일 라이브러리 앨범 허브 (데이터셋 / PLY 구역) */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -998,7 +1075,6 @@ private fun LibraryAlbumHubGrid(
     gsPreviewCount: Int,
     gsAnalysisCount: Int,
     gsPreviewCoverUri: Uri?,
-    gsAnalysisCoverUri: Uri?,
     jsonLibraryCount: Int,
     arcoreLibraryCount: Int,
     glbLibraryCount: Int,
@@ -1085,10 +1161,9 @@ private fun LibraryAlbumHubGrid(
         HubEntry(
             LibraryTab.GS_ANALYSIS, "DA3 품질평가",
             "${gsAnalysisCount}개",
-            gsAnalysisCoverUri,
-            Icons.Outlined.Description,
+            null,
+            Icons.Outlined.Article,
             placeholderInk,
-            useDocumentVerifiedPlaceholder = true,
             compactSingleLineTitle = true,
         ),
         HubEntry(
@@ -1370,7 +1445,6 @@ fun GalleryScreen(
     val gsPreviewCount = remember(serverTaskManifestInfos) { countPreviewTasks(serverTaskManifestInfos) }
     val gsAnalysisCount = remember(serverTaskManifestInfos) { countAnalysisTasks(serverTaskManifestInfos) }
     val gsPreviewCoverUri = gsPreviewUris.firstOrNull()
-    val gsAnalysisCoverUri = remember(gsAnalysisGridItems) { gsAnalysisCoverUriFirstImage(gsAnalysisGridItems) }
     val noServerResponseMsg = "서버에 대한 응답이 없습니다.\n서버 연결을 확인해주십시오."
     var isEditMode by remember { mutableStateOf(false) }
     var selectedItems by remember { mutableStateOf<Set<Uri>>(emptySet()) }
@@ -1438,7 +1512,6 @@ fun GalleryScreen(
     var aiCadStlFiles by remember { mutableStateOf<List<File>>(emptyList()) }
     var selectedAiCadStlFile by remember { mutableStateOf<File?>(null) }
 
-    // [추가] 내보내기/가져오기 작업 상태
     var isTransferring by remember { mutableStateOf(false) }
     val transferScope = rememberCoroutineScope()
     val pipelineUploadScope = rememberCoroutineScope()
@@ -1599,19 +1672,16 @@ fun GalleryScreen(
         }
     }
 
-    // [추가] 1차 배경제거 작업 상태
     var isBgRemoving by remember { mutableStateOf(false) }
     var showBgRemoveDialog by remember { mutableStateOf(false) }
     var bgRemovePrompt by remember { mutableStateOf("") }
     var bgRemovePromptError by remember { mutableStateOf(false) }
 
-    // [추가] 광택 제거 작업 상태
     var isGlareRemoving by remember { mutableStateOf(false) }
     var glareProgressPercent by remember { mutableStateOf(0) }
     var glareProgressMessage by remember { mutableStateOf("") }
     var glareResultMessage by remember { mutableStateOf<String?>(null) }
 
-    // 3D 모델링 전송 팝업 상태
     var show3DModelingDialog by remember { mutableStateOf(false) }
     var modelingPromptText by remember { mutableStateOf("") }
     var modelingPromptError by remember { mutableStateOf(false) }
@@ -1636,7 +1706,6 @@ fun GalleryScreen(
     var sam3ProgressMessage by remember { mutableStateOf("") }
     var sam3ResultMessage by remember { mutableStateOf<String?>(null) }
 
-    // [추가] 가져오기 런처 (시스템 갤러리/파일 선택)
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris ->
@@ -1825,7 +1894,6 @@ fun GalleryScreen(
         }
     }
 
-    // 뒤로가기 버튼 처리 (편집 모드에서만)
     BackHandler(enabled = isEditMode || isDatasetEditMode || libraryAssetEditMode) {
         when {
             libraryTab == LibraryTab.DATASET && isDatasetEditMode -> {
@@ -1961,8 +2029,6 @@ fun GalleryScreen(
         }
     }
 
-    // [추가] 데이터셋 탭에서 0장(빈) 폴더 주기적 자동 삭제/갱신
-    // - 폴더 상세 화면에서는 폴더가 사라지면 UX가 깨질 수 있어 제외
     LaunchedEffect(libraryTab, libraryDetailScreen) {
         if (libraryTab != LibraryTab.DATASET) return@LaunchedEffect
         if (libraryDetailScreen == LibraryDetailScreen.DATASET_FOLDER) return@LaunchedEffect
@@ -2004,7 +2070,6 @@ fun GalleryScreen(
             .fillMaxSize()
             .background(palette.background)
     ) {
-        // 헤더 (허브: 제목만 / 구역: ‹ 뒤로 + 현재 구역명 + 취소)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2655,7 +2720,6 @@ fun GalleryScreen(
                     gsPreviewCount = gsPreviewCount,
                     gsAnalysisCount = gsAnalysisCount,
                     gsPreviewCoverUri = gsPreviewCoverUri,
-                    gsAnalysisCoverUri = gsAnalysisCoverUri,
                     jsonLibraryCount = jsonLibraryFiles.size,
                     arcoreLibraryCount = arcoreLibraryFiles.size,
                     glbLibraryCount = glbLibraryFiles.size,
@@ -3315,7 +3379,6 @@ fun GalleryScreen(
                                                     uploadMessage = "선택된 폴더가 없습니다"
                                                 }
                                                 else -> {
-                                                    // 3D 모델링 프롬프트 팝업을 먼저 표시
                                                     pending3DSourceTab = LibraryTab.DATASET
                                                     pending3DDatasetFolders = selectedDatasetFolders.toList()
                                                     pending3DArcoreZipUriForDataset = null
@@ -3558,12 +3621,10 @@ fun GalleryScreen(
                     )
                 }
             } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(4),
+                LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     itemsIndexed(
                         gsAnalysisGridItems,
@@ -3575,51 +3636,24 @@ fun GalleryScreen(
                                     "qj:${item.taskId}:${item.file.absolutePath}"
                             }
                         },
-                    ) { index, item ->
+                    ) { _, item ->
                         when (item) {
                             is GsAnalysisGridItem.ImageTile -> {
                                 val uri = item.uri
                                 val filePath = item.canonicalPath
-                                val delHighlight =
-                                    filePath != null && filePath in selectedLibraryDeletePaths
-                                Image(
-                                    painter = rememberGalleryGridPhotoPainter(uri, gridThumbPx),
-                                    contentDescription = "3DGS 분석 이미지",
-                                    modifier = Modifier
-                                        .aspectRatio(1f)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .then(
-                                            if (delHighlight) {
-                                                Modifier.border(
-                                                    2.dp,
-                                                    Color(0xFFFF5252),
-                                                    RoundedCornerShape(8.dp),
-                                                )
-                                            } else {
-                                                Modifier
-                                            },
-                                        )
-                                        .combinedClickable(
-                                            onClick = {
-                                                if (selectedLibraryDeletePaths.isNotEmpty()) {
-                                                    filePath?.let { p ->
-                                                        selectedLibraryDeletePaths =
-                                                            if (p in selectedLibraryDeletePaths) {
-                                                                selectedLibraryDeletePaths - p
-                                                            } else {
-                                                                selectedLibraryDeletePaths + p
-                                                            }
-                                                    }
-                                                } else {
-                                                    val imgIndex = gsAnalysisImageUrisOnly.indexOf(uri)
-                                                    if (imgIndex >= 0) {
-                                                        onServerPipelineOpenImageViewer(gsAnalysisImageUrisOnly, imgIndex)
-                                                    } else {
-                                                        onServerPipelineOpenImageViewer(listOf(uri), 0)
-                                                    }
-                                                }
-                                            },
-                                            onLongClick = {
+                                val file = remember(uri) {
+                                    uri.path?.let { File(it) }?.takeIf { it.isFile }
+                                }
+                                if (file != null) {
+                                    val delHighlight =
+                                        filePath != null && filePath in selectedLibraryDeletePaths
+                                    LibraryDocumentFileListRow(
+                                        fileName = file.name,
+                                        detailLeftLabel = formatLibraryFileSizeLabel(file.length()),
+                                        modifiedMillis = file.lastModified(),
+                                        delHighlight = delHighlight,
+                                        onClick = {
+                                            if (selectedLibraryDeletePaths.isNotEmpty()) {
                                                 filePath?.let { p ->
                                                     selectedLibraryDeletePaths =
                                                         if (p in selectedLibraryDeletePaths) {
@@ -3628,81 +3662,66 @@ fun GalleryScreen(
                                                             selectedLibraryDeletePaths + p
                                                         }
                                                 }
-                                            },
-                                        ),
-                                    contentScale = ContentScale.Crop,
-                                )
+                                            } else {
+                                                val imgIndex = gsAnalysisImageUrisOnly.indexOf(uri)
+                                                if (imgIndex >= 0) {
+                                                    onServerPipelineOpenImageViewer(
+                                                        gsAnalysisImageUrisOnly,
+                                                        imgIndex,
+                                                    )
+                                                } else {
+                                                    onServerPipelineOpenImageViewer(listOf(uri), 0)
+                                                }
+                                            }
+                                        },
+                                        onLongClick = {
+                                            filePath?.let { p ->
+                                                selectedLibraryDeletePaths =
+                                                    if (p in selectedLibraryDeletePaths) {
+                                                        selectedLibraryDeletePaths - p
+                                                    } else {
+                                                        selectedLibraryDeletePaths + p
+                                                    }
+                                            }
+                                        },
+                                    )
+                                }
                             }
                             is GsAnalysisGridItem.QualityJsonTile -> {
+                                val file = item.file
                                 val filePath = item.canonicalPath
                                 val delHighlight =
                                     filePath != null && filePath in selectedLibraryDeletePaths
-                                Box(
-                                    modifier = Modifier
-                                        .aspectRatio(1f)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(palette.surfaceCardAlt)
-                                        .then(
-                                            if (delHighlight) {
-                                                Modifier.border(
-                                                    2.dp,
-                                                    Color(0xFFFF5252),
-                                                    RoundedCornerShape(8.dp),
-                                                )
-                                            } else {
-                                                Modifier
-                                            },
-                                        )
-                                        .combinedClickable(
-                                            onClick = {
-                                                if (selectedLibraryDeletePaths.isNotEmpty()) {
-                                                    filePath?.let { p ->
-                                                        selectedLibraryDeletePaths =
-                                                            if (p in selectedLibraryDeletePaths) {
-                                                                selectedLibraryDeletePaths - p
-                                                            } else {
-                                                                selectedLibraryDeletePaths + p
-                                                            }
+                                LibraryDocumentFileListRow(
+                                    fileName = file.name,
+                                    detailLeftLabel = formatLibraryFileSizeLabel(file.length()),
+                                    modifiedMillis = file.lastModified(),
+                                    delHighlight = delHighlight,
+                                    onClick = {
+                                        if (selectedLibraryDeletePaths.isNotEmpty()) {
+                                            filePath?.let { p ->
+                                                selectedLibraryDeletePaths =
+                                                    if (p in selectedLibraryDeletePaths) {
+                                                        selectedLibraryDeletePaths - p
+                                                    } else {
+                                                        selectedLibraryDeletePaths + p
                                                     }
+                                            }
+                                        } else {
+                                            qualityReportDialogFile = file
+                                        }
+                                    },
+                                    onLongClick = {
+                                        filePath?.let { p ->
+                                            selectedLibraryDeletePaths =
+                                                if (p in selectedLibraryDeletePaths) {
+                                                    selectedLibraryDeletePaths - p
                                                 } else {
-                                                    qualityReportDialogFile = item.file
+                                                    selectedLibraryDeletePaths + p
                                                 }
-                                            },
-                                            onLongClick = {
-                                                filePath?.let { p ->
-                                                    selectedLibraryDeletePaths =
-                                                        if (p in selectedLibraryDeletePaths) {
-                                                            selectedLibraryDeletePaths - p
-                                                        } else {
-                                                            selectedLibraryDeletePaths + p
-                                                        }
-                                                }
-                                            },
-                                        ),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Column(
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        modifier = Modifier.padding(6.dp),
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Outlined.Description,
-                                            contentDescription = "품질 리포트",
-                                            tint = palette.onBackground.copy(alpha = 0.55f),
-                                            modifier = Modifier.size(36.dp),
-                                        )
-                                        Spacer(modifier = Modifier.height(4.dp))
-                                        Text(
-                                            text = "품질\n평가",
-                                            color = palette.onBackground.copy(alpha = 0.85f),
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            textAlign = TextAlign.Center,
-                                            lineHeight = 13.sp,
-                                            maxLines = 2,
-                                        )
-                                    }
-                                }
+                                        }
+                                    },
+                                )
                             }
                         }
                     }
@@ -3725,78 +3744,42 @@ fun GalleryScreen(
                     )
                 }
             } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(4),
+                LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     items(jsonLibraryFiles, key = { it.absolutePath }) { file ->
                         val fPath = remember(file.absolutePath, file.lastModified()) {
                             runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
                         }
                         val delHighlight = fPath in selectedLibraryDeletePaths
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .border(1.dp, palette.onBackground.copy(alpha = 0.18f), RoundedCornerShape(10.dp))
-                                .then(
-                                    if (delHighlight) {
-                                        Modifier.border(2.dp, Color(0xFFFF5252), RoundedCornerShape(10.dp))
-                                    } else {
-                                        Modifier
-                                    },
-                                )
-                                .background(palette.surfaceCard.copy(alpha = 0.35f))
-                                .combinedClickable(
-                                    onClick = {
-                                        if (selectedLibraryDeletePaths.isNotEmpty()) {
-                                            selectedLibraryDeletePaths =
-                                                if (fPath in selectedLibraryDeletePaths) {
-                                                    selectedLibraryDeletePaths - fPath
-                                                } else {
-                                                    selectedLibraryDeletePaths + fPath
-                                                }
+                        LibraryDocumentFileListRow(
+                            fileName = file.name,
+                            detailLeftLabel = formatLibraryFileSizeLabel(file.length()),
+                            modifiedMillis = file.lastModified(),
+                            delHighlight = delHighlight,
+                            onClick = {
+                                if (selectedLibraryDeletePaths.isNotEmpty()) {
+                                    selectedLibraryDeletePaths =
+                                        if (fPath in selectedLibraryDeletePaths) {
+                                            selectedLibraryDeletePaths - fPath
                                         } else {
-                                            jsonLibraryDetailFile = file
+                                            selectedLibraryDeletePaths + fPath
                                         }
-                                    },
-                                    onLongClick = {
-                                        selectedLibraryDeletePaths =
-                                            if (fPath in selectedLibraryDeletePaths) {
-                                                selectedLibraryDeletePaths - fPath
-                                            } else {
-                                                selectedLibraryDeletePaths + fPath
-                                            }
-                                    },
-                                )
-                                .padding(12.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Icon(
-                                imageVector = Icons.Outlined.Description,
-                                contentDescription = null,
-                                tint = palette.brand,
-                                modifier = Modifier.size(36.dp)
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = file.name,
-                                color = palette.onBackground,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 2,
-                                textAlign = TextAlign.Center,
-                                lineHeight = 15.sp
-                            )
-                            Text(
-                                text = "${file.length() / 1024} KB",
-                                color = palette.onBackgroundMuted,
-                                fontSize = 11.sp
-                            )
-                        }
+                                } else {
+                                    jsonLibraryDetailFile = file
+                                }
+                            },
+                            onLongClick = {
+                                selectedLibraryDeletePaths =
+                                    if (fPath in selectedLibraryDeletePaths) {
+                                        selectedLibraryDeletePaths - fPath
+                                    } else {
+                                        selectedLibraryDeletePaths + fPath
+                                    }
+                            },
+                        )
                     }
                 }
             }
@@ -3820,12 +3803,10 @@ fun GalleryScreen(
                     )
                 }
             } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(4),
+                LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     items(arcoreLibraryFiles, key = { it.absolutePath }) { file ->
                         val isZip = file.name.endsWith(".zip", ignoreCase = true)
@@ -3836,7 +3817,7 @@ fun GalleryScreen(
                             archiveCounts =
                                 if (isZip) {
                                     withContext(Dispatchers.IO) {
-                                        ArcoreLibrary.readArchiveSummaryCounts(file)
+                                        ArcoreLibrary.summarizeZipMediaCounts(file)
                                     }
                                 } else {
                                     null
@@ -3846,83 +3827,40 @@ fun GalleryScreen(
                             runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
                         }
                         val delHighlight = fPath in selectedLibraryDeletePaths
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .border(1.dp, palette.onBackground.copy(alpha = 0.18f), RoundedCornerShape(10.dp))
-                                .then(
-                                    if (delHighlight) {
-                                        Modifier.border(2.dp, Color(0xFFFF5252), RoundedCornerShape(10.dp))
-                                    } else {
-                                        Modifier
-                                    },
-                                )
-                                .background(palette.surfaceCard.copy(alpha = 0.35f))
-                                .combinedClickable(
-                                    onClick = {
-                                        if (selectedLibraryDeletePaths.isNotEmpty()) {
-                                            selectedLibraryDeletePaths =
-                                                if (fPath in selectedLibraryDeletePaths) {
-                                                    selectedLibraryDeletePaths - fPath
-                                                } else {
-                                                    selectedLibraryDeletePaths + fPath
-                                                }
-                                        } else {
-                                            arcoreLibraryDetailFile = file
-                                        }
-                                    },
-                                    onLongClick = {
-                                        selectedLibraryDeletePaths =
-                                            if (fPath in selectedLibraryDeletePaths) {
-                                                selectedLibraryDeletePaths - fPath
-                                            } else {
-                                                selectedLibraryDeletePaths + fPath
-                                            }
-                                    },
-                                )
-                                .padding(10.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.ViewInAr,
-                                contentDescription = null,
-                                tint = palette.brand,
-                                modifier = Modifier.size(32.dp)
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = file.name,
-                                color = palette.onBackground,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 2,
-                                textAlign = TextAlign.Center,
-                                lineHeight = 14.sp
-                            )
-                            Text(
-                                text = "${file.length() / 1024} KB",
-                                color = palette.onBackgroundMuted,
-                                fontSize = 10.sp
-                            )
-                            archiveCounts?.let { (imageCount, jsonCount) ->
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "이미지 ${imageCount}장",
-                                    color = palette.onBackgroundMuted,
-                                    fontSize = 9.sp,
-                                    textAlign = TextAlign.Center,
-                                    lineHeight = 11.sp,
-                                )
-                                Text(
-                                    text = "JSON ${jsonCount}개",
-                                    color = palette.onBackgroundMuted,
-                                    fontSize = 9.sp,
-                                    textAlign = TextAlign.Center,
-                                    lineHeight = 11.sp,
-                                )
+                        val detailLeftLabel = when {
+                            isZip && archiveCounts != null -> {
+                                val (imageCount, jsonCount) = archiveCounts!!
+                                formatArcoreZipCountLabel(imageCount, jsonCount)
                             }
+                            isZip -> "개수 확인 중…"
+                            else -> formatLibraryFileSizeLabel(file.length())
                         }
+                        LibraryDocumentFileListRow(
+                            fileName = file.name,
+                            detailLeftLabel = detailLeftLabel,
+                            modifiedMillis = file.lastModified(),
+                            delHighlight = delHighlight,
+                            onClick = {
+                                if (selectedLibraryDeletePaths.isNotEmpty()) {
+                                    selectedLibraryDeletePaths =
+                                        if (fPath in selectedLibraryDeletePaths) {
+                                            selectedLibraryDeletePaths - fPath
+                                        } else {
+                                            selectedLibraryDeletePaths + fPath
+                                        }
+                                } else {
+                                    arcoreLibraryDetailFile = file
+                                }
+                            },
+                            onLongClick = {
+                                selectedLibraryDeletePaths =
+                                    if (fPath in selectedLibraryDeletePaths) {
+                                        selectedLibraryDeletePaths - fPath
+                                    } else {
+                                        selectedLibraryDeletePaths + fPath
+                                    }
+                            },
+                        )
                     }
                 }
             }
@@ -4054,7 +3992,6 @@ fun GalleryScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 업로드 버튼 (데이터셋 라이브러리 편집 툴바와 동일 터치 영역)
                     Icon(
                         imageVector = Icons.Filled.CloudUpload,
                         contentDescription = "업로드",
@@ -4071,7 +4008,6 @@ fun GalleryScreen(
                                         uploadMessage = "선택된 미디어가 없습니다"
                                     }
                                     else -> {
-                                        // 3D 모델링 프롬프트 팝업을 먼저 표시
                                         pending3DSourceTab = LibraryTab.GALLERY
                                         pending3DGalleryUris = selectedItems.toList()
                                         pending3DArcoreZipUriForDataset = null
@@ -4083,7 +4019,6 @@ fun GalleryScreen(
                             }
                     )
 
-                    // 선택 삭제 버튼
                     Text(
                         text = "삭제",
                         color = if (selectedItems.isNotEmpty()) Color.White else palette.onBackground.copy(alpha = 0.4f),
@@ -4104,8 +4039,6 @@ fun GalleryScreen(
             }
 
 
-
-            // 미디어 그리드 (편집 메뉴 Row와 세로로 나열 — Box 형제 배치 시 그리드가 메뉴를 덮음)
             if (images.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -4165,7 +4098,6 @@ fun GalleryScreen(
                         val isSelected = selectedItems.contains(mediaUri)
                         var videoThumbnail by remember(mediaUri) { mutableStateOf<Bitmap?>(null) }
 
-                        // 동영상 썸네일 로드
                         if (isVideo) {
                             LaunchedEffect(mediaUri, gridThumbPx) {
                                 videoThumbnail = decodeVideoGridThumbnail(context, mediaUri, gridThumbPx)
@@ -4185,23 +4117,16 @@ fun GalleryScreen(
                                     detectTapGestures(
                                         onTap = {
                                             if (isEditMode) {
-                                                // 편집 모드: 이미지 선택/해제 토글
-                                                // 이미 선택된 이미지를 다시 누르면 선택 해제
-                                                // 선택되지 않은 이미지를 누르면 선택
                                                 selectedItems = if (isSelected) {
-                                                    // 선택 해제: selectedItems에서 해당 mediaUri 제거
                                                     selectedItems - mediaUri
                                                 } else {
-                                                    // 선택: selectedItems에 해당 mediaUri 추가
                                                     selectedItems + mediaUri
                                                 }
                                             } else {
-                                                // 일반 모드: 상세 보기 화면으로 이동
                                                 onMediaSelected(mediaUri, images)
                                             }
                                         },
                                         onLongPress = {
-                                            // 길게 누르면 편집 모드로 전환하고 해당 이미지 선택
                                             if (!isEditMode) {
                                                 isEditMode = true
                                                 selectedItems = setOf(mediaUri)
@@ -4211,7 +4136,6 @@ fun GalleryScreen(
                                 }
                         ) {
                             if (isVideo) {
-                                // 동영상 썸네일 또는 배경
                                 if (videoThumbnail != null) {
                                     Image(
                                         bitmap = videoThumbnail!!.asImageBitmap(),
@@ -4220,7 +4144,6 @@ fun GalleryScreen(
                                         contentScale = ContentScale.Crop
                                     )
                                 } else {
-                                    // 썸네일 로딩 중 배경
                                     Box(
                                         modifier = Modifier
                                             .fillMaxSize()
@@ -4235,7 +4158,6 @@ fun GalleryScreen(
                                             .size(48.dp)
                                     )
                                 }
-                                // 동영상 아이콘 오버레이 (우측 하단)
                                 Box(
                                     modifier = Modifier
                                         .align(Alignment.BottomEnd)
@@ -4251,7 +4173,6 @@ fun GalleryScreen(
                                     )
                                 }
                             } else {
-                                // 이미지
                                 Image(
                                     painter = rememberGalleryGridPhotoPainter(mediaUri, gridThumbPx),
                                     contentDescription = "촬영한 미디어",
@@ -4260,7 +4181,6 @@ fun GalleryScreen(
                                 )
                             }
 
-                            // 선택 표시
                             if (isSelected) {
                                 Box(
                                     modifier = Modifier
@@ -4287,7 +4207,6 @@ fun GalleryScreen(
         }
         }
 
-        // 업로드 팝업(UI) - 탭별로 분리 표시
         if (uploadSourceTab == libraryTab) {
             if (isUploading) {
                 val total = uploadProgress.second.takeIf { it > 0 } ?: 100
@@ -4340,7 +4259,6 @@ fun GalleryScreen(
                     }
                 }
             } else {
-                // ── 완료 다이얼로그 ──────────────────────────────────────────
                 if (serverPipelineCompleteBundle != null) {
                     val spb = serverPipelineCompleteBundle!!
                     val completionBtnBg = if (palette.isDark) Color.Black else Color.White
@@ -4692,7 +4610,6 @@ fun GalleryScreen(
                     }
                 }
 
-                // 업로드 메시지(완료/실패)는 기존처럼 배너로 잠깐 표시
                 uploadMessage?.let { message ->
                     LaunchedEffect(message) {
                         delay(3000)
@@ -4808,9 +4725,7 @@ fun GalleryScreen(
             )
         }
 
-        // --- 다이얼로그 구역 (어떤 탭에서도 보일 수 있도록 탭 분기 바깥에 배치) ---
 
-        // [추가] 1차 배경제거 진행률 팝업 (온디바이스)
         if (isBgRemoving) {
             val fraction = (sam3ProgressPercent.coerceIn(0, 100) / 100f)
             Dialog(onDismissRequest = { /* 처리 중 닫기 불가 */ }) {
@@ -4834,7 +4749,6 @@ fun GalleryScreen(
                             fontSize = 11.sp
                         )
                         Spacer(modifier = Modifier.height(16.dp))
-                        // 퍼센트 숫자
                         Text(
                             text = "${sam3ProgressPercent.coerceIn(0, 100)}%",
                             color = palette.onBackground,
@@ -4842,7 +4756,6 @@ fun GalleryScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(10.dp))
-                        // 진행 바
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -4860,7 +4773,6 @@ fun GalleryScreen(
                             )
                         }
                         Spacer(modifier = Modifier.height(12.dp))
-                        // 단계 메시지
                         Text(
                             text = sam3ProgressMessage,
                             color = palette.onBackground.copy(alpha = 0.8f),
@@ -4871,7 +4783,6 @@ fun GalleryScreen(
             }
         }
 
-        // [추가] SAM3 완료 결과 팝업
         sam3ResultMessage?.let { resultMsg ->
             Dialog(onDismissRequest = { sam3ResultMessage = null }) {
                 Box(
@@ -4918,7 +4829,6 @@ fun GalleryScreen(
             }
         }
 
-        // [추가] 광택 제거 진행 다이얼로그
         if (isGlareRemoving) {
             val fraction = glareProgressPercent.coerceIn(0, 100) / 100f
             Dialog(onDismissRequest = { /* 처리 중 닫기 불가 */ }) {
@@ -4973,7 +4883,6 @@ fun GalleryScreen(
             }
         }
 
-        // [추가] 광택 제거 결과 다이얼로그
         glareResultMessage?.let { resultMsg ->
             Dialog(onDismissRequest = { glareResultMessage = null }) {
                 Box(
@@ -5020,7 +4929,6 @@ fun GalleryScreen(
             }
         }
 
-        // 새 데이터셋폴더: 이름 입력 후 복사 (앱 갤러리 원본은 유지)
         if (showNewDatasetFolderNameDialog) {
             Dialog(onDismissRequest = {
                 if (!isTransferring) showNewDatasetFolderNameDialog = false
@@ -5141,7 +5049,6 @@ fun GalleryScreen(
             }
         }
 
-        // [추가] 1차 배경제거 프롬프트 입력 다이얼로그
         if (showBgRemoveDialog) {
             val isPromptValid = !bgRemovePromptError
             val canApply = isPromptValid
@@ -5269,7 +5176,6 @@ fun GalleryScreen(
                                         }
                                         transferScope.launch {
                                             val bgStartMs = System.currentTimeMillis()
-                                            // 포그라운드 서비스 시작
                                             startOrUpdateForegroundService(
                                                 context, "배경 제거 중 (${total}장)", 0, "준비 중...", bgStartMs
                                             )
@@ -5289,7 +5195,6 @@ fun GalleryScreen(
                                                     basePercent, "이미지 로드 중...$itemLabel", bgStartMs
                                                 )
 
-                                                // 비트맵 디코딩
                                                 val bitmap = withContext(Dispatchers.IO) {
                                                     decodeBitmapWithMaxDimension(context, uri, 1024)
                                                 }
@@ -5301,7 +5206,6 @@ fun GalleryScreen(
                                                 sam3ProgressPercent = basePercent + itemRange / 8
                                                 sam3ProgressMessage = "MediaPipe 세그멘테이션 준비 중...$itemLabel"
 
-                                                // MediaPipe Image Segmentation 기반 온디바이스 배경 제거
                                                 val result = withContext(Dispatchers.IO) {
                                                     BackgroundRemovalProcessor.removeBackground(
                                                         context    = context,
@@ -5353,7 +5257,6 @@ fun GalleryScreen(
                                                 else ->
                                                     "배경 제거 실패\n객체를 찾지 못했거나 모델이 없습니다.\n(assets/models/ 폴더를 확인하세요)"
                                             }
-                                            // 포그라운드 서비스 완료 처리
                                             val doneMsg = if (successCount > 0) "${successCount}장 완료" else "처리 실패"
                                             stopForegroundService(context, "배경 제거 완료", doneMsg)
                                             if (successCount > 0) {
@@ -5648,7 +5551,6 @@ fun GalleryScreen(
                                                         )
                                                         var pipelineOk = false
                                                         if (rawDatasetZip != null) {
-                                                            // 데이터셋 업로드는 텍스트 없이 두 ZIP만 전송합니다:
                                                             // file_pc = 데이터셋 라이브러리 압축파일, file_gs = ARCore 압축파일.
                                                             val arcoreUri = arcoreUriSnapshot
                                                             val arcoreZipForGs = if (arcoreUri != null) {
@@ -5789,7 +5691,6 @@ fun GalleryScreen(
                                                                 onDa3Complete = { da3Bundle ->
                                                                     mainHandler.post {
                                                                         try {
-                                                                            // 다중 파일 업로드 중: isUploading 은 모든 파일 완료 후 해제
                                                                             onServerPipelineCompleteBundleChange(da3Bundle)
                                                                             if (shouldAutoGenerateModelThumbnail(da3Bundle.plyFile)) {
                                                                                 libraryModelThumbRefresh++

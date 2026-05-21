@@ -42,17 +42,13 @@ object BackgroundRemovalProcessor {
 
     private const val TAG = "BgRemoval"
     private const val DETECTOR_MODEL = "models/efficientdet_lite0.tflite"
-    // MediaPipe 공식 DeepLab v3 (257×257 입력, Pascal VOC 21클래스)
     // 다운로드 출처: https://storage.googleapis.com/mediapipe-models/image_segmenter/deeplab_v3/float32/1/deeplab_v3.tflite
     private const val SEGMENTER_MODEL = "models/segmentation/deeplab_v3.tflite"
 
-    // removeBackground() 진행 단계 수
     private const val PIPELINE_STEP_COUNT = 10
 
-    // U²-Net (u2netp): 카테고리 제한 없는 두드러진 객체 배경 제거
     // 다운로드: https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx
     // 입력: NCHW float32 [1,3,320,320], ImageNet 정규화
-    // 출력: [1,1,320,320] 전경 확률 (0~1)
     private const val U2NET_MODEL = "models/u2net/u2netp.onnx"
     private const val U2NET_INPUT_SIZE = 320
     private val U2NET_MEAN = floatArrayOf(0.485f, 0.456f, 0.406f)
@@ -61,7 +57,6 @@ object BackgroundRemovalProcessor {
     // 배경 제거 시 최대 이미지 변 길이 (OOM/크래시 방지)
     private const val MAX_IMAGE_DIMENSION = 1024
 
-    // InteractiveSegmenter 모델 경로
     private const val INTERACTIVE_SEGMENTER_MODEL = "models/interactive_segmenter/magic_touch.tflite"
 
     // ── MobileSAM (경량화 SAM2 계열) ─────────────────────────────────────────
@@ -70,7 +65,6 @@ object BackgroundRemovalProcessor {
     // Decoder: mobile_sam_decoder.onnx      (15.7MB, SAM 마스크 디코더)
     private const val MOBILE_SAM_ENCODER = "models/mobile_sam/mobile_sam_encoder.onnx"
     private const val MOBILE_SAM_DECODER = "models/mobile_sam/mobile_sam_decoder.onnx"
-    // SAM 이미지 전처리 파라미터 (0~255 스케일 정규화)
     private const val SAM_INPUT_SIZE = 1024
     private val SAM_PIXEL_MEAN = floatArrayOf(123.675f, 116.28f, 103.53f)
     private val SAM_PIXEL_STD  = floatArrayOf(58.395f,  57.12f,  57.375f)
@@ -84,14 +78,12 @@ object BackgroundRemovalProcessor {
     private const val MEM_MID_THRESHOLD_MB = 800L     // 이 미만이면 256px 입력
     private const val MEM_HIGH_THRESHOLD_MB = 1500L   // 이 미만이면 384px 입력, 이상이면 512px
 
-    // Pascal VOC 21 클래스 (DeepLab v3) - 0=background, 1~20=객체
     private val VOC_LABELS = listOf(
         "background", "aeroplane", "bicycle", "bird", "boat", "bottle", "bus", "car",
         "cat", "chair", "cow", "dining table", "dog", "horse", "motorcycle", "person",
         "potted plant", "sheep", "sofa", "train", "tv"
     )
 
-    // 한/영 → VOC 인덱스 매핑 (DeepLab v3 폴백용)
     private val TEXT_TO_INDEX = mapOf(
         "사람" to 15, "person" to 15, "인물" to 15,
         "병" to 5, "bottle" to 5, "캔" to 5, "can" to 5,
@@ -110,10 +102,8 @@ object BackgroundRemovalProcessor {
      * EfficientDet이 COCO 레이블을 반환하므로 VOC가 아닌 COCO 이름으로 매핑해야 한다.
      */
     private val TEXT_TO_COCO_LABEL = mapOf(
-        // 사람
         "person" to "person", "people" to "person", "human" to "person",
         "man" to "person", "woman" to "person", "child" to "person",
-        // 전자기기
         "laptop" to "laptop", "notebook" to "laptop", "computer" to "laptop",
         "mouse" to "mouse",
         "keyboard" to "keyboard",
@@ -122,20 +112,17 @@ object BackgroundRemovalProcessor {
         "remote" to "remote", "remote control" to "remote",
         "clock" to "clock",
         "book" to "book",
-        // 용기 / 식기
         "bottle" to "bottle", "can" to "bottle",
         "cup" to "cup", "mug" to "cup",
         "bowl" to "bowl",
         "glass" to "wine glass", "wine glass" to "wine glass",
         "fork" to "fork", "knife" to "knife", "spoon" to "spoon",
         "vase" to "vase",
-        // 가구
         "chair" to "chair",
         "couch" to "couch", "sofa" to "couch",
         "table" to "dining table", "desk" to "dining table", "dining table" to "dining table",
         "bed" to "bed",
         "toilet" to "toilet",
-        // 동물
         "cat" to "cat", "kitten" to "cat",
         "dog" to "dog", "puppy" to "dog",
         "bird" to "bird",
@@ -146,7 +133,6 @@ object BackgroundRemovalProcessor {
         "zebra" to "zebra",
         "giraffe" to "giraffe",
         "sheep" to "sheep",
-        // 차량
         "car" to "car", "vehicle" to "car",
         "truck" to "truck",
         "bus" to "bus",
@@ -154,18 +140,15 @@ object BackgroundRemovalProcessor {
         "motorcycle" to "motorcycle",
         "airplane" to "airplane", "plane" to "airplane",
         "boat" to "boat", "ship" to "boat",
-        // 가방 / 악세서리
         "backpack" to "backpack", "bag" to "backpack",
         "handbag" to "handbag", "purse" to "handbag",
         "umbrella" to "umbrella",
         "tie" to "tie", "suitcase" to "suitcase",
-        // 스포츠 / 기타 도구
         "ball" to "sports ball",
         "skateboard" to "skateboard",
         "surfboard" to "surfboard",
         "skis" to "skis",
         "kite" to "kite",
-        // 음식
         "pizza" to "pizza",
         "cake" to "cake",
         "banana" to "banana",
@@ -173,15 +156,12 @@ object BackgroundRemovalProcessor {
         "sandwich" to "sandwich",
         "orange" to "orange",
         "donut" to "donut",
-        // 식물
         "plant" to "potted plant", "flower" to "potted plant", "potted plant" to "potted plant",
-        // 주방가전
         "sink" to "sink",
         "oven" to "oven",
         "microwave" to "microwave",
         "refrigerator" to "refrigerator", "fridge" to "refrigerator",
         "toaster" to "toaster",
-        // 기타
         "scissors" to "scissors",
         "toothbrush" to "toothbrush",
         "teddy bear" to "teddy bear", "teddy" to "teddy bear",
@@ -302,8 +282,6 @@ object BackgroundRemovalProcessor {
         }
 
         val masks = masksOpt.get()
-        // masks[1] = 전경(객체) 확률, masks[0] = 배경 확률
-        // 전경 마스크가 있으면 index 1 사용, 없으면 index 0 사용
         val fgIdx = if (masks.size > 1) 1 else 0
         val confImage = masks[fgIdx]
         val maskW = confImage.width
@@ -544,7 +522,6 @@ object BackgroundRemovalProcessor {
         val result = FloatArray(width * height)
         val startIdx = startY * width + startX
 
-        // 시작 픽셀이 전경이 아니면 인근에서 탐색
         val actualStart = if (confidence.getOrElse(startIdx) { 0f } >= threshold) {
             startIdx
         } else {
@@ -552,7 +529,6 @@ object BackgroundRemovalProcessor {
         }
         if (actualStart < 0) {
             Log.w(TAG, "연결 컴포넌트: 전경 픽셀 없음, 원본 마스크 반환")
-            // 전경을 찾지 못하면 원본 confidence 중 threshold 이상을 그대로 반환
             return FloatArray(confidence.size) { if (confidence[it] >= threshold) confidence[it] else 0f }
         }
 
@@ -692,7 +668,6 @@ object BackgroundRemovalProcessor {
     fun segmentForeground(context: Context, bitmap: Bitmap): Bitmap? {
         val mask = runU2Net(context, bitmap) ?: return null
         val sz   = U2NET_INPUT_SIZE
-        // 원본 크기로 마스크 리사이즈 후 알파 채널 적용
         val resizedMask = resizeFloatMask(mask, sz, sz, bitmap.width, bitmap.height)
         val result = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         for (y in 0 until bitmap.height) {
@@ -760,7 +735,6 @@ object BackgroundRemovalProcessor {
             Bitmap.createScaledBitmap(bitmap, resW, resH, true) else bitmap
         val needRecycle = resized !== bitmap
 
-        // HWC 순서: data[y*resW*3 + x*3 + c]
         val data   = FloatArray(resH * resW * 3)
         val pixels = IntArray(resW * resH)
         resized.getPixels(pixels, 0, resW, 0, 0, resW, resH)
@@ -818,7 +792,6 @@ object BackgroundRemovalProcessor {
             val origH       = procBitmap.height
 
             try {
-                // ── 1단계: 인코더 실행 (HWC 포맷: [resH, resW, 3], raw 0~255) ─
                 val (inputData, resH, resW) = preprocessImageHWC(procBitmap)
                 val samScale     = SAM_INPUT_SIZE.toFloat() / maxOf(origW, origH)
                 val encShape     = longArrayOf(resH.toLong(), resW.toLong(), 3L)
@@ -834,17 +807,13 @@ object BackgroundRemovalProcessor {
                 }
                 Log.d(TAG, "MobileSAM 인코더 완료 embeddings[${embeddings.size}] resized=${resW}x${resH}")
 
-                // ── 2단계: 디코더 입력 구성 ────────────────────────────────────
-                // 포인트 좌표: 원본 픽셀 공간 → SAM 리사이즈 공간으로 변환
                 // ptX = normX * origW * (1024 / max(origW,origH)) = normX * resW
                 val ptX = normX * origW * samScale
                 val ptY = normY * origH * samScale
-                // SAM 디코더는 포인트 + 더미 패딩(label=-1) 필요
                 val pointCoords  = floatArrayOf(ptX, ptY, 0f, 0f)
                 val pointLabels  = floatArrayOf(1f, -1f)       // 1=전경, -1=패딩
                 val maskInput    = FloatArray(256 * 256)        // 이전 마스크 없음
                 val hasMaskInput = floatArrayOf(0f)
-                // orig_im_size: SAM 업스케일 기준 (리사이즈 후 크기)
                 val origImSize   = floatArrayOf(origH.toFloat(), origW.toFloat())
 
                 val embShape    = longArrayOf(1L, 256L, 64L, 64L)
@@ -886,7 +855,6 @@ object BackgroundRemovalProcessor {
                     }
                 }}}}}}
 
-                // ── 3단계: 마스크 후처리 → 알파 적용 ──────────────────────────
                 // logit > 0.0 → 전경 (sigmoid 0.5 임계값과 동일)
                 val binaryMask = FloatArray(masks.size) { if (masks[it] > 0f) 1f else 0f }
                 val resized    = resizeFloatMask(binaryMask, maskW, maskH, procBitmap.width, procBitmap.height)
@@ -933,7 +901,6 @@ object BackgroundRemovalProcessor {
             // ── 처리 해상도로 축소 (OOM 방지) ────────────────────────────────────
             val scaled = scaleBitmapTo(bitmap, inputSize)
             val needRecycle = scaled !== bitmap
-            // scaled의 크기를 recycle 전에 미리 저장
             val scaledW = scaled.width
             val scaledH = scaled.height
 
@@ -946,7 +913,6 @@ object BackgroundRemovalProcessor {
                 val segResult = iSeg.segment(mpImage, roi)
                 rawConf = extractConfidenceMask(segResult, scaledW, scaledH)
             } finally {
-                // 반드시 처리 완료 후 scaled 해제 (use-after-free 방지)
                 if (needRecycle) scaled.recycle()
             }
 
@@ -955,7 +921,6 @@ object BackgroundRemovalProcessor {
                 return null
             }
 
-            // ── 클릭 위치 vs 전체 평균 비교 → 마스크 자동 반전 ─────────────────
             val clickPxX = (normX * scaledW).toInt().coerceIn(0, scaledW - 1)
             val clickPxY = (normY * scaledH).toInt().coerceIn(0, scaledH - 1)
             val neighborR = (minOf(scaledW, scaledH) * 0.04f).toInt().coerceAtLeast(2)
@@ -968,7 +933,6 @@ object BackgroundRemovalProcessor {
                 FloatArray(rawConf.size) { 1f - rawConf[it] }
             } else rawConf
 
-            // ── 원본 크기로 마스크 리사이즈 후 배치 알파 적용 (ANR 방지) ─────────
             val resized = resizeFloatMask(finalMask, scaledW, scaledH, bitmap.width, bitmap.height)
             applyAlphaMaskBatch(bitmap, resized)
 
@@ -1043,7 +1007,6 @@ object BackgroundRemovalProcessor {
                 }
             }
 
-            // 민-맥스 정규화 → [0, 1] (rembg 와 동일한 후처리)
             val minV = probFlat.min() ?: 0f
             val maxV = probFlat.max() ?: 1f
             val range = maxV - minV
@@ -1081,17 +1044,13 @@ object BackgroundRemovalProcessor {
         val p = userPrompt.trim().lowercase()
         val cocoTarget = TEXT_TO_COCO_LABEL[p] ?: p
 
-        // 1) 정확히 일치하는 COCO 레이블
         detections.firstOrNull { (lbl, _) -> lbl.lowercase() == cocoTarget }
             ?.let { return it.second }
-        // 2) 부분 포함 (예: "sports ball" ↔ "ball")
         detections.firstOrNull { (lbl, _) ->
             lbl.lowercase().contains(cocoTarget) || cocoTarget.contains(lbl.lowercase())
         }?.let { return it.second }
-        // 3) 사용자 입력이 감지 레이블에 포함
         detections.firstOrNull { (lbl, _) -> lbl.lowercase().contains(p) }
             ?.let { return it.second }
-        // 4) 어떤 것도 매칭 안 되면 가장 큰 박스(주요 피사체)
         return detections.maxByOrNull { (_, box) ->
             (box.right - box.left) * (box.bottom - box.top)
         }?.second
@@ -1158,13 +1117,11 @@ object BackgroundRemovalProcessor {
         // ── 1단계: 수평 팽창 (sliding window count) ─────────────────────────────
         for (y in 0 until height) {
             var count = 0
-            // 초기 윈도우 채우기: x=0 기준 [-radius, radius] 범위
             for (dx in 0..radius) {
                 if (dx < width && src[y * width + dx]) count++
             }
             for (x in 0 until width) {
                 tmp[y * width + x] = count > 0
-                // 다음 픽셀로 이동: 오른쪽 새 픽셀 추가, 왼쪽 오래된 픽셀 제거
                 val addX = x + radius + 1
                 if (addX < width && src[y * width + addX]) count++
                 val remX = x - radius
@@ -1226,7 +1183,6 @@ object BackgroundRemovalProcessor {
 
             onProgress(1, 3)
 
-            // InteractiveSegmenter로 터치 위치 피사체 분리
             val iSeg = getInteractiveSegmenter(context)
                 ?: return run {
                     if (needRecycleBitmap) bitmap.recycle()
@@ -1256,7 +1212,6 @@ object BackgroundRemovalProcessor {
                 return Result.Error("이 위치에서 피사체를 찾을 수 없습니다.\n객체 위를 길게 눌러 보세요.")
             }
 
-            // ── 클릭 좌표 및 인근 평균 신뢰도 계산 ─────────────────────────────
             val clickPixX = (normX * bitmap.width).toInt().coerceIn(0, bitmap.width - 1)
             val clickPixY = (normY * bitmap.height).toInt().coerceIn(0, bitmap.height - 1)
             val neighborRadius = (minOf(bitmap.width, bitmap.height) * 0.04f).toInt().coerceAtLeast(2)
@@ -1285,18 +1240,15 @@ object BackgroundRemovalProcessor {
             val componentDilated = selectConnectedComponent(
                 dilated, bitmap.width, bitmap.height, clickPixX, clickPixY, threshold = 0.5f
             )
-            // 팽창된 컴포넌트 마스크 범위 안에서 원본 신뢰도 복원 (경계선 선명도 유지)
             val recovered = FloatArray(afterInversion.size) { i ->
                 if (componentDilated[i] >= 0.5f) afterInversion[i] else 0f
             }
 
-            // ── 시그모이드 샤프닝: 복원된 신뢰도를 0/1 로 수렴 ───────────────
             val sharpened = sharpenMask(recovered, steepness = 10f)
 
             // ── BFS 홀 채우기: 연결 컴포넌트 내부 구멍 제거 ──────────────────
             val filledConfidence = fillMaskHoles(sharpened, bitmap.width, bitmap.height, threshold = 0.5f)
 
-            // ── 고해상도 출력: 원본(raw) 크기로 마스크 업스케일 후 적용 ──────
             val outputBitmap = if (raw !== bitmap) {
                 val upscaled = resizeFloatMask(
                     filledConfidence, bitmap.width, bitmap.height, raw.width, raw.height

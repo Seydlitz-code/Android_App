@@ -62,7 +62,6 @@ object ClaudeChatClient {
         INTERNET_REF
     }
 
-    // ─────────────────────── 스트리밍 API ───────────────────────
 
     /**
      * 일반 대화 스트리밍: 토큰이 수신될 때마다 [onDelta]를 Main 스레드에서 호출.
@@ -323,7 +322,6 @@ object ClaudeChatClient {
         }
     }
 
-    // ─────────────────────── 기존 (비스트리밍) API ───────────────────────
 
     suspend fun sendMessage(
         text: String,

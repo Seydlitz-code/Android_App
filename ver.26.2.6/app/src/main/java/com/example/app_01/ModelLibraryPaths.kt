@@ -26,7 +26,6 @@ object ModelLibraryPaths {
         return d
     }
 
-    // One-time move from flat models/ into ply/ and obj/
     fun migrateFlatModelsIfNeeded(context: Context) {
         val root = legacyModelsDir(context)
         root.mkdirs()

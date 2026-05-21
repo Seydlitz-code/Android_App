@@ -478,7 +478,6 @@ fun CameraScreen(
     var rearTelephotoPhysParent by remember { mutableStateOf<String?>(null) }  // 물리 망원의 부모 논리 ID
     var rearWideId              by remember { mutableStateOf<String?>(null) }  // 광각 논리
 
-    // 앱 시작 시 한 번: 2단계 탐색 (논리 → 물리 서브카메라 순)
     LaunchedEffect(Unit) {
         try {
             val cameraProvider = withContext(Dispatchers.IO) {
@@ -514,7 +513,6 @@ fun CameraScreen(
                 android.util.Log.d("CameraScreen",
                     "논리 선택 → 망원: $rearTelephotoLogicalId, 광각: $rearWideId")
             } else {
-                // ── 2단계: 논리 카메라가 1개(퓨전 카메라)인 경우 → 물리 서브카메라 탐색 ──
                 rearWideId = logicalBack.firstOrNull()?.id
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -556,7 +554,6 @@ fun CameraScreen(
         }
     }
 
-    // [추가] 촬영 중 화면 켜짐 유지
     val view = LocalView.current
     DisposableEffect(isRecording) {
         if (isRecording) {
@@ -567,7 +564,6 @@ fun CameraScreen(
         }
     }
 
-    // [추가] 백그라운드 작업 유지를 위한 서비스 제어
     LaunchedEffect(isRecording) {
         val intent = Intent(context, AppForegroundService::class.java)
         if (isRecording) {
@@ -581,7 +577,6 @@ fun CameraScreen(
         }
     }
 
-    // 이동식 공간: 3D 격자 세션(구역 기억·수집 상태)
     val mobileSpaceSession = remember { MobileSpaceCaptureSession(context.filesDir) }
     var mobileSpaceUiRev by remember { mutableIntStateOf(0) }
     val mobileSpaceOverlayState = remember(mobileSpaceUiRev, cameraEntryMode) {
@@ -591,7 +586,6 @@ fun CameraScreen(
             MobileSpaceGridOverlayState(0, 6, 4, 3, emptyList(), emptyList())
         }
     }
-    // 이동식 공간: 방향별 커버리지(빨강→투명 오버레이용)
     val scanCoverage = remember { MobileSpaceScanCoverage() }
     val meshAnalysisExecutor = remember { Executors.newSingleThreadExecutor() }
     val cameraEntryModeState = rememberUpdatedState(cameraEntryMode)
@@ -629,7 +623,6 @@ fun CameraScreen(
         }
     }
     var baseAzimuthDegrees by remember { mutableStateOf<Float?>(null) }
-    // 수직(세로) 들었을 때 0도를 기준으로 하는 기울기
     var pitchDegrees by remember { mutableStateOf(0f) }
     /** 이동식 공간 격자 롤 축(3D 보xel) */
     var rollDegrees by remember { mutableStateOf(0f) }
@@ -639,7 +632,6 @@ fun CameraScreen(
 
     val sectorCount = 30
     val sectorSize = 360f / sectorCount
-    // 지면-휴대폰 각도 기준: 90도, 110도, 70도 (공간 스캔 시)
     val pitchTargets = remember(cameraEntryMode) {
         if (cameraEntryMode.isSpaceMode()) listOf(90f, 110f, 70f) else listOf(120f)
     }
@@ -650,7 +642,6 @@ fun CameraScreen(
     }
     val currentTargetPitch by currentTargetPitchState
     val effectivePitchDegreesState = remember {
-        // [최적화] pitchDegrees가 이제 중력 기준 절대 각도(수직=90)이므로 그대로 사용
         derivedStateOf { pitchDegrees }
     }
     val effectivePitchDegrees by effectivePitchDegreesState
@@ -699,7 +690,6 @@ fun CameraScreen(
         onDispose { }
     }
 
-    // 이동식 공간 진입 시 그리드용 방위를 나침반 방위와 즉시 일치 (초기 프레임 동기화)
     LaunchedEffect(cameraEntryMode) {
         if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
             azimuthForGrid = azimuthDegrees
@@ -739,7 +729,6 @@ fun CameraScreen(
                 var rawAzimuth = Math.toDegrees(orientation[0].toDouble()).toFloat()
                 if (rawAzimuth < 0f) rawAzimuth += 360f
 
-                // [수정] Low-pass Filter 적용 (노이즈/Jitter 감소)
                 val alpha = 0.15f
                 val currentAzimuth = azimuthDegrees
                 var delta = rawAzimuth - currentAzimuth
@@ -761,14 +750,12 @@ fun CameraScreen(
                 if (nextGridAz >= 360f) nextGridAz -= 360f
                 azimuthForGrid = nextGridAz
 
-                // [수정] 미리보기/방위와 동일하게 remap된 행렬로 피치 계산 (수직=90도 기준)
                 val worldZInPhoneY = adjustedRotationMatrix[7]
                 val worldZInPhoneZ = adjustedRotationMatrix[8]
                 val angleDeg = Math.toDegrees(
                     Math.atan2(worldZInPhoneZ.toDouble(), worldZInPhoneY.toDouble()),
                 ).toFloat()
                 
-                // 앞으로 숙이면 90도 미만, 뒤로 젖히면 90도 초과가 되도록 설정
                 pitchDegrees = 90f + angleDeg
                 rollDegrees = Math.toDegrees(orientation[2].toDouble()).toFloat()
             }
@@ -799,7 +786,6 @@ fun CameraScreen(
         }
     }
 
-    // 동영상 촬영 시간 업데이트
     LaunchedEffect(isRecording) {
         while (isRecording) {
             delay(100)
@@ -807,7 +793,6 @@ fun CameraScreen(
         }
     }
 
-    // 동영상 촬영 시 데이터셋 수집 제어 (촬영 시작 3초 후 시작)
     LaunchedEffect(isRecording, captureMode) {
         if (captureMode != CaptureMode.VIDEO || !isRecording) {
             isDatasetCollectionEnabled = true
@@ -820,7 +805,6 @@ fun CameraScreen(
         }
     }
 
-    // 동영상 촬영 시 구역 체크: 1초 간격으로 현재 구역 기록 (사물/공간 모두)
     LaunchedEffect(isRecording, cameraEntryMode, captureMode, currentPitchIndex, isDatasetCollectionEnabled, datasetDir) {
         // [수정] 이동식 공간 촬영인 경우: 촬영 시작 3초 후(isDatasetCollectionEnabled=true) 1초 간격 자동 촬영
         if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
@@ -829,7 +813,6 @@ fun CameraScreen(
                 val dir = datasetDir
                 val capture = imageCapture
                 
-                // 직전에 저장된 데이터셋 이미지의 축소본 (유사도 비교용)
                 var lastSavedBitmapSmall: android.graphics.Bitmap? = null
 
                 if (dir != null && capture != null) {
@@ -845,20 +828,17 @@ fun CameraScreen(
                             val pitchNow = effectivePitchDegrees
                             val rollNow  = rollDegrees
                             if (lastSavedBitmapSmall == null) {
-                                // 첫 번째 데이터셋은 무조건 저장
                                 lastSavedBitmapSmall = android.graphics.Bitmap.createScaledBitmap(currentBitmap, 64, 64, true)
                                 mobileSpaceSession.recordAcceptedSample(azNow, pitchNow, rollNow)
                                 scanCoverage.recordFov(azNow, pitchNow)
                                 mobileSpaceUiRev++
                                 true
                             } else {
-                                // 현재 이미지와 직전 저장된 이미지 간의 구조적 유사도 비교
                                 val similarity = calculateImageSimilarity(lastSavedBitmapSmall!!, currentBitmap)
                                 val similarEnough = similarity >= 0.48f && similarity <= 0.985f
                                 val almostDuplicate = similarity > 0.985f && (captureCount % 4 == 0)
                                 val veryDifferent = similarity < 0.48f && (captureCount % 5 == 0)
                                 if (similarEnough || almostDuplicate || veryDifferent) {
-                                    // 조건 만족: 저장하고 비교 기준 갱신
                                     lastSavedBitmapSmall = android.graphics.Bitmap.createScaledBitmap(currentBitmap, 64, 64, true)
                                     mobileSpaceSession.recordAcceptedSample(azNow, pitchNow, rollNow)
                                     scanCoverage.recordFov(azNow, pitchNow)
@@ -877,7 +857,6 @@ fun CameraScreen(
         }
 
         if (captureMode == CaptureMode.VIDEO && isRecording && isDatasetCollectionEnabled) {
-            // 사물/공간 촬영: 피치 각도 체크 (90도 등)
             if (currentPitchIndex < pitchTargets.size) {
                 while (isRecording) {
                     delay(500) // 딜레이 단축 (반응성 향상)
@@ -895,7 +874,6 @@ fun CameraScreen(
                             val pv = previewView
                             val cam = camera
                             if (dir != null && capture != null) {
-                                // 화면 중심으로 AF/AE 후 셔터(데이터셋 스틸 선명도 향상)
                                 if (pv != null && cam != null && pv.width > 1 && pv.height > 1) {
                                     runCatching {
                                         val factory = pv.meteringPointFactory
@@ -918,7 +896,6 @@ fun CameraScreen(
                                 )
                             }
 
-                            // 연속 촬영 방지를 위해 잠시 대기
                             delay(300)
                         }
                     }
@@ -927,9 +904,7 @@ fun CameraScreen(
         }
     }
 
-    // 한 각도에서 360도 촬영 완료 시 다음 각도로 전환
     LaunchedEffect(capturedSectors, isRecording, cameraEntryMode, captureMode, currentPitchIndex) {
-        // [추가] 이동식 공간 촬영인 경우 섹터 로직 생략
         if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
             return@LaunchedEffect
         }
@@ -944,7 +919,6 @@ fun CameraScreen(
         }
     }
 
-    // 카메라 바인딩 함수
     fun bindCamera(view: PreviewView) {
         val executor = ContextCompat.getMainExecutor(context)
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
@@ -953,10 +927,6 @@ fun CameraScreen(
             try {
                 val cameraProvider = cameraProviderFuture.get()
 
-                // ── 후면 카메라 선택 우선순위 ────────────────────────────────
-                //  1) 망원 논리 카메라  2) 망원 물리 카메라(부모 논리 + setPhysicalCameraId)
-                //  3) 광각 논리 카메라  4) 기기 기본 후면 카메라(폴백)
-                // 전면: 기기 기본 전면 카메라
                 @Suppress("UnsafeOptInUsageError")
                 fun selectorByLogicalId(logicalId: String) = CameraSelector.Builder()
                     .addCameraFilter { list ->
@@ -968,7 +938,6 @@ fun CameraScreen(
                     }
                     .build()
 
-                // 물리 망원 카메라 사용 여부와 그 ID (Preview/ImageCapture 빌더에 적용)
                 val physicalIdToApply: String? = when {
                     lensFacing == CameraSelector.LENS_FACING_BACK
                         && rearTelephotoLogicalId == null
@@ -991,10 +960,8 @@ fun CameraScreen(
 
                 cameraProvider.unbindAll()
 
-                // 선택된 해상도
                 val targetSize = Size(selectedResolution.width, selectedResolution.height)
                 
-                // ViewPort 설정으로 명시적 비율 지정
                 val viewPort = androidx.camera.core.ViewPort.Builder(
                     android.util.Rational(
                         selectedResolution.width,
@@ -1055,7 +1022,6 @@ fun CameraScreen(
                             try {
                                 if (cameraEntryModeState.value != CameraEntryMode.MOBILE_SPACE) return@setAnalyzer
                                 val bmp = imageProxyRgbaToBitmap(image) ?: return@setAnalyzer
-                                // 신규 구역 생성 여부를 판단하기 위해 호출 전 구역 수 기록
                                 val prevRegionCount = mobileSpaceSession.regionCount
                                 val changed = mobileSpaceSession.onSceneFrame(bmp)
                                 val newRegionCreated = mobileSpaceSession.regionCount > prevRegionCount
@@ -1088,7 +1054,6 @@ fun CameraScreen(
                 if (captureMode == CaptureMode.PHOTO || captureMode == CaptureMode.CONTINUOUS) {
                     imageCapture = newImageCapture
 
-                    // UseCaseGroup을 사용하여 ViewPort 적용
                     val photoGroup = androidx.camera.core.UseCaseGroup.Builder()
                         .setViewPort(viewPort)
                         .addUseCase(preview)
@@ -1105,8 +1070,6 @@ fun CameraScreen(
                     videoCapture = null
                     isCameraReady = true
                 } else {
-                // VideoCapture에도 해상도 설정 적용
-                // Recorder는 해상도보다는 Quality를 사용하지만,
                 // 선택된 해상도에 따라 최대한 근접한 품질을 선택합니다.
                 val recorder = androidx.camera.video.Recorder.Builder()
                     .setQualitySelector(
@@ -1119,7 +1082,6 @@ fun CameraScreen(
                     videoCapture = VideoCapture.withOutput(recorder)
                     imageCapture = newImageCapture
 
-                    // UseCaseGroup을 사용하여 ViewPort 적용
                     val videoGroup = androidx.camera.core.UseCaseGroup.Builder()
                         .setViewPort(viewPort)
                         .addUseCase(preview)
@@ -1149,7 +1111,6 @@ fun CameraScreen(
         previewView?.let { bindCamera(it) }
     }
 
-    // 선택된 해상도의 비율 계산 (정사각형: 1024/1024)
     val density = LocalDensity.current
 
     Box(
@@ -1158,9 +1119,7 @@ fun CameraScreen(
             .background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
-        // 해상도 변경 시 PreviewView를 완전히 재생성하기 위해 key 사용
         key(selectedResolution) {
-            // 정사각형 해상도: 1:1 미리보기 강제 적용
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1215,7 +1174,6 @@ fun CameraScreen(
             }
         }
 
-        // 상단 바 배경
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -1224,7 +1182,6 @@ fun CameraScreen(
                 .background(Color.Black)
         )
 
-        // 동영상 촬영 시간 표시 (상단 알약)
         if (isRecording) {
             Box(
                 modifier = Modifier
@@ -1242,7 +1199,6 @@ fun CameraScreen(
             }
         }
 
-        // 통합 경고 메시지 영역 (기울기/모델링 적합성)
         val shouldShowWarningColumn = captureMode == CaptureMode.VIDEO && isRecording
         if (shouldShowWarningColumn) {
             Column(
@@ -1253,7 +1209,6 @@ fun CameraScreen(
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 if (captureMode == CaptureMode.VIDEO && isRecording) {
-                    // 기울기 경고 (이동식 공간 촬영 제외)
                     if (cameraEntryMode != CameraEntryMode.MOBILE_SPACE) {
                         val isAllPitchCompleted = currentPitchIndex >= pitchTargets.size
                         if (!isAllPitchCompleted && !isPitchAligned) {
@@ -1285,7 +1240,6 @@ fun CameraScreen(
             }
         }
 
-        // 상단 바: 좌측 모드 전환 + 우측 플래시/포커스/카운트
         val topMenuPadding = 8.dp
         Row(
             modifier = Modifier
@@ -1352,9 +1306,7 @@ fun CameraScreen(
             }
         }
 
-        // 동영상 촬영 중 구역 수집 정보 표시 (사물/공간 모두) - 이동식 공간 촬영은 제외
         if (captureMode == CaptureMode.VIDEO && isRecording && cameraEntryMode != CameraEntryMode.MOBILE_SPACE) {
-            // 구역 수집 진행률 표시
             Text(
                 text = "${capturedSectors.size} / ${sectorCount}장",
                 color = Color.White,
@@ -1367,7 +1319,6 @@ fun CameraScreen(
                     .padding(horizontal = 10.dp, vertical = 4.dp)
             )
             
-            // 동영상 촬영 안내 메시지 (사물/공간 모두 90도 촬영 지원)
             val isAllPitchCompleted = currentPitchIndex >= pitchTargets.size
             val instructionText = when {
                 isAllPitchCompleted -> "모든 각도 촬영 완료"
@@ -1390,7 +1341,6 @@ fun CameraScreen(
             )
             }
         
-        // 하단 컨트롤 바
         Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -1400,7 +1350,6 @@ fun CameraScreen(
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // 마지막 촬영 사진 썸네일 또는 갤러리 버튼
             Box(
                 modifier = Modifier
                     .size(56.dp)
@@ -1413,7 +1362,6 @@ fun CameraScreen(
                     val isVideo = isVideoUri(context, lastCapturedImageUri)
                     var videoThumbnail by remember(lastCapturedImageUri) { mutableStateOf<Bitmap?>(null) }
                     
-                    // 동영상 썸네일 로드
                     if (isVideo) {
                         LaunchedEffect(lastCapturedImageUri) {
                             videoThumbnail = withContext(Dispatchers.IO) {
@@ -1432,7 +1380,6 @@ fun CameraScreen(
                             }
                         }
                         
-                        // 동영상 썸네일 표시
                         if (videoThumbnail != null) {
                             Image(
                                 bitmap = videoThumbnail!!.asImageBitmap(),
@@ -1440,7 +1387,6 @@ fun CameraScreen(
                                 modifier = Modifier.fillMaxSize(),
                                 contentScale = ContentScale.Crop
                             )
-                            // 동영상 아이콘 오버레이
                             Icon(
                                 imageVector = Icons.Filled.Videocam,
                                 contentDescription = "동영상",
@@ -1453,7 +1399,6 @@ fun CameraScreen(
                                     .padding(2.dp)
                             )
                         } else {
-                            // 썸네일 로딩 중
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
@@ -1467,7 +1412,6 @@ fun CameraScreen(
                             )
                         }
                     } else {
-                        // 이미지 표시
                         Image(
                             painter = rememberAsyncImagePainter(lastCapturedImageUri),
                             contentDescription = "마지막 촬영 사진",
@@ -1485,12 +1429,10 @@ fun CameraScreen(
                 }
             }
 
-            // 동영상 촬영 중 구역 링 표시 (사물/공간 모두) - 이동식 공간 촬영은 제외
             val showRing = captureMode == CaptureMode.VIDEO && isRecording && cameraEntryMode != CameraEntryMode.MOBILE_SPACE
             val captureButtonSize =
                 if (isRecording || isContinuousBurstActive) 64.dp else 72.dp
 
-            // 촬영 버튼 + 링 (중심 일치)
             Box(
                 modifier = Modifier.size(if (showRing) ringSize else captureButtonSize)
             ) {
@@ -1543,12 +1485,10 @@ fun CameraScreen(
                                     imageCapture?.let { capture ->
                                         val useArcoreMeta = arcoreMetaEnabled &&
                                             lensFacing == CameraSelector.LENS_FACING_BACK
-                                        // 사고 현장: 단일 촬영마다 격자(커버리지) 세션을 새로 시작
                                         if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
                                             scanCoverage.reset()
                                             mobileSpaceUiRev++
                                         }
-                                        // 셔터 소리를 약 30% 수준으로 낮춤 (MediaActionSound는 볼륨 조절 불가)
                                         SoftShutterSound.play(volume = 0.3f)
                                         takePhoto(context, capture) { uri, file ->
                                             onImageCaptured(uri)
@@ -1634,12 +1574,10 @@ fun CameraScreen(
                                             }
                                             continuousBurstJob?.cancel()
                                             continuousBurstSessionFiles.clear()
-                                            // 연속 촬영 세션별 데이터셋 폴더 생성
                                             val burstDatasetDir = File(
                                                 context.getExternalFilesDir(null),
                                                 "datasets/연속촬영_${SimpleDateFormat("yyyy-MM-dd_HHmmss", Locale.US).format(Date())}"
                                             ).also { it.mkdirs() }
-                                            // 사고 현장: 한 번의 연속 촬영 세션 동안만 격자 공유 → 세션 시작 시 초기화
                                             if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
                                                 scanCoverage.reset()
                                                 mobileSpaceUiRev++
@@ -1806,7 +1744,6 @@ fun CameraScreen(
 
                                 CaptureMode.VIDEO -> {
                                 if (!isRecording) {
-                                    // 동영상 촬영 시작 - 카메라가 준비되었는지 확인
                                     if (isCameraReady && videoCapture != null) {
                                         videoCapture?.let { capture ->
                                             mediaActionSound.play(MediaActionSound.START_VIDEO_RECORDING)
@@ -1831,12 +1768,10 @@ fun CameraScreen(
                                                     datasetDir = sessionFolder
                                                     pendingVideoDatasetDirForArcore = sessionFolder
                                                     pendingVideoDatasetPathForArcore = sessionFolder.absolutePath
-                                                    // 사고 현장: 한 번의 동영상 녹화 동안만 격자 공유 → 녹화 시작 시 초기화
                                                     if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
                                                         scanCoverage.reset()
                                                         mobileSpaceUiRev++
                                                     }
-                                                    // 동영상 촬영 시작 시 방위각 기준 설정
                                                     baseAzimuthDegrees = azimuthDegrees
                                                     capturedSectors = emptySet()
                                                     basePitchDegrees = pitchDegrees
@@ -1967,7 +1902,6 @@ fun CameraScreen(
                                         }
                                     }
                                 } else {
-                                    // 동영상 촬영 중지
                                     mediaActionSound.play(MediaActionSound.STOP_VIDEO_RECORDING)
                                     recording?.stop()
                                     recording = null
@@ -1979,7 +1913,6 @@ fun CameraScreen(
                                         mobileSpaceUiRev++
                                     }
 
-                                    // [추가] 빈 데이터셋 폴더 정리 — ImageCapture 비동기 저장 중이면 비어 보일 수 있어
                                     // ARCore·데이터셋 ZIP을 위해 pendingArcoreForVideo인 경우 즉시 삭제하지 않는다.
                                     val targetDir = datasetDir
                                     val skipImmediateEmptyCleanup = pendingArcoreForVideo
@@ -1995,7 +1928,6 @@ fun CameraScreen(
                                     }
 
                                     datasetDir = null
-                                    // 동영상 촬영 종료 시 상태 초기화
                                     baseAzimuthDegrees = null
                                     capturedSectors = emptySet()
                                     basePitchDegrees = null
@@ -2055,7 +1987,6 @@ fun CameraScreen(
                 }
             }
 
-            // 전면/후면 카메라 전환 버튼
             Icon(
                 imageVector = Icons.Filled.Cameraswitch,
                 contentDescription = "카메라 전환",
@@ -2071,7 +2002,6 @@ fun CameraScreen(
             )
         }
 
-        // 링은 촬영 버튼 내부로 이동
     }
 }
 

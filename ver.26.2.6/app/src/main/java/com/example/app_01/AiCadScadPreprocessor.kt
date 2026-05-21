@@ -92,13 +92,11 @@ object AiCadScadPreprocessor {
         for (line in lines) {
             val t = line.trim()
 
-            // 빈 줄 — 상태 유지
             if (t.isEmpty()) {
                 out.add(line)
                 continue
             }
 
-            // 이미 주석
             if (t.startsWith("//") || t.startsWith("/*") || t.startsWith("*")) {
                 out.add(line)
                 prevWasComment = true
@@ -115,7 +113,6 @@ object AiCadScadPreprocessor {
                 continue
             }
 
-            // ── Rule 2: 치수 서술 독립 줄 ─────────────────────────────────
             // 이전 줄과 무관하게 치수 서술로 보이는 줄입니다.
             if (looksLikeDimensionProse(t)) {
                 out.add(toComment(line, t))
@@ -137,14 +134,12 @@ object AiCadScadPreprocessor {
                 continue
             }
 
-            // ── Rule 5: 영어 단어 나열 (구조 문자 없음) ───────────────────
             if (looksLikeEnglishProseLine(t)) {
                 out.add(toComment(line, t))
                 prevWasComment = true
                 continue
             }
 
-            // OpenSCAD 코드로 통과
             out.add(line)
             prevWasComment = false
         }
@@ -163,13 +158,11 @@ object AiCadScadPreprocessor {
      * 의도: "OpenSCAD라고 확신할 수 있는 것만 허용". 나머지는 주석으로.
      */
     private fun looksLikeNewOpenScadStatement(t: String): Boolean {
-        // ① 구조 문자: = ; { [ ] }
         for (c in t) {
             when (c) {
                 '=', ';', '{', '[', ']', '}' -> return true
             }
         }
-        // ② `$fn`, `$fs`, `$fa`, `$t` 등 특수 변수
         if (t.startsWith("\$")) return true
 
         // ③ 줄 시작이 식별자 호출 — `cube(`, `translate([` 등. `(see diagram)` 같은 설명 줄은 false
@@ -201,15 +194,12 @@ object AiCadScadPreprocessor {
         // ~N.Nmm x N.Nmm … 또는 ≈N 형태 (tilde, approx 기호)
         if (Regex("""(?i)[~≈]?\s*\d+(\.\d+)?\s*mm\s*[x×]\s*\d+""").containsMatchIn(t)) return true
 
-        // approx / (approx) 패턴
         if (Regex("""(?i)\(?\s*approx\s*\)?\s*:?\s*""").containsMatchIn(t) &&
             !t.contains('=')) return true
 
-        // N x N x N 또는 N×N×N (괄호 없어도 치수로 간주)
         if (Regex("""(?i)\d+(\.\d+)?\s*[x×]\s*\d+(\.\d+)?\s*[x×]\s*\d+(\.\d+)?""")
                 .containsMatchIn(t) && !t.contains('=') && !t.contains(';')) return true
 
-        // mm + 치수 키워드(wide, tall, thick …)
         if (Regex("""(?i)\bmm\b""").containsMatchIn(t) &&
             Regex("""(?i)\b(wide|width|tall|height|thick|thickness|length|depth|diameter|radius)\b""")
                 .containsMatchIn(t)) return true
@@ -231,9 +221,7 @@ object AiCadScadPreprocessor {
         if (',' in inside || '=' in inside || '[' in inside) return false
         val tokens = inside.split(Regex("\\s+")).filter { it.isNotBlank() }
         if (tokens.isEmpty()) return false
-        // 숫자만 있으면 OpenSCAD 인수
         if (tokens.all { it.matches(Regex("""^[+-]?[0-9.]+$""")) }) return false
-        // 괄호 바깥 앞부분이 없거나 단순 영문/밑줄이고, 내부가 모두 영문자이면 설명
         val prefix = t.substring(0, open).trim()
         if (prefix.isEmpty() || prefix.all { it.isLetter() || it == '_' || it.isWhitespace() }) {
             if (tokens.all { it.matches(Regex("""^[a-zA-Z][a-zA-Z0-9_'-]*$""")) }) return true

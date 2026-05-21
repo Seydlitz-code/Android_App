@@ -48,9 +48,6 @@ class MobileSpaceScanCoverage(
     /** true = 이 방향은 수집 완료 */
     private val captured = BooleanArray(azBins * pitchBins)
 
-    // ──────────────────────────────────────────────
-    // 내부 유틸
-    // ──────────────────────────────────────────────
 
     private fun idx(az: Int, p: Int) = az * pitchBins + p
 
@@ -61,9 +58,6 @@ class MobileSpaceScanCoverage(
         ((pitchDeg.coerceIn(pitchMinDeg, pitchMaxDeg) - pitchMinDeg) / pitchDegPerBin)
             .toInt().coerceIn(0, pitchBins - 1)
 
-    // ──────────────────────────────────────────────
-    // 공개 API
-    // ──────────────────────────────────────────────
 
     /**
      * 현재 카메라가 바라보는 방향(headingDeg, pitchDeg) 주변 좁은 범위를

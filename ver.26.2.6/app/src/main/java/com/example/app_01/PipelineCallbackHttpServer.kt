@@ -84,7 +84,6 @@ internal class PipelineCallbackHttpServer(
         // NanoHTTPD 2.3.1 의 parseBody() 는 멀티파트 POST 전량을 바이트 배열로
         // 들고 올린 뒤 파싱합니다. 서버가 PLY·GLB·이미지를 콜백에 포함하면 한 번에
         // 수백 MB 힙이 필요해 프로세스가 바로 종료되는 사례가 있습니다.
-        //
         // - Content-Length 가 없거나(청크 등) 신뢰할 수 없으면 parseBody 호출 불가 → 드레인만
         // - 알려진 길이라도 소량(텍스트·소형 JSON 상태만) 일 때만 parseBody 허용
         // 그 외는 고정 버퍼로만 읽어 버리고 GET /results 다운로드로만 결과를 받습니다.
@@ -161,7 +160,6 @@ internal class PipelineCallbackHttpServer(
                     src.copyTo(dest, overwrite = true)
                     if (dest.isFile && dest.length() > 0L) partFiles[artifactKey] = dest
                 } catch (_: Exception) {
-                    // 복사 실패 시 해당 파일만 건너뜀
                 }
             }
 
@@ -202,7 +200,6 @@ internal class PipelineCallbackHttpServer(
                 remaining -= n
             }
         } catch (_: Exception) {
-            // 드레인 실패는 무시 — 연결이 이미 닫혔을 수 있음
         }
     }
 
@@ -252,7 +249,6 @@ internal class PipelineCallbackHttpServer(
                     if (value.isNotEmpty()) result[name] = value
                 }
             } else {
-                // application/x-www-form-urlencoded
                 chunk.split("&").forEach { pair ->
                     val eq = pair.indexOf('=')
                     if (eq < 0) return@forEach
@@ -324,7 +320,6 @@ internal fun startPipelineCallbackServer(
             s.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
             return s to p
         } catch (_: Exception) {
-            // 다음 포트 시도
         }
     }
     return null

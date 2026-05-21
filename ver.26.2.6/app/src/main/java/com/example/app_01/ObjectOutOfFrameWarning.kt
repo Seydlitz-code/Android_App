@@ -22,7 +22,6 @@ object ObjectOutOfFrameWarning {
 
     private const val MODEL_ASSET_PATH = "models/efficientdet_lite0.tflite"
 
-    // 과도한 연산 방지용 스로틀
     private val lastRunAtMs = AtomicLong(0L)
 
     @Volatile
@@ -69,7 +68,6 @@ object ObjectOutOfFrameWarning {
     ): Boolean? {
         val now = SystemClock.elapsedRealtime()
         val last = lastRunAtMs.get()
-        // 스로틀 구간에서는 "상태 업데이트를 하지 않음" (경고 깜빡임 방지)
         if (now - last < minIntervalMs) return null
         lastRunAtMs.set(now)
 
@@ -96,7 +94,6 @@ object ObjectOutOfFrameWarning {
         val top = (h - size) / 2f
         val square = RectF(left, top, left + size, top + size)
 
-        // 사물 박스가 사각형을 조금이라도 벗어나면 경고
         return (targetBox.left < square.left ||
             targetBox.top < square.top ||
             targetBox.right > square.right ||
@@ -117,7 +114,6 @@ object ObjectOutOfFrameWarning {
             if (hit != null) return hit
         }
 
-        // fallback: 가장 큰 박스(면적 기준)
         return boxes.maxByOrNull { (it.width() * it.height()) }
     }
 }

@@ -60,7 +60,6 @@ fun MobileSpaceScanOverlay(
 
     Box(modifier = modifier) {
         Canvas(Modifier.fillMaxSize()) {
-            // 커버리지 갱신 시 캔버스 무효화 보장 (mutable 객체만 바뀌는 경우)
             @Suppress("UNUSED_VARIABLE") val _invalidate = revisionTick
 
             val cw = size.width
@@ -70,7 +69,6 @@ fun MobileSpaceScanOverlay(
             val pxPerAz    = cw / FOV_H
             val pxPerPitch = ch / FOV_V
 
-            // 세로 기준 크기 + 가로 한계(마름모 전폭 4·halfH ≤ 화면의 ~88%)
             val ROWS_TARGET   = 24f
             val halfHByHeight = ch / ROWS_TARGET
             val halfHByWidth  = (cw * 0.88f) / 4f
@@ -83,7 +81,6 @@ fun MobileSpaceScanOverlay(
 
             val pitchMargin = pitchStepDeg * 5f
             // 시야(±FOV/2)를 피치 각도로 직접 잡는다. P_MIN/P_MAX 로 여기서 자르면 안 된다.
-            // 천장을 볼 때 pitchDeg 가 P_MIN(5°) 근처·이하인데도 start 를 5°로 막아버리면
             // pitchC < pitchDeg 인 행(= 화면 위쪽)이 한 줄도 생성되지 않아 그리드가 화면 하단에만 깔린다.
             val pitchLo = pitchDeg - FOV_V * 0.5f - pitchMargin
             val pitchHi = pitchDeg + FOV_V * 0.5f + pitchMargin
@@ -118,7 +115,6 @@ fun MobileSpaceScanOverlay(
 
                         if (screenX + halfW > -edgeSlack && screenX - halfW < cw + edgeSlack) {
                             val azNorm = ((azC % 360f) + 360f) % 360f
-                            // 커버리지 맵은 P_MIN~P_MAX 만 저장 — 화면 밖 각도는 가장자리 빈으로 조회
                             val pitchForCoverage = pitchC.coerceIn(P_MIN, P_MAX)
                             val captured = coverage.getCoverageNearby(azNorm, pitchForCoverage) >= 1f
 

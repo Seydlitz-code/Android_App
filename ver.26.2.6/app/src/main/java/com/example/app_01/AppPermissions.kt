@@ -6,8 +6,6 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
 
-// ── 앱 권한 목록 정의 ─────────────────────────────────────────────────────────
-
 data class AppPermissionInfo(
     val name: String,
     val description: String,

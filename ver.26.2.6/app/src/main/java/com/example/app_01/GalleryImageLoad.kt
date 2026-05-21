@@ -29,7 +29,6 @@ fun rememberGalleryGridThumbEdgePx(columns: Int): Int {
     return remember(cfg.screenWidthDp, cfg.densityDpi, columns) {
         val gutterApprox = 24f
         val cellDp = ((cfg.screenWidthDp - gutterApprox) / columns.toFloat()).coerceAtLeast(40f)
-        // 상한을 낮춰 그리드 셀에 맞는 해상도만 디코딩 — 첫 표시·스크롤 부담 감소
         (cellDp * cfg.densityDpi / 160f).toInt().coerceIn(120, 480)
     }
 }

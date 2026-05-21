@@ -350,7 +350,6 @@ internal fun getImageDimensions(context: Context, uri: Uri): Pair<Int, Int>? {
 /** OOM 방지: 최대 변 길이 이하로 디코딩. EXIF 회전을 적용해 표시 방향과 일치시킴 */
 internal fun decodeBitmapWithMaxDimension(context: Context, uri: Uri, maxDim: Int): Bitmap? {
     return try {
-        // 원본 크기 확인
         val sizeOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, sizeOpts) }
         val rawW = sizeOpts.outWidth
@@ -370,7 +369,6 @@ internal fun decodeBitmapWithMaxDimension(context: Context, uri: Uri, maxDim: In
             orientation == ExifInterface.ORIENTATION_TRANSVERSE ||
             orientation == ExifInterface.ORIENTATION_TRANSPOSE
 
-        // 회전 후 실효 크기 기준으로 sampleSize 계산
         val effectiveW = if (rotates90or270) rawH else rawW
         val effectiveH = if (rotates90or270) rawW else rawH
         var sampleSize = 1
@@ -543,7 +541,6 @@ fun CameraApp(modifier: Modifier = Modifier) {
             }
             allPermissionsLauncher.launch(permList.toTypedArray())
         } else {
-            // 이미 요청된 적 있으면 카메라·저장소만 개별 확인
             if (!hasCameraPermission) cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
             if (!hasStoragePermission) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
@@ -554,7 +551,6 @@ fun CameraApp(modifier: Modifier = Modifier) {
         }
     }
 
-    // 갤러리 그리드 스크롤 상태 — 이미지 상세 화면 이동 후 복귀 시 위치 유지
     val galleryGridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
     val galleryScope = rememberCoroutineScope()
 
@@ -564,7 +560,6 @@ fun CameraApp(modifier: Modifier = Modifier) {
         if (images.isNotEmpty()) {
             lastCapturedImageUri = images.first()
         }
-        // 3DGS 완료 알림 채널 등록
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = context.getSystemService(NotificationManager::class.java)
             if (nm?.getNotificationChannel("gs3d_completion") == null) {
@@ -630,7 +625,6 @@ fun CameraApp(modifier: Modifier = Modifier) {
                 }
             }
         }
-        // ── 3DGS 완료 팝업 (앱 전역 — 어느 탭에서든 표시) ───────────────
         if (showGs3dViewerPopup && !gs3dViewerUrl.isNullOrBlank()) {
             Dialog(
                 onDismissRequest = { showGs3dViewerPopup = false },
@@ -700,7 +694,6 @@ fun CameraApp(modifier: Modifier = Modifier) {
                 initialIndex = selectedMediaIndex,
                 onBack = {
                     selectedMediaUri = null
-                    // 갤러리로 복귀 시 마지막으로 본 이미지가 있는 행으로 스크롤
                     galleryScope.launch {
                         galleryGridState.scrollToItem(
                             gridItemIndexForMediaIndex(selectedMediaIndex, capturedImages, context)
@@ -863,7 +856,6 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                 showGs3dViewerPopup = true
                                 context.getSharedPreferences("gs3d_prefs", Context.MODE_PRIVATE)
                                     .edit().putString("last_viewer_url", url).apply()
-                                // 시스템 알림
                                 try {
                                     val tapIntent = PendingIntent.getActivity(
                                         context, 1000,
@@ -1035,19 +1027,15 @@ fun MediaDetailScreen(
     val context = LocalContext.current
     val palette = LocalAppUiPalette.current
     val scope = rememberCoroutineScope()
-    // 내부 변경 가능한 리스트 (삭제 시 즉시 반영)
     val mutableMediaList = remember(mediaList) { mediaList.toMutableStateList() }
     var currentIndex by remember { mutableStateOf(initialIndex.coerceIn(0, mediaList.size - 1)) }
 
-    // 핀치 줌 / 패닝 상태
     var scale by remember { mutableStateOf(1f) }
     var offsetX by remember { mutableStateOf(0f) }
     var offsetY by remember { mutableStateOf(0f) }
 
-    // 필름스트립 스크롤 상태
     val filmstripState = rememberLazyListState()
 
-    // 옵션 바 상태
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var actionMessage by remember { mutableStateOf<String?>(null) }
     var showImageEdit by remember { mutableStateOf(false) }
@@ -1085,7 +1073,6 @@ fun MediaDetailScreen(
         }
     }
 
-    // 인덱스 변경 시 콜백 + 줌 리셋 + 필름스트립 자동 스크롤
     LaunchedEffect(currentIndex) {
         onMediaChanged(currentIndex)
         scale = 1f; offsetX = 0f; offsetY = 0f
@@ -1094,7 +1081,6 @@ fun MediaDetailScreen(
         }
     }
 
-    // 액션 메시지 3초 후 자동 소거
     LaunchedEffect(actionMessage) {
         if (actionMessage != null) {
             kotlinx.coroutines.delay(3000)
@@ -1112,7 +1098,6 @@ fun MediaDetailScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // ─── 메인 미디어 영역 (필름스트립 + 옵션 바 위쪽) ────────────────────────
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1121,7 +1106,6 @@ fun MediaDetailScreen(
         ) {
             if (currentMediaUri != null) {
                 if (isVideo) {
-                    // 동영상 재생
                     var videoViewRef by remember { mutableStateOf<VideoView?>(null) }
                     LaunchedEffect(currentMediaUri) {
                         videoViewRef?.let { view ->
@@ -1148,7 +1132,6 @@ fun MediaDetailScreen(
                         update = { view -> videoViewRef = view }
                     )
                 } else {
-                    // 이미지: 핀치 줌(2손가락) + 패닝(줌된 상태) + 스와이프 내비게이션(1손가락·줌 해제)
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -1157,9 +1140,6 @@ fun MediaDetailScreen(
                                 val viewWidth  = size.width.toFloat()
                                 val viewHeight = size.height.toFloat()
 
-                                // 오프셋 경계 클램핑 헬퍼:
-                                // scale 배율에서 이미지가 뷰 밖으로 나가지 않도록 최대 이동 범위를 제한
-                                // maxOffset = (scale - 1) × viewDim / 2
                                 fun clampOffsets() {
                                     val maxX = ((scale - 1f) * viewWidth  / 2f).coerceAtLeast(0f)
                                     val maxY = ((scale - 1f) * viewHeight / 2f).coerceAtLeast(0f)
@@ -1167,7 +1147,6 @@ fun MediaDetailScreen(
                                     offsetY = offsetY.coerceIn(-maxY, maxY)
                                 }
 
-                                // 단일 awaitPointerEventScope 블록으로 핀치줌+스와이프를 모두 처리
                                 awaitPointerEventScope {
                                     while (true) {
                                         awaitFirstDown(requireUnconsumed = false)
@@ -1176,14 +1155,12 @@ fun MediaDetailScreen(
                                         var pinching = false
                                         var prevDist = 0f
 
-                                        // 손가락이 모두 떼어질 때까지 이벤트 처리
                                         while (true) {
                                             val event = awaitPointerEvent()
                                             val pressed = event.changes.filter { it.pressed }
                                             if (pressed.isEmpty()) break
 
                                             if (pressed.size >= 2) {
-                                                // ─ 두 손가락: 핀치 줌 + 패닝 ─
                                                 pinching = true
                                                 val p1 = pressed[0]; val p2 = pressed[1]
                                                 val dx = p1.position.x - p2.position.x
@@ -1202,17 +1179,14 @@ fun MediaDetailScreen(
                                                     }
                                                 }
                                                 prevDist = dist
-                                                // 핀치 후 경계 클램핑 적용
                                                 clampOffsets()
                                                 pressed.forEach { it.consume() }
 
                                             } else if (pressed.size == 1 && !pinching) {
-                                                // ─ 한 손가락: 줌 상태이면 패닝, 아니면 내비게이션 스와이프 ─
                                                 val delta = pressed[0].position - pressed[0].previousPosition
                                                 if (scale > 1.05f) {
                                                     offsetX += delta.x
                                                     offsetY += delta.y
-                                                    // 패닝 후 경계 클램핑 적용
                                                     clampOffsets()
                                                 } else {
                                                     dragX += delta.x
@@ -1221,7 +1195,6 @@ fun MediaDetailScreen(
                                             }
                                         }
 
-                                        // 스와이프 내비게이션 판정 (핀치 없음 + 줌 해제 상태)
                                         if (!pinching && scale <= 1.05f) {
                                             val threshold = viewWidth * 0.3f
                                             when {
@@ -1229,7 +1202,6 @@ fun MediaDetailScreen(
                                                 dragX < -threshold && currentIndex < mutableMediaList.size - 1 -> currentIndex++
                                             }
                                         }
-                                        // scale 1 미만 방지 + 최종 경계 클램핑
                                         if (scale < 1f) { scale = 1f; offsetX = 0f; offsetY = 0f }
                                         else clampOffsets()
                                     }
@@ -1255,13 +1227,11 @@ fun MediaDetailScreen(
             }
         }
 
-        // ─── 하단: 필름스트립 + 옵션 바 ────────────────────────────────────────
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
         ) {
-            // 필름스트립 (2장 이상일 때)
             if (mutableMediaList.size > 1) {
                 Box(
                     modifier = Modifier
@@ -1313,7 +1283,6 @@ fun MediaDetailScreen(
                 }
             }
 
-            // ─── 옵션 바 (항상 표시) ──────────────────────────────────────────────
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1322,7 +1291,6 @@ fun MediaDetailScreen(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 이미지 편집 (연필 아이콘)
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -1339,9 +1307,7 @@ fun MediaDetailScreen(
                         modifier = Modifier.size(26.dp)
                     )
                 }
-                // 구분선
                 Box(modifier = Modifier.width(0.5.dp).height(28.dp).background(Color(0xFF444444)))
-                // 2차 사물 배경 분리 (브러시 아이콘)
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -1358,9 +1324,7 @@ fun MediaDetailScreen(
                         modifier = Modifier.size(26.dp)
                     )
                 }
-                // 구분선
                 Box(modifier = Modifier.width(0.5.dp).height(28.dp).background(Color(0xFF444444)))
-                // 이미지 내보내기 (업로드 아이콘)
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -1384,9 +1348,7 @@ fun MediaDetailScreen(
                         modifier = Modifier.size(26.dp)
                     )
                 }
-                // 구분선
                 Box(modifier = Modifier.width(0.5.dp).height(28.dp).background(Color(0xFF444444)))
-                // 이미지 삭제 (휴지통 아이콘)
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -1406,7 +1368,6 @@ fun MediaDetailScreen(
             }
         }
 
-        // 동영상: 프레임 분할 — 우측 상단 텍스트만 (하단 편집 바에서는 제외)
         if (isVideo && currentMediaUri != null) {
             Box(
                 modifier = Modifier
@@ -1431,7 +1392,6 @@ fun MediaDetailScreen(
             }
         }
 
-        // 액션 메시지 토스트 (내보내기 결과 등)
         actionMessage?.let { msg ->
             Box(
                 modifier = Modifier
@@ -1444,7 +1404,6 @@ fun MediaDetailScreen(
             }
         }
 
-        // 이미지 편집 화면: 외부 Box 안에서 오버레이로 표시해야 전체 화면 덮기 가능
         if (showImageEdit && currentMediaUri != null) {
             ImageEditScreen(
                 imageUri = currentMediaUri,
@@ -1460,7 +1419,6 @@ fun MediaDetailScreen(
         }
     }
 
-    // 프레임 분할 진행도 다이얼로그
     if (showFrameSplitDialog) {
         val splitBarColor = if (palette.isDark) Color.White else Color.Black
         val splitTrackColor = palette.onBackground.copy(alpha = 0.14f)
@@ -1513,7 +1471,6 @@ fun MediaDetailScreen(
         )
     }
 
-    // 삭제 확인 다이얼로그
     if (showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
@@ -1555,9 +1512,6 @@ fun MediaDetailScreen(
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// 자르기 모드 지원 타입
-// ──────────────────────────────────────────────────────────────────────────────
 private enum class CropHandle { NONE, MOVE, NW, NE, SW, SE, N, E, S, W }
 
 internal data class PendingCropData(
@@ -1574,9 +1528,6 @@ internal data class PendingCropData(
     val cropPanY: Float = 0f
 )
 
-// ──────────────────────────────────────────────────────────────────────────────
-// 이미지 편집 화면
-// ──────────────────────────────────────────────────────────────────────────────
 @Composable
 fun ImageEditScreen(
     imageUri: Uri,
@@ -1586,23 +1537,19 @@ fun ImageEditScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // 현재 표시 중인 URI (누끼 따기 결과로 갱신 가능)
     var currentUri by remember { mutableStateOf(imageUri) }
 
-    // 변환 상태
     var buttonRotation by remember { mutableStateOf(0f) }
     var dialDegrees    by remember { mutableStateOf(0f) }
     var isFlipped      by remember { mutableStateOf(false) }
     var pendingCrop    by remember { mutableStateOf<PendingCropData?>(null) }
     var isCropMode     by remember { mutableStateOf(false) }
     var isDrawMode     by remember { mutableStateOf(false) }   // 누끼 따기 모드
-    // 자르기 모드 전용 줌/패닝 상태
     var cropZoom  by remember { mutableStateOf(1f) }
     var cropPanX  by remember { mutableStateOf(0f) }
     var cropPanY  by remember { mutableStateOf(0f) }
 
     val totalRotation = buttonRotation + dialDegrees
-    // 현재 URI가 원본과 달라도(누끼 따기 후) hasChanges = true
     val hasChanges    = buttonRotation != 0f || dialDegrees != 0f || isFlipped || pendingCrop != null || currentUri != imageUri
 
     var showSaveDialog by remember { mutableStateOf(false) }
@@ -1617,7 +1564,6 @@ fun ImageEditScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // ── 메인 이미지 (모드별 하단 패딩) ──
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1646,7 +1592,6 @@ fun ImageEditScreen(
             )
         }
 
-        // ── 상단 바: X | 이미지 편집 | 원본 복원  저장 ──
         Row(
             modifier = Modifier
                 .align(Alignment.TopStart)
@@ -1659,7 +1604,6 @@ fun ImageEditScreen(
                 Icon(Icons.Default.Close, contentDescription = "닫기", tint = Color.White)
             }
             Spacer(modifier = Modifier.weight(1f))
-            // 원본 복원 버튼
             TextButton(
                 onClick = {
                     buttonRotation = 0f
@@ -1676,7 +1620,6 @@ fun ImageEditScreen(
                     fontSize = 14.sp
                 )
             }
-            // 저장 버튼
             TextButton(
                 onClick  = { showSaveDialog = true },
                 enabled  = hasChanges
@@ -1690,7 +1633,6 @@ fun ImageEditScreen(
             }
         }
 
-        // ── 하단: 다이얼 바 + 기능 버튼 (자르기/그리기 모드가 아닐 때만) ──
         if (!isCropMode && !isDrawMode) {
             Column(
                 modifier = Modifier
@@ -1726,7 +1668,6 @@ fun ImageEditScreen(
             }
         }
 
-        // ── 자르기 모드 오버레이 ──
         if (isCropMode) {
             CropModeOverlay(
                 imageUri          = currentUri,
@@ -1761,7 +1702,6 @@ fun ImageEditScreen(
             )
         }
 
-        // ── 누끼 따기 모드 오버레이 ──
         if (isDrawMode) {
             SubjectSegmentOverlay(
                 sourceUri     = currentUri,
@@ -1780,7 +1720,6 @@ fun ImageEditScreen(
             )
         }
 
-        // 저장 중 오버레이
         if (isSaving) {
             Box(
                 modifier = Modifier
@@ -1793,7 +1732,6 @@ fun ImageEditScreen(
         }
     }
 
-    // ── 저장 확인 다이얼로그 ──
     if (showSaveDialog) {
         androidx.compose.ui.window.Dialog(onDismissRequest = { showSaveDialog = false }) {
             Column(
@@ -1813,7 +1751,6 @@ fun ImageEditScreen(
                 )
                 Spacer(Modifier.height(16.dp))
                 HorizontalDivider(color = Color(0xFF444444))
-                // 편집 이미지로 저장 (원본 덮어쓰기)
                 TextButton(
                     onClick = {
                         showSaveDialog = false
@@ -1829,7 +1766,6 @@ fun ImageEditScreen(
                     Text("편집 이미지로 저장", color = Color(0xFF9CD83B), fontSize = 15.sp)
                 }
                 HorizontalDivider(color = Color(0xFF444444))
-                // 복사본으로 저장
                 TextButton(
                     onClick = {
                         showSaveDialog = false
@@ -1845,7 +1781,6 @@ fun ImageEditScreen(
                     Text("복사본으로 저장", color = Color.White, fontSize = 15.sp)
                 }
                 HorizontalDivider(color = Color(0xFF444444))
-                // 저장하지 않음
                 TextButton(
                     onClick = { showSaveDialog = false; onBack() },
                     modifier = Modifier.fillMaxWidth()
@@ -1858,9 +1793,6 @@ fun ImageEditScreen(
 }
 
 // ── 다이얼 바: 50칸 / 양끝 페이드 아웃 / 검은 배경 ────────────────────────
-// ─────────────────────────────────────────────────────────────────────────────
-// 누끼 따기 — 영역 직접 드로잉 + U²-Net 사물 분리
-// ─────────────────────────────────────────────────────────────────────────────
 @Composable
 internal fun SubjectSegmentOverlay(
     sourceUri: Uri,
@@ -1877,11 +1809,9 @@ internal fun SubjectSegmentOverlay(
     val topBarDp  = 56.dp
     val botBarDp  = 80.dp
 
-    // 현재 편집 상태가 반영된 작업용 비트맵 (비동기 준비)
     var workingBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var isPreparing   by remember { mutableStateOf(true) }
 
-    // 드로잉 경로 & UI 상태 (LaunchedEffect보다 먼저 선언)
     var pathPoints   by remember { mutableStateOf(listOf<Offset>()) }
     var isProcessing by remember { mutableStateOf(false) }
     var errorMsg     by remember { mutableStateOf<String?>(null) }
@@ -1910,7 +1840,6 @@ internal fun SubjectSegmentOverlay(
         val botPx      = with(density) { botBarDp.toPx() }
         val imgAreaH   = containerH - topPx - botPx
 
-        // 이미지 실제 표시 경계 (ContentScale.Fit 기준)
         var dispLeft by remember { mutableStateOf(0f) }
         var dispTop  by remember { mutableStateOf(topPx) }
         var dispW    by remember { mutableStateOf(containerW) }
@@ -1926,7 +1855,6 @@ internal fun SubjectSegmentOverlay(
             dispW    = dW; dispH = dH
         }
 
-        // ── 작업용 이미지 표시 ──
         workingBitmap?.let { bm ->
             Image(
                 bitmap = bm.asImageBitmap(),
@@ -1938,7 +1866,6 @@ internal fun SubjectSegmentOverlay(
             )
         }
 
-        // ── 드로잉 캔버스 ──
         val composePath = remember(pathPoints) {
             if (pathPoints.size < 2) null
             else androidx.compose.ui.graphics.Path().apply {
@@ -1979,7 +1906,6 @@ internal fun SubjectSegmentOverlay(
             }
         }
 
-        // ── 상단 바 ──
         val canApply = pathPoints.size >= 6 && workingBitmap != null
         Row(
             modifier = Modifier
@@ -2051,7 +1977,6 @@ internal fun SubjectSegmentOverlay(
             }
         }
 
-        // ── 하단 안내 바 ──
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -2072,7 +1997,6 @@ internal fun SubjectSegmentOverlay(
             )
         }
 
-        // ── 준비 중 오버레이 ──
         if (isPreparing) {
             Box(
                 modifier = Modifier.fillMaxSize().background(Color.Black),
@@ -2086,7 +2010,6 @@ internal fun SubjectSegmentOverlay(
             }
         }
 
-        // ── 처리 중 오버레이 ──
         if (isProcessing) {
             Box(
                 modifier = Modifier
@@ -2102,7 +2025,6 @@ internal fun SubjectSegmentOverlay(
             }
         }
 
-        // ── 에러 토스트 ──
         errorMsg?.let { msg ->
             LaunchedEffect(msg) {
                 kotlinx.coroutines.delay(3000)
@@ -2120,9 +2042,6 @@ internal fun SubjectSegmentOverlay(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 자르기 오버레이 (이미지 위에 전체 화면으로 덮음)
-// ─────────────────────────────────────────────────────────────────────────────
 @Composable
 internal fun CropModeOverlay(
     imageUri: Uri,
@@ -2140,7 +2059,6 @@ internal fun CropModeOverlay(
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
-    // pointerInput 안에서 항상 최신값을 읽기 위한 래퍼
     val latestZoom = androidx.compose.runtime.rememberUpdatedState(cropZoom)
     val latestPanX = androidx.compose.runtime.rememberUpdatedState(cropPanX)
     val latestPanY = androidx.compose.runtime.rememberUpdatedState(cropPanY)
@@ -2152,13 +2070,11 @@ internal fun CropModeOverlay(
         val imgAreaTop = topPx
         val imgAreaH   = containerH - topPx - with(density) { bottomBarDp.toPx() }
 
-        // 실제 이미지 표시 경계 (이미지 로드 후 업데이트)
         var dispLeft   by remember { mutableStateOf(0f) }
         var dispTop    by remember { mutableStateOf(imgAreaTop) }
         var dispRight  by remember { mutableStateOf(containerW) }
         var dispBottom by remember { mutableStateOf(imgAreaTop + imgAreaH) }
 
-        // 자르기 사각형 상태 (dispLeft/dispTop 기준 초기값)
         var cropLeft  by remember { mutableStateOf(0f) }
         var cropTop   by remember { mutableStateOf(imgAreaTop) }
         var cropW     by remember { mutableStateOf(containerW) }
@@ -2173,13 +2089,11 @@ internal fun CropModeOverlay(
         val hLineW     = with(density) { 3.dp.toPx() }
         val edgeLen    = hLen * 1.1f   // 모서리 핸들 선 길이 (꼭짓점 L자와 비슷한 크기)
         val edgeLineW  = hLineW * 1.2f // 꼭짓점보다 살짝 두껍게
-        // 가로/세로 터치 인식 범위
         val edgeTouchX = with(density) { 48.dp.toPx() }  // N/S: 가로 넓게
         val edgeTouchY = with(density) { 28.dp.toPx() }  // N/S: 세로 보통
         val edgeTouchXv = with(density) { 28.dp.toPx() } // E/W: 가로 보통
         val edgeTouchYv = with(density) { 48.dp.toPx() } // E/W: 세로 넓게
 
-        // 이미지 실제 표시 경계 비동기 계산
         LaunchedEffect(imageUri, buttonRotation) {
             val bounds = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -2199,7 +2113,6 @@ internal fun CropModeOverlay(
             } ?: return@LaunchedEffect
             dispLeft   = bounds[0]; dispTop    = bounds[1]
             dispRight  = bounds[2]; dispBottom = bounds[3]
-            // 이미지 영역의 90% 크기로 초기 자르기 설정
             val iW = (dispRight - dispLeft) * 0.90f
             val iH = (dispBottom - dispTop) * 0.90f
             cropLeft = dispLeft + (dispRight - dispLeft - iW) / 2f
@@ -2207,20 +2120,17 @@ internal fun CropModeOverlay(
             cropW    = iW;  cropH = iH
         }
 
-        // ── 어두운 마스크 + 자르기 테두리 + 격자 + 핸들 ──
         Canvas(modifier = Modifier.fillMaxSize()) {
             val cr = cropLeft + cropW
             val cb = cropTop  + cropH
             val ov = Color.Black.copy(alpha = 0.6f)
             fun cs(w: Float, h: Float) = androidx.compose.ui.geometry.Size(w, h)
 
-            // 외부 4면 어둡게
             drawRect(ov, Offset.Zero,        cs(containerW, cropTop))
             drawRect(ov, Offset(0f, cb),      cs(containerW, containerH - cb))
             drawRect(ov, Offset(0f, cropTop), cs(cropLeft, cropH))
             drawRect(ov, Offset(cr, cropTop), cs(containerW - cr, cropH))
 
-            // 흰색 테두리
             drawRect(
                 color   = Color.White,
                 topLeft = Offset(cropLeft, cropTop),
@@ -2228,7 +2138,6 @@ internal fun CropModeOverlay(
                 style   = androidx.compose.ui.graphics.drawscope.Stroke(width = hLineW * 0.55f)
             )
 
-            // 삼등분 격자선
             for (i in 1..2) {
                 val gx = cropLeft + cropW * i / 3f
                 val gy = cropTop  + cropH * i / 3f
@@ -2236,7 +2145,6 @@ internal fun CropModeOverlay(
                 drawLine(Color.White.copy(alpha = 0.4f), Offset(cropLeft, gy), Offset(cr, gy), strokeWidth = hLineW * 0.3f)
             }
 
-            // L자 꼭짓점 핸들
             fun corner(cx: Float, cy: Float, dx: Float, dy: Float) {
                 drawLine(Color.White, Offset(cx, cy), Offset(cx + dx, cy), strokeWidth = hLineW)
                 drawLine(Color.White, Offset(cx, cy), Offset(cx, cy + dy), strokeWidth = hLineW)
@@ -2246,31 +2154,23 @@ internal fun CropModeOverlay(
             corner(cropLeft, cb,       hLen, -hLen)
             corner(cr,       cb,      -hLen, -hLen)
 
-            // 모서리 중간 핸들 (굵은 가로/세로선)
             val mx = cropLeft + cropW / 2f
             val my = cropTop  + cropH / 2f
-            // N (상단 중앙 – 가로선)
             drawLine(Color.White, Offset(mx - edgeLen / 2f, cropTop), Offset(mx + edgeLen / 2f, cropTop), strokeWidth = edgeLineW)
-            // S (하단 중앙 – 가로선)
             drawLine(Color.White, Offset(mx - edgeLen / 2f, cb),      Offset(mx + edgeLen / 2f, cb),      strokeWidth = edgeLineW)
-            // E (우측 중앙 – 세로선)
             drawLine(Color.White, Offset(cr, my - edgeLen / 2f),      Offset(cr, my + edgeLen / 2f),      strokeWidth = edgeLineW)
-            // W (좌측 중앙 – 세로선)
             drawLine(Color.White, Offset(cropLeft, my - edgeLen / 2f), Offset(cropLeft, my + edgeLen / 2f), strokeWidth = edgeLineW)
         }
 
-        // ── 제스처 핸들러 ──
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(is1to1, dispLeft, dispTop, dispRight, dispBottom) {
-                    // 이미지 컨테이너 중심 (graphicsLayer 축)
                     val cx = containerW / 2f
                     val cy = imgAreaTop + imgAreaH / 2f
                     val imgDispW = dispRight - dispLeft
                     val imgDispH = dispBottom - dispTop
 
-                    // 현재 줌/패닝을 적용한 유효 이미지 표시 경계 계산
                     fun effBounds(): FloatArray {
                         val z  = latestZoom.value
                         val px = latestPanX.value
@@ -2318,7 +2218,6 @@ internal fun CropModeOverlay(
                                 if (pressed.isEmpty()) break
 
                                 if (pressed.size >= 2) {
-                                    // ── 두 손가락 핀치: 확대/축소 + 이동 ──
                                     val p1 = pressed[0]; val p2 = pressed[1]
                                     val curDist  = (p2.position - p1.position).getDistance()
                                     val prevDist = (p2.previousPosition - p1.previousPosition).getDistance()
@@ -2327,14 +2226,12 @@ internal fun CropModeOverlay(
                                         val px = latestPanX.value; val py = latestPanY.value
                                         val scaleFactor = curDist / prevDist
                                         val newZoom = (z * scaleFactor).coerceIn(1f, 5f)
-                                        // 두 손가락 중점이 동일한 이미지 점에 고정되도록 패닝 조정
                                         val midX = (p1.previousPosition.x + p2.previousPosition.x) / 2f
                                         val midY = (p1.previousPosition.y + p2.previousPosition.y) / 2f
                                         val newMidX = (p1.position.x + p2.position.x) / 2f
                                         val newMidY = (p1.position.y + p2.position.y) / 2f
                                         var newPanX = newMidX - cx - ((midX - cx - px) / z) * newZoom
                                         var newPanY = newMidY - cy - ((midY - cy - py) / z) * newZoom
-                                        // 패닝 범위 제한 (이미지가 화면에서 너무 벗어나지 않도록)
                                         val maxPX = imgDispW * (newZoom - 1f) / 2f + kotlin.math.abs(dispLeft - cx)
                                         val maxPY = imgDispH * (newZoom - 1f) / 2f + kotlin.math.abs(dispTop  - cy)
                                         newPanX = newPanX.coerceIn(-maxPX, maxPX)
@@ -2349,7 +2246,6 @@ internal fun CropModeOverlay(
                                     val efl = b[0]; val eft = b[1]; val efr = b[2]; val efb = b[3]
                                     if (activeHdl != CropHandle.NONE) cropModified = true
                                     if (is1to1) {
-                                        // ── 1:1 고정 ──
                                         when (activeHdl) {
                                             CropHandle.MOVE -> {
                                                 cropLeft = (cropLeft + d.x).coerceIn(efl, efr - cropW)
@@ -2385,7 +2281,6 @@ internal fun CropModeOverlay(
                                             CropHandle.NONE -> {}
                                         }
                                     } else {
-                                        // ── 자유 크롭 ──
                                         when (activeHdl) {
                                             CropHandle.MOVE -> {
                                                 cropLeft = (cropLeft + d.x).coerceIn(efl, efr - cropW)
@@ -2441,9 +2336,6 @@ internal fun CropModeOverlay(
                 }
         )
 
-        // ── 상단 바 오버레이 (기존 편집 상단 바 위에 덮음) ──
-        // 원본 복원: 외부 편집 변경 OR 크롭 조작 시 활성화
-        // 저장:     크롭 영역을 실제로 조작했을 때만 활성화
         val canRestore = hasEditChanges || cropModified
         val canSave    = cropModified
         Row(
@@ -2499,7 +2391,6 @@ internal fun CropModeOverlay(
             }
         }
 
-        // ── 하단 바: 1:1 토글만 ──
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -2538,7 +2429,6 @@ internal fun CropModeOverlay(
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
 @Composable
 internal fun EditDialBar(
     degrees: Float,
@@ -2566,7 +2456,6 @@ internal fun EditDialBar(
                     }
                 )
         ) {
-            // 현재 각도 텍스트 (중앙 상단)
             Text(
                 text     = "${"%.1f".format(degrees)}°",
                 color    = Color(0xFF9CD83B),
@@ -2576,7 +2465,6 @@ internal fun EditDialBar(
                     .padding(top = 2.dp)
             )
 
-            // 눈금 Canvas
             Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2596,7 +2484,6 @@ internal fun EditDialBar(
                     val x = centerX + (i - degrees) * tickWidthPx
                     if (x < 0f || x > size.width) continue
 
-                    // 중심에서 멀수록 점점 투명하게 (페이드 아웃)
                     val dist       = kotlin.math.abs(x - centerX) / halfW   // 0=중심, 1=끝
                     val fadeAlpha  = ((1f - dist / 0.82f) * 1.1f).coerceIn(0f, 1f)
 
@@ -2612,7 +2499,6 @@ internal fun EditDialBar(
                 }
             }
 
-            // 중앙 기준 포인터 (고정 녹색 선)
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -2625,7 +2511,6 @@ internal fun EditDialBar(
     }
 }
 
-// ── 편집 기능 버튼 아이템 ──────────────────────────────────────────────────────
 @Composable
 internal fun EditActionButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
@@ -2651,9 +2536,6 @@ internal fun EditActionButton(
 }
 
 // ── 편집된 이미지 저장 (회전·반전 적용 후 파일 쓰기) ─────────────────────────
-// ─────────────────────────────────────────────────────────────────────────────
-// 현재 편집 상태(회전·반전·크롭)를 적용한 비트맵 생성
-// ─────────────────────────────────────────────────────────────────────────────
 internal suspend fun buildWorkingBitmap(
     context: Context,
     sourceUri: Uri,
@@ -2698,9 +2580,6 @@ internal suspend fun buildWorkingBitmap(
     bm
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ML Kit Subject Segmentation + 드로잉 경로 마스크 합성
-// ─────────────────────────────────────────────────────────────────────────────
 internal suspend fun performSubjectSegmentation(
     context: Context,
     bitmap: android.graphics.Bitmap,
@@ -2779,7 +2658,6 @@ internal suspend fun performSubjectSegmentation(
             rc.drawBitmap(pathMask, 0f, 0f, android.graphics.Paint().apply {
                 xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_IN)
             })
-            // 중간 비트맵 해제
             pathMask.recycle()
             if (baseCopied) base.recycle() else foregroundBm?.recycle()
 
@@ -2793,7 +2671,6 @@ internal suspend fun performSubjectSegmentation(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 internal suspend fun saveEditedImage(
     context: Context,
     originalUri: Uri,
@@ -2803,7 +2680,6 @@ internal suspend fun saveEditedImage(
     cropData: PendingCropData? = null
 ): Uri? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
     try {
-        // 비트맵 로드
         val src = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
             val source = android.graphics.ImageDecoder.createSource(context.contentResolver, originalUri)
             android.graphics.ImageDecoder.decodeBitmap(source) { dec, _, _ ->
@@ -2814,7 +2690,6 @@ internal suspend fun saveEditedImage(
             android.provider.MediaStore.Images.Media.getBitmap(context.contentResolver, originalUri)
         }.copy(android.graphics.Bitmap.Config.ARGB_8888, true)
 
-        // 회전/반전 행렬 적용
         val matrix = android.graphics.Matrix()
         if (rotationDegrees != 0f) matrix.postRotate(rotationDegrees)
         if (isFlipped)             matrix.postScale(-1f, 1f, src.width / 2f, src.height / 2f)
@@ -2823,7 +2698,6 @@ internal suspend fun saveEditedImage(
             android.graphics.Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
         } else src
 
-        // 자르기 적용 (회전/반전 후 화면상 좌표 → 비트맵 좌표 변환, 줌/패닝 포함)
         if (cropData != null) {
             val rotW = result.width.toFloat()
             val rotH = result.height.toFloat()
@@ -2831,10 +2705,8 @@ internal suspend fun saveEditedImage(
             val s    = minOf(cropData.containerW / rotW, cropData.imgAreaHeightPx / rotH)
             val baseDispLeft = (cropData.containerW - rotW * s) / 2f
             val baseDispTop  = cropData.imgAreaTopPx + (cropData.imgAreaHeightPx - rotH * s) / 2f
-            // graphicsLayer 중심 (축 기준점)
             val cx = cropData.containerW / 2f
             val cy = cropData.imgAreaTopPx + cropData.imgAreaHeightPx / 2f
-            // 줌/패닝 적용 후 실제 화면상 이미지 좌상단 위치
             val z  = cropData.cropZoom
             val px = cropData.cropPanX; val py = cropData.cropPanY
             val effDispLeft = cx + (baseDispLeft - cx) * z + px
@@ -2849,7 +2721,6 @@ internal suspend fun saveEditedImage(
             result = android.graphics.Bitmap.createBitmap(result, imgCropLeft, imgCropTop, imgCropW, imgCropH)
         }
 
-        // 저장 경로 결정 — PNG 소스(투명 배경)는 PNG 유지, 그 외 JPEG
         val originalPath = originalUri.path ?: return@withContext null
         val originalFile = java.io.File(originalPath)
         val isPng   = originalPath.endsWith(".png", ignoreCase = true)
@@ -2956,7 +2827,6 @@ internal fun startVideoRecording(
         val recording = videoCapture.output
             .prepareRecording(context, fileOutputOptions)
             .apply {
-                // 오디오 권한이 있으면 오디오 활성화, 없으면 오디오 없이 촬영
                 if (ContextCompat.checkSelfPermission(
                         context,
                         Manifest.permission.RECORD_AUDIO
@@ -2968,34 +2838,25 @@ internal fun startVideoRecording(
             .start(ContextCompat.getMainExecutor(context)) { event ->
                 when (event) {
                     is VideoRecordEvent.Start -> {
-                        // 촬영 시작됨
                     }
                     is VideoRecordEvent.Finalize -> {
                         if (!event.hasError()) {
-                            // 동영상 저장 완료
                             val videoUri = Uri.fromFile(videoFile)
                             onVideoSaved(videoUri, videoFile)
                         } else {
-                            // 오류 발생
                             event.cause?.printStackTrace()
                         }
                     }
                 }
             }
         
-        // recording 객체를 콜백으로 전달
         onRecordingStarted(recording)
     } catch (e: Exception) {
         e.printStackTrace()
-        // 오류 발생 시 빈 Recording 객체 전달하지 않음
     }
 }
 
-// [수정] 모델링 적합성 판단 (이동식 공간 촬영용)
-// - 기존: "가상 점 5개가 모두 같은 공간"과 유사한 개념을 십자선 전체 표준편차로 간접 판단
-// - 변경: 3x3 배열(9개)의 "가상 점(샘플 포인트)"을 중앙 주변에 배치하고,
 //        9개 중 7개 이상이 동일한 공간(=주변 RGB/밝기 특성이 동일한 영역)으로 판정되면 경고(false)
-// true: 적합, false: 부적합(경고 필요)
 internal fun checkModelingSuitability(bitmap: android.graphics.Bitmap): Boolean {
     val width = bitmap.width
     val height = bitmap.height
@@ -3004,13 +2865,9 @@ internal fun checkModelingSuitability(bitmap: android.graphics.Bitmap): Boolean 
     val cx = width / 2
     val cy = height / 2
 
-    // 3x3 샘플 포인트 배치 (중앙 기준)
-    // - 화면 해상도에 따라 자동 스케일
     val spacing = (minOf(width, height) * 0.18f).toInt().coerceIn(80, 260)
     val offsets = intArrayOf(-spacing, 0, spacing)
 
-    // 각 포인트에서 작은 패치(주변 픽셀) 평균 밝기를 구해 "공간 ID"로 사용
-    // - quantStep이 작을수록 민감 (동일 판정이 어려움), 클수록 둔감
     val patchRadius = 10 // 21x21
     val quantStep = 16   // 0~255 -> 16단계(0~15)
 
@@ -3054,12 +2911,9 @@ internal fun checkModelingSuitability(bitmap: android.graphics.Bitmap): Boolean 
 
     if (totalPoints <= 0) return true
 
-    // 9개 중 7개 이상이 동일 공간이면 "깊이/텍스처 정보 부족"으로 간주
     val maxSame = spaceIdCounts.values.maxOrNull() ?: 0
     if (maxSame >= 7) return false
 
-    // 보조 안전장치: 중앙 십자선 영역의 텍스처(표준편차)도 너무 낮으면 부적합 처리
-    // (샘플링만으로 놓치는 케이스 방지)
     val halfLen = 350
     val halfThick = 10
     val lumValues = ArrayList<Int>(4000)
@@ -3540,15 +3394,12 @@ internal fun loadDatasetFolders(
     onLoaded(loadDatasetFoldersSync(context))
 }
 
-// [추가] 데이터셋 폴더 로드(동기) + 빈 폴더 자동 정리
 internal fun loadDatasetFoldersSync(context: Context): List<DatasetFolder> {
     val root = File(context.getExternalFilesDir(null), "datasets")
     if (!root.exists()) {
         return emptyList()
     }
 
-    // [추가] 0장(빈) 데이터셋 폴더 자동 정리
-    // - 너무 최근에 생성된 폴더(촬영 직후 등)는 오탐 방지를 위해 잠시 유예
     val now = System.currentTimeMillis()
     val minAgeMs = 60_000L // 60초보다 오래된 "빈" 폴더만 삭제
 
@@ -3560,7 +3411,6 @@ internal fun loadDatasetFoldersSync(context: Context): List<DatasetFolder> {
             }?.sortedByDescending { mediaSortTimeMillis(it) } ?: emptyList()
 
             if (images.isEmpty()) {
-                // 이미지가 0개인 폴더는 주기적으로 자동 삭제
                 if (now - dir.lastModified() >= minAgeMs) {
                     try {
                         dir.deleteRecursively()
@@ -4249,10 +4099,8 @@ internal suspend fun uploadZipAndRunPipeline(
     /** UI는 post만 하고 IO 코루틴은 대기하지 않음(백그라운드에서 메인 지연 시 폴링이 멈추지 않도록). */
     val mainHandler = Handler(Looper.getMainLooper())
     val appCtx = context.applicationContext
-    // 마지막으로 표시한 퍼센트 — 표시 값이 역행하지 않도록 추적
     var lastShownProgress = 0
 
-    // 공통 헬퍼: 알림 즉시 갱신 + UI는 메인 큐에 비동기 전달
     fun emitProgress(p: Int, msg: String) {
         val safeP = p.coerceAtLeast(lastShownProgress).coerceIn(0, 100)
         lastShownProgress = safeP
@@ -4260,7 +4108,6 @@ internal suspend fun uploadZipAndRunPipeline(
         mainHandler.post { onProgress(safeP, msg) }
     }
 
-    // 서비스 시작
     startOrUpdateForegroundService(appCtx, taskTitle, 0, "업로드 준비 중...", uploadStartMs)
 
     val pm = appCtx.getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -4280,7 +4127,6 @@ internal suspend fun uploadZipAndRunPipeline(
         val cbPort = starter?.second
         val callbackUrl = resolvePipelineCallbackUrlForUpload(appCtx, lanIp, cbPort)
 
-        // 2) 업로드 -> task_id 확보
         emitProgress(
             5, "파일 업로드 중…",
         )
@@ -4445,7 +4291,6 @@ internal suspend fun uploadZipAndRunPipeline(
             return null
         }
 
-        // 4) 콜백으로 PLY 등을 이미 받았으면 HTTP 재다운로드 생략
         emitProgress(lastShownProgress.coerceAtLeast(95), "결과 정리 중…")
         var bundle = pushBundle ?: downloadServerPipelineArtifacts(appCtx, taskId, ::emitProgress) ?: run {
             appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
@@ -4457,7 +4302,6 @@ internal suspend fun uploadZipAndRunPipeline(
             ?: pushedGsViewerUrl
         android.util.Log.i("uploadZipAndRunPipeline", "gsViewerUrl after drain: ${gsViewerUrl ?: "(null)"}")
         if (gsViewerUrl.isNullOrBlank()) {
-            // DA3 완료 — 백그라운드에서 3DGS URL 대기 시작 (메인 파이프라인은 바로 반환)
             android.util.Log.i("uploadZipAndRunPipeline", "Launching background GS poller+drainer — pipeline returns immediately")
             val capturedTaskId = taskId
             kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
@@ -4535,8 +4379,6 @@ internal suspend fun uploadZipAndRunPipeline(
             appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
         } catch (_: Exception) {
         }
-        // pushServer는 3DGS 콜백을 수신하기 위해 앱 종료 시까지 유지
-        // pushChannel도 함께 유지 (finally 에서 stop/close 하지 않음)
     }
 }
 
@@ -4782,25 +4624,20 @@ internal suspend fun enhanceDatasetFolders(
                     onProgress(processed, total, "처리 중... (${processed}/${total})", computeEtaMs())
                 }
 
-                // 원본 폴더 삭제 + 임시 폴더를 원래 이름으로 교체
                 val backup = File(parent, "${folder.name}__old_${System.currentTimeMillis()}")
                 val originalPath = folder.absolutePath
                 val original = File(originalPath)
 
-                // 1) 원본 폴더를 백업 이름으로 이동(가능하면)
                 if (original.exists()) {
                     val renamed = original.renameTo(backup)
                     if (!renamed) {
-                        // rename 실패 시, 그래도 요구사항(자동 삭제)을 위해 삭제 시도
                         try { original.deleteRecursively() } catch (_: Exception) {}
                     }
                 }
 
-                // 2) tmp를 원래 경로로 rename 시도
                 val target = File(originalPath)
                 val moved = tmp.renameTo(target)
                 if (!moved) {
-                    // rename 실패 시 직접 이동
                     target.mkdirs()
                     tmp.listFiles()?.forEach { child ->
                         try {
@@ -4812,7 +4649,6 @@ internal suspend fun enhanceDatasetFolders(
                     try { tmp.deleteRecursively() } catch (_: Exception) {}
                 }
 
-                // 3) 백업 삭제
                 try { backup.deleteRecursively() } catch (_: Exception) {}
             }
 
@@ -5523,7 +5359,6 @@ internal fun startOrUpdateForegroundService(
             context.startService(intent)
         }
     } catch (t: Throwable) {
-        // Android 12+: 앱이 백그라운드 상태에서 포그라운드 서비스를 시작할 수 없을 때
         // (ForegroundServiceStartNotAllowedException 등) — 알림 갱신 실패는 무시하고 계속 진행
         android.util.Log.w(
             "ForegroundService",
@@ -5547,7 +5382,6 @@ internal fun stopForegroundService(context: Context, taskTitle: String, doneMess
     }
 }
 
-// [추가] 백그라운드 작업 유지를 위한 포그라운드 서비스
 class AppForegroundService : Service() {
     companion object {
         const val CHANNEL_ID  = "AppForegroundServiceChannel"

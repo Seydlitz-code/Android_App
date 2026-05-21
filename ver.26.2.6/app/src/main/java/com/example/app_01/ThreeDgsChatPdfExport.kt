@@ -25,7 +25,6 @@ object ThreeDgsChatPdfExport {
         val extractedPieceCount: Int,
     )
 
-    // A4: 595 x 842 points
     private const val PAGE_WIDTH = 595f
     private const val PAGE_HEIGHT = 842f
     private const val MARGIN_LEFT = 40f
@@ -110,7 +109,6 @@ object ThreeDgsChatPdfExport {
             }
         }
 
-        // title page header
         val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = colorPrimary
             textSize = 26f
@@ -142,14 +140,12 @@ object ThreeDgsChatPdfExport {
                     }
                     newPageIfNeeded(60f)
                     if (isFirstHeading) {
-                        // 표지 타이틀
                         canvas.drawText(piece.text, MARGIN_LEFT, y + size, headingPaint)
                         y += size + 8f
                         canvas.drawText("생성: $stampText", MARGIN_LEFT, y + 12f, subtitlePaint)
                         y += 20f
                         canvas.drawLine(MARGIN_LEFT, y, PAGE_WIDTH - MARGIN_RIGHT, y, underlinePaint)
                         y += 4f
-                        // cover page subtitle
                         canvas.drawText(
                             title,
                             MARGIN_LEFT,
@@ -192,7 +188,6 @@ object ThreeDgsChatPdfExport {
                 is ThreeDgsChatDocxExport.DocPiece.Table -> {
                     if (piece.rows.isEmpty()) continue
                     if (looksLikeChartTable(piece.rows)) {
-                        // 차트로 렌더링
                         newPageIfNeeded(280f)
                         chartSeq++
                         val needed = renderBarChart(canvas, piece.rows, chartSeq, y)
@@ -225,7 +220,6 @@ object ThreeDgsChatPdfExport {
             PAGE_WIDTH.toInt(), PAGE_HEIGHT.toInt(), document.pages.size + 1
         ).create()
         val page = document.startPage(pageInfo)
-        // page number footer
         val footerPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.GRAY; textSize = 8f
         }
@@ -370,7 +364,6 @@ object ThreeDgsChatPdfExport {
         val labels = dataRows.map { it.firstOrNull().orEmpty() }
         val seriesCount = seriesLabels.size.coerceIn(1, dataRows.firstOrNull()?.size?.minus(1) ?: 1)
 
-        // title
         val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = colorPrimary; textSize = 14f; typeface = Typeface.DEFAULT_BOLD
         }
@@ -400,7 +393,6 @@ object ThreeDgsChatPdfExport {
         }
 
         if (chartType == "bar") {
-            // y-axis
             canvas.drawLine(chartLeft, chartTop, chartLeft, chartBottom, axisPaint)
             canvas.drawLine(chartLeft, chartBottom, chartRight, chartBottom, axisPaint)
 
@@ -409,7 +401,6 @@ object ThreeDgsChatPdfExport {
             }.maxOrNull() ?: 1f
             val valStep = computeNiceStep(maxVal)
 
-            // grid lines
             var gv = 0f
             while (gv <= maxVal + valStep) {
                 val gy = chartBottom - (gv / (maxVal + valStep * 0.5f) * chartHeight).coerceIn(0f, chartHeight)
@@ -458,7 +449,6 @@ object ThreeDgsChatPdfExport {
                 angle += sweep
             }
 
-            // legend
             var lx = chartLeft + radius * 2 + 40f
             var ly = chartTop + 20f
             val legendPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -475,7 +465,6 @@ object ThreeDgsChatPdfExport {
             }
             cy = chartBottom + 10f
         } else {
-            // fallback: simple message
             val msgPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.GRAY; textSize = 10f; typeface = Typeface.DEFAULT
             }

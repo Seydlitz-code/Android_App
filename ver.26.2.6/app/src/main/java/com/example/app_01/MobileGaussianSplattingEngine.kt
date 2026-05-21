@@ -76,9 +76,7 @@ object MobileGaussianSplattingEngine {
     // SH degree-0 상수 (Mobile-GS sh_utils.py C0 = 1/(2√π))
     private const val C0 = 0.28209479177387814f
 
-    // =========================================================================
     // 공개 API — 바이너리 스플랫 파싱 (서버 연동 시)
-    // =========================================================================
 
     fun parseSplatBinary(bytes: ByteArray): MobileSplatScene? {
         if (bytes.size < 4) return null
@@ -91,9 +89,7 @@ object MobileGaussianSplattingEngine {
         return MobileSplatScene(positions = pos, colors = col, sizes = siz, splatCount = n)
     }
 
-    // =========================================================================
     // EXIF 카메라 내부 파라미터 추론
-    // =========================================================================
 
     /**
      * EXIF 에서 35mm 환산 초점거리를 읽어 NDC 초점거리로 변환합니다.
@@ -142,9 +138,6 @@ object MobileGaussianSplattingEngine {
         }.getOrElse { default }
     }
 
-    // =========================================================================
-    // 피보나치 구체(Fibonacci Sphere) 카메라 배치
-    // =========================================================================
 
     /**
      * 피보나치 구체 위의 i번째 점을 단위 벡터로 반환합니다.
@@ -157,7 +150,6 @@ object MobileGaussianSplattingEngine {
     private fun fibonacciSpherePoint(i: Int, n: Int): FloatArray {
         val goldenAngle = PI * (3.0 - sqrt(5.0))
         val nSafe = maxOf(n, 2)
-        // cy: 북극(1) → 남극(-1) 균등 배치
         val cy = 1.0 - (i.toDouble() / (nSafe - 1)) * 2.0
         val r  = sqrt(maxOf(0.0, 1.0 - cy * cy))
         val theta = goldenAngle * i
@@ -188,35 +180,23 @@ object MobileGaussianSplattingEngine {
         val upX: Float;    val upY: Float;    val upZ: Float
 
         if (rHoriz > 1e-4f) {
-            // 일반 케이스: right = normalize(cz, 0, -cx)
             rightX = cz / rHoriz;  rightY = 0f;  rightZ = -cx / rHoriz
-            // up = cross(right, -camPos/1) = cross(right, forward)
-            // forward = (-cx,-cy,-cz), right = (rightX,0,rightZ)
             // up.x = right.y*fwd.z - right.z*fwd.y = 0*(-cz) - rightZ*(-cy) = rightZ*cy
             // up.y = right.z*fwd.x - right.x*fwd.z = rightZ*(-cx) - rightX*(-cz)
             //      = -rightZ*cx + rightX*cz = (-cx/rHoriz)*cx + (cz/rHoriz)*cz
-            //      = (cz²+cx²)/rHoriz... wait let me redo
             // Actually: up = cross(right, forward) where forward = (-cx,-cy,-cz)
             val fwdX = -cx; val fwdY = -cy; val fwdZ = -cz
             upX = rightY * fwdZ - rightZ * fwdY   // = 0*fwdZ - rightZ*fwdY = -rightZ*(-cy) = rightZ*cy
             upY = rightZ * fwdX - rightX * fwdZ   // = rightZ*(-cx) - rightX*(-cz) = -rightZ*cx + rightX*cz
             upZ = rightX * fwdY - rightY * fwdX   // = rightX*(-cy) - 0 = -rightX*cy
         } else {
-            // 극(pole) 케이스: cy ≈ ±1
-            // 카메라가 위에서 아래(cy=+1) 또는 아래서 위(cy=-1)를 향함
-            // right = +X축, up은 forward에 수직인 축으로 설정
             rightX = 1f; rightY = 0f; rightZ = 0f
-            // forward = (0,-cy,0) 대략
             // up = cross(right=(1,0,0), forward=(0,sign(-cy),0)) = (0*0-0*sign(-cy), 0*0-1*0, 1*sign(-cy)-0*0) = (0,0,-cy)
             upX = 0f; upY = 0f; upZ = -cy
         }
-        // backward = camPos (단위 벡터)
         return floatArrayOf(rightX, rightY, rightZ, upX, upY, upZ, cx, cy, cz)
     }
 
-    // =========================================================================
-    // 공개 API — 이미지에서 스플랫 씬 빌드
-    // =========================================================================
 
     /**
      * 이미지 URI 목록에서 [MobileSplatScene]을 생성합니다.
@@ -268,7 +248,6 @@ object MobileGaussianSplattingEngine {
             // ── 깊이 맵 계산 ───────────────────────────────────────────────
             val depthMap = computeDepthMap(pixels, w, h)
 
-            // ── 피보나치 구체 카메라 포즈 ──────────────────────────────────
             val spherePos = fibonacciSpherePoint(idx, n)
             val camX = CAM_SPHERE_R * spherePos[0]
             val camY = CAM_SPHERE_R * spherePos[1]
@@ -302,9 +281,7 @@ object MobileGaussianSplattingEngine {
         )
     }
 
-    // =========================================================================
     // (1) 다중 스케일 깊이 추정 (monocular, scene/cameras.py 개념 참조)
-    // =========================================================================
 
     /**
      * 픽셀 배열에서 [0,1] 깊이 맵을 반환합니다. 0 = 가까움, 1 = 멂.
@@ -330,7 +307,6 @@ object MobileGaussianSplattingEngine {
             sat[i] = if (mx > 1e-4f) (mx - mn) / mx else 0f
         }
 
-        // 세밀 라플라시안 (3×3)
         val lapFine = FloatArray(w * h)
         for (y in 1 until h - 1) {
             for (x in 1 until w - 1) {
@@ -339,7 +315,6 @@ object MobileGaussianSplattingEngine {
                     luma[y*w+(x-1)] + luma[y*w+(x+1)] - 4f * luma[y*w+x])
             }
         }
-        // 거친 라플라시안 (7×7 — 박스 블러 후 차분)
         val lumaBlur7 = boxBlur(luma, w, h, radius = 3)
         val lapCoarse = FloatArray(w * h) { i ->
             abs(luma[i] - lumaBlur7[i])
@@ -370,10 +345,6 @@ object MobileGaussianSplattingEngine {
                 val cw   = 1f - sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy)) / maxDist
                 val li   = 1f - luma[i]
 
-                // 가중치 (Mobile-GS 논문 기반 경험적 조정):
-                //   - 중심 가중치(cw) 최고: 360° 데이터셋에서 피사체 = 중심
-                //   - 채도(sa): 유채색 피사체 강조
-                //   - 다중 스케일 선명도: 엣지+전경 모두 포착
                 val nearScore = sf * 0.22f +
                                 sc * 0.12f +
                                 vr * 0.18f +
@@ -386,9 +357,7 @@ object MobileGaussianSplattingEngine {
         return depth
     }
 
-    // =========================================================================
     // (2) 역투영 + 가우시안 초기화 (cameras.py · gaussian_model.py 참조)
-    // =========================================================================
 
     /**
      * 한 뷰(카메라)에서 픽셀을 3D 점으로 역투영하고 가우시안 파라미터를 초기화합니다.
@@ -456,16 +425,12 @@ object MobileGaussianSplattingEngine {
                 val gf = Color.green(pixel) / 255f
                 val bf = Color.blue(pixel)  / 255f
 
-                // ── 배경 픽셀 필터링 ─────────────────────────────────────────
-                // 1) 밝고 채도 낮은 픽셀: 하늘·흰 배경
                 val lumaL = 0.299f * rf + 0.587f * gf + 0.114f * bf
                 val maxC  = maxOf(rf, gf, bf)
                 val satL  = if (maxC > 0.02f) (maxC - minOf(rf, gf, bf)) / maxC else 0f
                 if (lumaL > 0.87f && satL < 0.15f) { x += gridStep; continue }
-                // 2) 매우 어두운 그림자
                 if (lumaL < 0.04f) { x += gridStep; continue }
 
-                // ── 깊이 → 카메라~3D점 거리 ──────────────────────────────────
                 // dist 범위 [0.55, 1.45]: 카메라 반경 1.0 기준으로 피사체 앞뒤를 포괄
                 // depth=0(선명·근접) → dist=0.55, depth=1(배경) → dist=1.45
                 val d    = depthMap[idx]
@@ -475,7 +440,6 @@ object MobileGaussianSplattingEngine {
                 val xNdc =  (x / (w - 1f)) * 2f - 1f
                 val yNdc = -((y / (h - 1f)) * 2f - 1f) * aspectInv
 
-                // ── 카메라 공간 방향 벡터 ─────────────────────────────────────
                 // xNdc / focalNdc = tan(angH)  ←→  cameras.py focal2fov 역변환
                 val rx = xNdc / focalNdc
                 val ry = yNdc / focalNdc
@@ -483,8 +447,6 @@ object MobileGaussianSplattingEngine {
                 val rLen = sqrt(rx*rx + ry*ry + rz*rz)
                 val rxN = rx / rLen;  val ryN = ry / rLen;  val rzN = rz / rLen
 
-                // ── 카메라 공간 → 월드 공간 (일반화 회전 행렬) ────────────────
-                // d_world = rxN*right + ryN*up + rzN*backward
                 val wdx = rxN * rX + ryN * uX + rzN * bX
                 val wdy = rxN * rY + ryN * uY + rzN * bY
                 val wdz = rxN * rZ + ryN * uZ + rzN * bZ
@@ -496,9 +458,7 @@ object MobileGaussianSplattingEngine {
 
                 pos.add(px); pos.add(py); pos.add(pz)
 
-                // ── 색상 (RGB 직접 전달) ─────────────────────────────────────
                 // gaussian_model.py: f_dc = (rgb - 0.5) / C0
-                // GLES 렌더러는 RGB 직접 사용하므로 변환 없이 전달
                 col.add(rf); col.add(gf); col.add(bf)
 
                 // ── gl_PointSize (gaussian_model.py scaling 참조) ────────────
@@ -515,9 +475,7 @@ object MobileGaussianSplattingEngine {
         }
     }
 
-    // =========================================================================
     // (3) 씬 정규화 (dataset_readers.py — getNerfppNorm)
-    // =========================================================================
 
     /**
      * 점 구름을 GLES2 뷰어 범위([-SCENE_RADIUS, SCENE_RADIUS])로 정규화합니다.
@@ -546,9 +504,6 @@ object MobileGaussianSplattingEngine {
         }
     }
 
-    // =========================================================================
-    // 유틸리티
-    // =========================================================================
 
     private fun calcGridStep(imgCount: Int, bmpW: Int, bmpH: Int, maxImgSplats: Int = MAX_SPLATS): Int {
         if (imgCount <= 0 || bmpW <= 0 || bmpH <= 0 || maxImgSplats <= 0) return BASE_GRID_STEP
@@ -615,9 +570,7 @@ object MobileGaussianSplattingEngine {
         return FloatArray(src.size) { i -> max(0f, meanSq[i] - mean[i] * mean[i]) }
     }
 
-    // =========================================================================
     // COLMAP points3D.bin → 스플랫 씬 (Mobile-GS scene/colmap_loader.py 참조)
-    // =========================================================================
 
     /**
      * COLMAP `points3D.bin` 에서 읽은 점군으로 [MobileSplatScene] 을 만듭니다.

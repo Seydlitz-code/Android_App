@@ -81,7 +81,6 @@ fun extractOpenCadCode(markdown: String): String? {
         }
     }
     if (tagged.isNotEmpty()) {
-        // 이전: "가장 긴 블록" 선택 → LLM이 앞에 긴 예시·템플릿·실패본을 두고 짧은 최종 코드만
         //      뒤에 두는 경우 잘못된 형상이 렌더되는 문제가 잦음.
         // 개선: union/cube 등 힌트가 있는 블록만 후보로 하고, 그중 응답 문자열에서 가장 늦게 나온 블록(최종본)을 사용.
         val hinted = tagged.filter { looksLikeOpenScadSource(it.code) }

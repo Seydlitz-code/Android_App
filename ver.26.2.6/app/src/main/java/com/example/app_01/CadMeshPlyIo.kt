@@ -14,7 +14,6 @@ fun loadColoredPlyMesh(file: File): ObjParseResult? {
             var vertexCount = 0
             var hasRgb = false
 
-            // 헤더 파싱
             while (true) {
                 val raw = reader.readLine() ?: return null
                 val line = raw.trim()

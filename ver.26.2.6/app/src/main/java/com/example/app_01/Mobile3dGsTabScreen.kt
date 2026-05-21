@@ -394,7 +394,6 @@ fun Mobile3dGsScreen() {
             )
             Spacer(modifier = Modifier.height(20.dp))
 
-            // 사진 데이터셋
             Text(
                 text = "사진 데이터셋",
                 color = palette.onBackground.copy(alpha = 0.9f),
@@ -447,7 +446,6 @@ fun Mobile3dGsScreen() {
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            // COLMAP 바이너리
             Text(
                 text = "COLMAP 바이너리",
                 color = palette.onBackground.copy(alpha = 0.9f),
@@ -650,7 +648,6 @@ fun Mobile3dGsScreen() {
         }
     }
 
-    // ── 입력 소스: 갤러리(다중) vs 데이터셋 폴더 ──
     if (showDatasetSourceDialog) {
         Dialog(onDismissRequest = { showDatasetSourceDialog = false }) {
             Box(
@@ -747,7 +744,6 @@ fun Mobile3dGsScreen() {
         }
     }
 
-    // ── 갤러리 다중 선택 ──
     if (showGalleryMultiDialog) {
         Dialog(onDismissRequest = { showGalleryMultiDialog = false }) {
             Box(
@@ -882,7 +878,6 @@ fun Mobile3dGsScreen() {
         }
     }
 
-    // ── 데이터셋 폴더 목록 ──
     if (showDatasetFolderDialog) {
         Dialog(onDismissRequest = { showDatasetFolderDialog = false }) {
             Box(

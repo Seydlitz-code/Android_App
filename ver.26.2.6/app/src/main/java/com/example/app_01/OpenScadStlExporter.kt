@@ -101,7 +101,6 @@ object OpenScadStlExporter {
                     settings.allowFileAccess = true
                     settings.allowContentAccess = true
                     settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                    // WASM 재로드·CDN 갱신이 필요할 때 캐시만 쓰지 않도록
                     settings.cacheMode = WebSettings.LOAD_DEFAULT
                 }
                 webViewRef = webView
@@ -202,7 +201,6 @@ async function go() {
       printErr: function (t) { stderrBuf += t + '\n'; },
     });
     const instance = api.getInstance();
-    // 문자열 그대로 쓰면 일부 환경에서 UTF-8과 불일치할 수 있어 바이트로 고정
     const enc = new TextEncoder();
     instance.FS.writeFile('/input.scad', enc.encode(scad));
 
@@ -217,7 +215,6 @@ async function go() {
       try { instance.FS.unlink('/out.stl'); } catch (e) {}
     }
 
-    // 인자 순서·Manifold 백엔드(큰 CSG에 유리)로 재시도 — STL 미생성 시 원인 완화
     const attempts = [
       ['/input.scad', '-o', '/out.stl'],
       ['-o', '/out.stl', '/input.scad'],

@@ -596,7 +596,6 @@ fun ClaudeChatScreen(
         if (stlDialogForIndex != null) stlSaveNameInput = ""
     }
 
-    // 갤러리: 이미지만 (동영상 제외)
     val galleryImageUris = remember(galleryImages) {
         galleryImages.filter { uri ->
             val path = uri.path ?: ""
@@ -646,17 +645,14 @@ fun ClaudeChatScreen(
             .background(palette.background)
             .imePadding()
     ) {
-        // ── 메인 콘텐츠 ──
         Column(modifier = Modifier.fillMaxSize()) {
 
-        // ── 상단 헤더: [메뉴] [모드 드롭다운] [새 채팅] ──
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 4.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // 좌측: 드로어 열기
             IconButton(onClick = { isDrawerOpen = true }) {
                 Icon(
                     imageVector = Icons.Filled.Menu,
@@ -666,7 +662,6 @@ fun ClaudeChatScreen(
                 )
             }
 
-            // 중앙: 모드 드롭다운 (기존 방식)
             Box(modifier = Modifier.weight(1f)) {
                 Row(
                     modifier = Modifier
@@ -757,7 +752,6 @@ fun ClaudeChatScreen(
                 }
             }
 
-            // 우측: 새 채팅
             IconButton(onClick = {
                 messages.clear()
                 currentThreadId = null
@@ -971,7 +965,6 @@ fun ClaudeChatScreen(
                 .background(palette.chatInputBarBg)
                 .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 10.dp)
         ) {
-            // 에러 메시지
             errorMessage?.let { err ->
                 Text(
                     text = err,
@@ -981,7 +974,6 @@ fun ClaudeChatScreen(
                 )
             }
 
-            // AI CAD 모드 옵션 칩 (컴팩트)
             if (aiTabMode == AiChatTabMode.AI_CAD) {
                 Row(
                     modifier = Modifier
@@ -1284,13 +1276,11 @@ fun ClaudeChatScreen(
                 onPending3dgsServerAutoSendConsumed()
             }
 
-            // 입력 바 (GPT 스타일 pill)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.Bottom,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // 왼쪽 첨부 버튼 (원형)
                 Box(
                     modifier = Modifier
                         .size(40.dp)
@@ -1317,7 +1307,6 @@ fun ClaudeChatScreen(
                     )
                 }
 
-                // Pill 입력 컨테이너
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -1352,7 +1341,6 @@ fun ClaudeChatScreen(
                             )
                         }
                         Spacer(modifier = Modifier.width(6.dp))
-                        // 전송 버튼 (pill 내부 오른쪽, 원형)
                         val canSend = !isStreaming && (
                             messageText.isNotBlank() || attachedImages.isNotEmpty() ||
                                 (aiTabMode == AiChatTabMode.MOBILE_3DGS && attachedAuxUris.isNotEmpty())
@@ -1387,7 +1375,6 @@ fun ClaudeChatScreen(
             }
         }
 
-        // 이미지·파일 선택 다이얼로그 (갤러리·데이터셋·3DGS 라이브러리)
         if (showImageSelectDialog) {
             ClaudeImageSelectDialog(
                 dialogSession = imagePickerSession,
@@ -1419,7 +1406,6 @@ fun ClaudeChatScreen(
 
         } // end inner Column
 
-        // ── 드로어 스크림 ──
         AnimatedVisibility(
             visible = isDrawerOpen,
             enter = fadeIn(),
@@ -1436,7 +1422,6 @@ fun ClaudeChatScreen(
             )
         }
 
-        // ── 드로어 패널 ──
         AnimatedVisibility(
             visible = isDrawerOpen,
             enter = slideInHorizontally { -it },
@@ -2296,9 +2281,7 @@ private fun ClaudeImageSelectDialog(
 
 private enum class AiChatTabMode { CLAUDE, AI_CAD, MOBILE_3DGS, DAMAGE_ANALYSIS }
 
-// ─────────────────────────────────────────────────────────────
 // 대화 스레드 드로어 UI
-// ─────────────────────────────────────────────────────────────
 
 @Composable
 private fun ChatThreadDrawer(
@@ -2747,7 +2730,6 @@ private fun ChatMessageItem(
     }
 }
 
-// ─────────────────────── 마크다운 렌더러 ───────────────────────
 
 private sealed class MarkdownBlock {
     data class Heading(val level: Int, val text: String) : MarkdownBlock()
@@ -2766,7 +2748,6 @@ private fun parseMarkdownBlocks(text: String): List<MarkdownBlock> {
         val line = lines[i]
         val trimmed = line.trim()
 
-        // 코드 블록
         if (trimmed.startsWith("```")) {
             val lang = trimmed.removePrefix("```").trim()
             val codeLines = mutableListOf<String>()
@@ -2780,14 +2761,12 @@ private fun parseMarkdownBlocks(text: String): List<MarkdownBlock> {
             continue
         }
 
-        // 제목
         val headingMatch = Regex("^(#{1,3}) (.+)").matchEntire(trimmed)
         if (headingMatch != null) {
             blocks.add(MarkdownBlock.Heading(headingMatch.groupValues[1].length, headingMatch.groupValues[2]))
             i++; continue
         }
 
-        // 불릿
         val bulletMatch = Regex("^([ \t]*)[-*+] (.+)").matchEntire(line)
         if (bulletMatch != null) {
             val depth = bulletMatch.groupValues[1].length / 2
@@ -2795,22 +2774,18 @@ private fun parseMarkdownBlocks(text: String): List<MarkdownBlock> {
             i++; continue
         }
 
-        // 번호 목록
         val numMatch = Regex("^\\s*(\\d+)[.)\\s] (.+)").matchEntire(trimmed)
         if (numMatch != null) {
             blocks.add(MarkdownBlock.NumberedItem(numMatch.groupValues[1].toIntOrNull() ?: 1, numMatch.groupValues[2]))
             i++; continue
         }
 
-        // 수평선
         if (trimmed.matches(Regex("^[-*_]{3,}$"))) {
             blocks.add(MarkdownBlock.HRule); i++; continue
         }
 
-        // 빈 줄
         if (trimmed.isEmpty()) { i++; continue }
 
-        // 단락 (연속 줄 묶음)
         val paraLines = mutableListOf(line)
         i++
         while (i < lines.size) {
@@ -2830,7 +2805,6 @@ private fun buildInlineAnnotated(text: String, baseColor: Color): AnnotatedStrin
     var i = 0
     while (i < text.length) {
         when {
-            // Bold+Italic: ***
             text.startsWith("***", i) -> {
                 val end = text.indexOf("***", i + 3)
                 if (end != -1) {
@@ -2840,7 +2814,6 @@ private fun buildInlineAnnotated(text: String, baseColor: Color): AnnotatedStrin
                     i = end + 3
                 } else append(text[i++])
             }
-            // Bold: **
             text.startsWith("**", i) -> {
                 val end = text.indexOf("**", i + 2)
                 if (end != -1) {
@@ -2848,7 +2821,6 @@ private fun buildInlineAnnotated(text: String, baseColor: Color): AnnotatedStrin
                     i = end + 2
                 } else append(text[i++])
             }
-            // Italic: _text_
             text.startsWith("_", i) && (i == 0 || text[i - 1] != '_') -> {
                 val end = text.indexOf("_", i + 1)
                 if (end != -1 && (end + 1 >= text.length || text[end + 1] != '_')) {
@@ -2856,7 +2828,6 @@ private fun buildInlineAnnotated(text: String, baseColor: Color): AnnotatedStrin
                     i = end + 1
                 } else append(text[i++])
             }
-            // Inline code: `
             text.startsWith("`", i) && !text.startsWith("```", i) -> {
                 val end = text.indexOf("`", i + 1)
                 if (end != -1) {

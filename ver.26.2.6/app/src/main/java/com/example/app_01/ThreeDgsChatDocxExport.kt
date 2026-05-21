@@ -80,24 +80,20 @@ object ThreeDgsChatDocxExport {
         if (markdown.isBlank()) return null
         val text = markdown.replace("\r\n", "\n")
 
-        // 펜스 언어: python, py, python3, python-docx 등 (LLM 출력 차이)
         val pyOpenTag = "(?:python-docx|python3?|py\\d*|python)\\b"
 
-        // 1) 라벨된 닫힌 펜스
         val labeled = Regex(
             "```\\s*$pyOpenTag[\\s\\n]*([\\s\\S]*?)```",
             RegexOption.IGNORE_CASE,
         )
         labeled.find(text)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }?.let { return it }
 
-        // 2) 언어 태그 없거나 기타 태그 — 줄바꿈 없이 코드가 이어지는 경우도 허용
         val generic = Regex("```[a-z0-9+#.\\-]{0,48}\\s*\\n?([\\s\\S]*?)```", RegexOption.IGNORE_CASE)
         for (m in generic.findAll(text)) {
             val body = m.groupValues.getOrNull(1)?.trim().orEmpty()
             if (body.isNotBlank() && looksLikePythonDocxScript(body)) return body
         }
 
-        // 3) 닫는 ``` 없이 끝나는 응답(스트림 잘림 등)
         val unclosed = Regex(
             "```\\s*$pyOpenTag[\\s\\n]*([\\s\\S]+)",
             RegexOption.IGNORE_CASE,

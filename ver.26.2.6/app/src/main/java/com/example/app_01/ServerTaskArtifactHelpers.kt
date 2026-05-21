@@ -325,11 +325,3 @@ internal fun collectGsAnalysisGridItems(infos: List<ServerTaskManifestInfo>): Li
     }
     return out
 }
-
-internal fun gsAnalysisCoverUriFirstImage(items: List<GsAnalysisGridItem>): Uri? =
-    items.firstNotNullOfOrNull { item ->
-        when (item) {
-            is GsAnalysisGridItem.ImageTile -> item.uri
-            is GsAnalysisGridItem.QualityJsonTile -> null
-        }
-    }

@@ -37,17 +37,14 @@ object SoftShutterSound {
                 @Suppress("DEPRECATION")
                 track.setStereoVolume(v, v)
             }
-            // MODE_STATIC 재생을 위해 상태 리셋
             try {
                 track.stop()
                 @Suppress("DEPRECATION")
                 track.reloadStaticData()
             } catch (_: Throwable) {
-                // ignore
             }
             track.play()
         } catch (_: Throwable) {
-            // ignore: 소리 재생 실패는 기능 핵심이 아님(촬영은 계속)
         }
     }
 
@@ -98,7 +95,6 @@ object SoftShutterSound {
                     track.release()
                     null
                 } else {
-                    // 한 번만 재생
                     track.setLoopPoints(0, samples.size, 0)
                     audioTrack = track
                     track
@@ -115,7 +111,6 @@ object SoftShutterSound {
         val out = ShortArray(n)
         val rand = Random(7)
 
-        // 짧은 고주파+노이즈 + 지수 감쇠 엔벨로프
         val f1 = 2200.0
         val f2 = 4800.0
         for (i in 0 until n) {

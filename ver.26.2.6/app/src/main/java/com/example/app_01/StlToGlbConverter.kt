@@ -345,7 +345,6 @@ object StlToGlbConverter {
             val rgb = rgbs[idx]
             val r = range.first
             val count = range.last - r + 1
-            // min/max for this slice
             var minX = Float.POSITIVE_INFINITY
             var minY = Float.POSITIVE_INFINITY
             var minZ = Float.POSITIVE_INFINITY

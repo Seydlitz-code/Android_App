@@ -47,9 +47,6 @@ object AiCadPipeline {
     ): Result<SavedArtifacts> {
 
         // ── Step 1: 전처리 ────────────────────────────────────────────────
-        // · 마크다운 펜스 제거
-        // · LLM 설명 줄(비OpenSCAD) → // 주석 처리
-        // · color() 제거 (WASM 렌더 전 필수)
         val prepared = AiCadScadPreprocessor.prepareForRender(scadSource)
         Log.d(TAG, "prepareForRender 완료 (${prepared.length} chars)")
 

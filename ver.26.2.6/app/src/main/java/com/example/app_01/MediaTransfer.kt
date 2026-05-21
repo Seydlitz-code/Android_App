@@ -268,7 +268,6 @@ suspend fun exportImagesToSystemGallery(context: Context, uris: List<Uri>): Medi
 
     for (u in uris) {
         try {
-            // 비디오는 이번 요청 범위(사진)에서 제외
             if (isVideoUriCompat(context, u)) {
                 fail++
                 continue

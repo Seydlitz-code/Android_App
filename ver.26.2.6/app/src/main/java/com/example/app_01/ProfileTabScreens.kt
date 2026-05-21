@@ -61,8 +61,29 @@ fun ProfileScreen(
     onGs3dWebViewClick: () -> Unit = {},
 ) {
     val palette = LocalAppUiPalette.current
-    val mode = LocalAppUiThemeMode.current
-    val setMode = LocalSetAppUiThemeMode.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var isOptimizingMemory by remember { mutableStateOf(false) }
+
+    fun runMemoryOptimization() {
+        if (isOptimizingMemory) return
+        isOptimizingMemory = true
+        scope.launch {
+            try {
+                val result = optimizeApplicationMemory(context.applicationContext)
+                Toast.makeText(
+                    context,
+                    formatMemoryOptimizationResult(result),
+                    Toast.LENGTH_LONG,
+                ).show()
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                Toast.makeText(context, "메모리 최적화 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
+            } finally {
+                isOptimizingMemory = false
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -121,6 +142,22 @@ fun ProfileScreen(
             Text(
                 text = "설정",
                 color = palette.onBackground,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = !isOptimizingMemory) { runMemoryOptimization() }
+                .padding(16.dp)
+        ) {
+            Text(
+                text = if (isOptimizingMemory) "메모리 최적화 중..." else "메모리 최적화",
+                color = palette.onBackground.copy(alpha = if (isOptimizingMemory) 0.5f else 1f),
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold
             )

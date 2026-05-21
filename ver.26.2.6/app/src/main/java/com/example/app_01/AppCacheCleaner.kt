@@ -1,11 +1,15 @@
 package com.example.app_01
 
+import android.app.ActivityManager
 import android.content.Context
 import android.webkit.CookieManager
 import android.webkit.WebStorage
 import coil.imageLoader
+import com.bumptech.glide.Glide
 import java.io.File
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 data class AppCacheCleanResult(
     val deletedFiles: Int,
@@ -63,7 +67,6 @@ internal fun cleanupOrphanedAppData(context: Context): AppCacheCleanResult {
     val dayMs = 24L * 60L * 60L * 1000L
     val staleThresholdMs = 7L * dayMs // 7일 이상 수정되지 않은 잉여물
 
-    // ── 빈 데이터셋 폴더 정리 ─────────────────────────────────────────────
     val datasetsDir = File(storageRoot, "datasets")
     if (datasetsDir.isDirectory) {
         val imageExts = setOf("jpg", "jpeg", "png", "webp", "heic", "heif")
@@ -77,7 +80,6 @@ internal fun cleanupOrphanedAppData(context: Context): AppCacheCleanResult {
         }
     }
 
-    // ── 임시 ZIP 파일 정리 ───────────────────────────────────────────────
     val cacheDir = appCtx.cacheDir
     if (cacheDir != null) {
         cacheDir.listFiles()?.forEach { f ->
@@ -89,14 +91,12 @@ internal fun cleanupOrphanedAppData(context: Context): AppCacheCleanResult {
         }
     }
 
-    // ── 저장소 루트의 임시 ZIP 정리 ──────────────────────────────────────
     storageRoot.listFiles()?.forEach { f ->
         if (f.isFile && f.name.endsWith(".zip") && now - f.lastModified() > staleThresholdMs) {
             accumulator.deleteRecursively(f)
         }
     }
 
-    // ── 빈 배치 결과 폴더 정리 ───────────────────────────────────────────
     if (datasetsDir.isDirectory) {
         datasetsDir.listFiles()?.filter { it.isDirectory }?.forEach { batchDir ->
             if (now - batchDir.lastModified() > staleThresholdMs) {
@@ -130,6 +130,68 @@ private fun clearWebViewCaches() {
         CookieManager.getInstance().flush()
     } catch (_: Throwable) {
     }
+}
+
+data class MemoryOptimizationResult(
+    val cacheCleanResult: AppCacheCleanResult,
+    val availMemoryBeforeMb: Long,
+    val availMemoryAfterMb: Long,
+) {
+    val freedMemoryMb: Long
+        get() = (availMemoryAfterMb - availMemoryBeforeMb).coerceAtLeast(0)
+}
+
+/**
+ * RAM 캐시·앱 캐시·WebView 등을 정리하고 GC 힌트를 보내
+ * 앱이 안정적으로 구동될 수 있는 메모리 여유를 확보한다.
+ */
+internal suspend fun optimizeApplicationMemory(context: Context): MemoryOptimizationResult {
+    val appCtx = context.applicationContext
+    val availBefore = getAvailableMemoryMb(appCtx)
+
+    withContext(Dispatchers.Main.immediate) {
+        clearCoilImageCaches(appCtx)
+        try {
+            Glide.get(appCtx).clearMemory()
+        } catch (_: Throwable) {
+        }
+    }
+
+    val cacheResult = withContext(Dispatchers.IO) {
+        try {
+            Glide.get(appCtx).clearDiskCache()
+        } catch (_: Throwable) {
+        }
+        clearApplicationCacheJunk(appCtx)
+    }
+
+    withContext(Dispatchers.IO) {
+        System.gc()
+        Runtime.getRuntime().gc()
+    }
+
+    val availAfter = getAvailableMemoryMb(appCtx)
+    return MemoryOptimizationResult(cacheResult, availBefore, availAfter)
+}
+
+internal fun formatMemoryOptimizationResult(result: MemoryOptimizationResult): String {
+    val cache = result.cacheCleanResult
+    return buildString {
+        append("메모리 최적화 완료")
+        if (result.freedMemoryMb > 0) {
+            append(": ${result.freedMemoryMb}MB 확보")
+        }
+        if (!cache.isEmpty) {
+            append(" · 캐시 ${formatCacheBytes(cache.deletedBytes)} 정리")
+        }
+        append(" (사용 가능 ${result.availMemoryAfterMb}MB)")
+    }
+}
+
+private fun getAvailableMemoryMb(context: Context): Long {
+    val mi = ActivityManager.MemoryInfo()
+    (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).getMemoryInfo(mi)
+    return mi.availMem / (1024 * 1024)
 }
 
 internal fun formatAppCacheCleanResult(result: AppCacheCleanResult): String {
