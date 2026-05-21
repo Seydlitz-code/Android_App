@@ -102,6 +102,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.rotate
@@ -219,6 +221,10 @@ import androidx.compose.material.icons.filled.Brush
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.material.icons.filled.Close
@@ -239,8 +245,6 @@ import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
-import kotlin.math.roundToInt
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.asImageBitmap
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -264,7 +268,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
@@ -316,6 +319,10 @@ import java.util.Collections
 private const val CONTINUOUS_CAPTURE_MAX_SHOTS = 200
 private const val CONTINUOUS_CAPTURE_INTERVAL_MS = 125L
 private const val CAMERA_REBIND_WAIT_AFTER_ARCORE_MS = 100L
+private const val FOCUS_TAP_OVERLAY_MARKER_DP = 72f
+private const val FOCUS_TAP_OVERLAY_LOCK_CHIP_WIDTH_DP = 76f
+private const val FOCUS_TAP_OVERLAY_LOCK_CHIP_HEIGHT_DP = 34f
+private const val FOCUS_TAP_OVERLAY_DISPLAY_MS = 3_000L
 
 /**
  * CameraX 언바인드 뒤 한 번의 ARCore 구간에서 여러 장의 포즈 메타를 채운 뒤 저장한다.
@@ -459,6 +466,10 @@ fun CameraScreen(
     var isFlashOn by remember { mutableStateOf(false) }
     /** true: 탭 초점 후 AF/AE 자동 해제 비활성화(고정). false일 때 cancel로 연속 AF 복귀 */
     var isFocusLockEnabled by remember { mutableStateOf(false) }
+    var focusTapOverlayOffset by remember { mutableStateOf<Offset?>(null) }
+    var focusTapOverlayVisible by remember { mutableStateOf(false) }
+    var focusTapOverlayLocked by remember { mutableStateOf(false) }
+    var focusTapOverlaySession by remember { mutableIntStateOf(0) }
     var previewOriginInRoot by remember { mutableStateOf<Offset?>(null) }
     var datasetDir by remember { mutableStateOf<File?>(null) }
     var isDatasetCollectionEnabled by remember { mutableStateOf(true) }
@@ -620,6 +631,18 @@ fun CameraScreen(
                 camera?.cameraControl?.cancelFocusAndMetering()
             } catch (_: Exception) {
             }
+            focusTapOverlayLocked = false
+            focusTapOverlayVisible = false
+            focusTapOverlayOffset = null
+        }
+    }
+
+    LaunchedEffect(focusTapOverlaySession) {
+        if (!focusTapOverlayVisible) return@LaunchedEffect
+        delay(FOCUS_TAP_OVERLAY_DISPLAY_MS)
+        if (!focusTapOverlayLocked) {
+            focusTapOverlayVisible = false
+            focusTapOverlayOffset = null
         }
     }
     var baseAzimuthDegrees by remember { mutableStateOf<Float?>(null) }
@@ -1112,6 +1135,10 @@ fun CameraScreen(
     }
 
     val density = LocalDensity.current
+    val focusMarkerHalfPx = with(density) { (FOCUS_TAP_OVERLAY_MARKER_DP / 2f).dp.toPx() }
+    val focusLockChipWidthPx = with(density) { FOCUS_TAP_OVERLAY_LOCK_CHIP_WIDTH_DP.dp.toPx() }
+    val focusLockChipHeightPx = with(density) { FOCUS_TAP_OVERLAY_LOCK_CHIP_HEIGHT_DP.dp.toPx() }
+    val focusLockChipGapPx = with(density) { 8.dp.toPx() }
 
     Box(
         modifier = Modifier
@@ -1127,8 +1154,59 @@ fun CameraScreen(
                     .clip(RectangleShape)
                     .onGloballyPositioned { coords ->
                         previewOriginInRoot = coords.positionInRoot()
+                    }
+                    .pointerInput(
+                        camera,
+                        previewView,
+                        isCameraReady,
+                        isFocusLockEnabled,
+                        focusTapOverlayVisible,
+                        focusTapOverlayOffset,
+                        focusTapOverlayLocked,
+                    ) {
+                        detectTapGestures { offset ->
+                            val pv = previewView ?: return@detectTapGestures
+                            val cam = camera ?: return@detectTapGestures
+                            if (!isCameraReady || pv.width < 2 || pv.height < 2) return@detectTapGestures
+
+                            val tapCenter = focusTapOverlayOffset
+                            if (focusTapOverlayVisible && tapCenter != null &&
+                                isTouchOnFocusLockChip(
+                                    touch = offset,
+                                    tapCenter = tapCenter,
+                                    previewWidthPx = size.width.toFloat(),
+                                    previewHeightPx = size.height.toFloat(),
+                                    markerHalfPx = focusMarkerHalfPx,
+                                    chipWidthPx = focusLockChipWidthPx,
+                                    chipHeightPx = focusLockChipHeightPx,
+                                    chipGapPx = focusLockChipGapPx,
+                                )
+                            ) {
+                                if (focusTapOverlayLocked || isFocusLockEnabled) {
+                                    isFocusLockEnabled = false
+                                } else {
+                                    focusTapOverlayLocked = true
+                                    isFocusLockEnabled = true
+                                    applyTapFocusAndMetering(cam, pv, tapCenter, lockFocus = true)
+                                }
+                                return@detectTapGestures
+                            }
+
+                            focusTapOverlayOffset = offset
+                            focusTapOverlayVisible = true
+                            focusTapOverlaySession++
+                            if (!isFocusLockEnabled) {
+                                focusTapOverlayLocked = false
+                            }
+                            applyTapFocusAndMetering(
+                                cam,
+                                pv,
+                                offset,
+                                isFocusLockEnabled || focusTapOverlayLocked,
+                            )
+                        }
                     },
-                contentAlignment = Alignment.Center
+                contentAlignment = Alignment.Center,
             ) {
                 AndroidView(
                     factory = { ctx ->
@@ -1138,39 +1216,31 @@ fun CameraScreen(
                             previewView = this
                         }
                     },
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
                 )
                 if (cameraEntryMode == CameraEntryMode.MOBILE_SPACE) {
                     MobileSpaceScanOverlay(
-                        headingDeg = azimuthForGrid,        // 그리드 전용 방위 (recordFov 와 동일 좌표계, 실시간)
+                        headingDeg = azimuthForGrid,
                         pitchDeg = effectivePitchDegrees,
                         coverage = scanCoverage,
                         revisionTick = mobileSpaceUiRev,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
                     )
                 }
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .pointerInput(camera, previewView, isCameraReady, isFocusLockEnabled) {
-                            detectTapGestures { offset ->
-                                val pv = previewView ?: return@detectTapGestures
-                                val cam = camera ?: return@detectTapGestures
-                                if (!isCameraReady || pv.width < 2 || pv.height < 2) return@detectTapGestures
-                                runCatching {
-                                    val point = pv.meteringPointFactory.createPoint(offset.x, offset.y)
-                                    val builder = FocusMeteringAction.Builder(point)
-                                    if (isFocusLockEnabled) {
-                                        // CameraX 1.4: 장시간 유지로 AF/AE 고정에 준함(무제한 API는 기기별 상이)
-                                        builder.setAutoCancelDuration(30, TimeUnit.MINUTES)
-                                    } else {
-                                        builder.setAutoCancelDuration(5, TimeUnit.SECONDS)
-                                    }
-                                    cam.cameraControl.startFocusAndMetering(builder.build())
-                                }
-                            }
-                        }
-                )
+                AnimatedVisibility(
+                    visible = focusTapOverlayVisible && focusTapOverlayOffset != null,
+                    enter = fadeIn(animationSpec = tween(120)),
+                    exit = fadeOut(animationSpec = tween(180)),
+                ) {
+                    val tapOffset = focusTapOverlayOffset
+                    if (tapOffset != null) {
+                        CameraFocusTapOverlay(
+                            tapOffset = tapOffset,
+                            isLocked = focusTapOverlayLocked || isFocusLockEnabled,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    }
+                }
             }
         }
 
@@ -1275,7 +1345,14 @@ fun CameraScreen(
                         tint = Color.White,
                     )
                 }
-                IconButton(onClick = { isFocusLockEnabled = !isFocusLockEnabled }) {
+                IconButton(onClick = {
+                    isFocusLockEnabled = !isFocusLockEnabled
+                    if (!isFocusLockEnabled) {
+                        focusTapOverlayLocked = false
+                        focusTapOverlayVisible = false
+                        focusTapOverlayOffset = null
+                    }
+                }) {
                     Icon(
                         imageVector = if (isFocusLockEnabled) Icons.Filled.Lock else Icons.Filled.CenterFocusStrong,
                         contentDescription = if (isFocusLockEnabled) {
@@ -2121,6 +2198,159 @@ private fun CameraEntryTextTile(
             modifier = Modifier.fillMaxWidth()
         )
     }
+}
+
+private fun applyTapFocusAndMetering(
+    cam: Camera,
+    pv: PreviewView,
+    offset: Offset,
+    lockFocus: Boolean,
+) {
+    runCatching {
+        val point = pv.meteringPointFactory.createPoint(offset.x, offset.y)
+        val builder = FocusMeteringAction.Builder(point)
+        if (lockFocus) {
+            builder.setAutoCancelDuration(30, TimeUnit.MINUTES)
+        } else {
+            builder.setAutoCancelDuration(5, TimeUnit.SECONDS)
+        }
+        cam.cameraControl.startFocusAndMetering(builder.build())
+    }
+}
+
+private fun clampFocusTapCenter(
+    tapOffset: Offset,
+    previewWidthPx: Float,
+    previewHeightPx: Float,
+    markerHalfPx: Float,
+): Offset {
+    if (previewWidthPx <= 0f || previewHeightPx <= 0f) return tapOffset
+    return Offset(
+        tapOffset.x.coerceIn(markerHalfPx, previewWidthPx - markerHalfPx),
+        tapOffset.y.coerceIn(markerHalfPx, previewHeightPx - markerHalfPx),
+    )
+}
+
+private fun isTouchOnFocusLockChip(
+    touch: Offset,
+    tapCenter: Offset,
+    previewWidthPx: Float,
+    previewHeightPx: Float,
+    markerHalfPx: Float,
+    chipWidthPx: Float,
+    chipHeightPx: Float,
+    chipGapPx: Float,
+): Boolean {
+    val center = clampFocusTapCenter(tapCenter, previewWidthPx, previewHeightPx, markerHalfPx)
+    var left = center.x + markerHalfPx + chipGapPx
+    val top = center.y - chipHeightPx / 2f
+    if (left + chipWidthPx > previewWidthPx - 4f) {
+        left = center.x - markerHalfPx - chipGapPx - chipWidthPx
+    }
+    return touch.x in left..(left + chipWidthPx) && touch.y in top..(top + chipHeightPx)
+}
+
+@Composable
+private fun CameraFocusTapOverlay(
+    tapOffset: Offset,
+    isLocked: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val density = LocalDensity.current
+    val markerSize = FOCUS_TAP_OVERLAY_MARKER_DP.dp
+    val markerHalf = markerSize / 2
+    val lockAccent = Color(0xFFFFAB40)
+    val strokeColor = if (isLocked) lockAccent else Color.White
+    val scale by animateFloatAsState(
+        targetValue = 1f,
+        animationSpec = tween(durationMillis = 180),
+        label = "focusMarkerScale",
+    )
+
+    BoxWithConstraints(modifier) {
+        val markerHalfPx = with(density) { markerHalf.toPx() }
+        val previewWidthPx = with(density) { maxWidth.toPx() }
+        val previewHeightPx = with(density) { maxHeight.toPx() }
+        val center = clampFocusTapCenter(
+            tapOffset,
+            previewWidthPx,
+            previewHeightPx,
+            markerHalfPx,
+        )
+        val centerXDp = with(density) { center.x.toDp() }
+        val centerYDp = with(density) { center.y.toDp() }
+
+        Box(
+            modifier = Modifier
+                .offset(x = centerXDp - markerHalf, y = centerYDp - markerHalf)
+                .size(markerSize)
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                },
+        ) {
+            Canvas(Modifier.fillMaxSize()) {
+                val cornerLen = size.minDimension * 0.24f
+                val strokeW = 2.5.dp.toPx()
+                drawFocusCornerBrackets(strokeColor, strokeW, cornerLen)
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .offset(
+                    x = (centerXDp + markerHalf + 8.dp).let { preferred ->
+                        val chipWidth = 76.dp
+                        if (preferred + chipWidth > maxWidth) {
+                            centerXDp - markerHalf - 8.dp - chipWidth
+                        } else {
+                            preferred
+                        }
+                    },
+                    y = centerYDp - 17.dp,
+                )
+                .clip(RoundedCornerShape(17.dp))
+                .background(Color.Black.copy(alpha = 0.62f))
+                .border(
+                    1.dp,
+                    if (isLocked) lockAccent else Color.White.copy(alpha = 0.85f),
+                    RoundedCornerShape(17.dp),
+                )
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Icon(
+                imageVector = if (isLocked) Icons.Filled.Lock else Icons.Filled.LockOpen,
+                contentDescription = null,
+                tint = if (isLocked) lockAccent else Color.White,
+                modifier = Modifier.size(16.dp),
+            )
+            Text(
+                text = if (isLocked) "초점 고정" else "고정",
+                color = if (isLocked) lockAccent else Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawFocusCornerBrackets(
+    color: Color,
+    strokeWidth: Float,
+    cornerLen: Float,
+) {
+    val w = size.width
+    val h = size.height
+    drawLine(color, Offset(0f, 0f), Offset(cornerLen, 0f), strokeWidth)
+    drawLine(color, Offset(0f, 0f), Offset(0f, cornerLen), strokeWidth)
+    drawLine(color, Offset(w, 0f), Offset(w - cornerLen, 0f), strokeWidth)
+    drawLine(color, Offset(w, 0f), Offset(w, cornerLen), strokeWidth)
+    drawLine(color, Offset(0f, h), Offset(cornerLen, h), strokeWidth)
+    drawLine(color, Offset(0f, h), Offset(0f, h - cornerLen), strokeWidth)
+    drawLine(color, Offset(w, h), Offset(w - cornerLen, h), strokeWidth)
+    drawLine(color, Offset(w, h), Offset(w, h - cornerLen), strokeWidth)
 }
 
 @Composable
