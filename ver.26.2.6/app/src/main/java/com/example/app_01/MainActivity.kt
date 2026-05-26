@@ -1052,7 +1052,7 @@ fun MediaDetailScreen(
         showFrameSplitDialog = true
         frameSplitProgress = 0f
         frameSplitCount = 0
-        frameSplitTotal = 0
+        frameSplitTotal = VIDEO_FRAME_SPLIT_COUNT
         frameSplitElapsedMs = 0L
         frameSplitEstimateMs = 0L
         frameSplitResultMsg = null
@@ -2755,8 +2755,7 @@ internal fun takePhoto(
 ) {
     val photoFile = File(
         context.getExternalFilesDir(null),
-        SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
-            .format(System.currentTimeMillis()) + ".jpg"
+        mediaFileName("jpg")
     )
 
     val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
@@ -2789,8 +2788,7 @@ internal suspend fun takePhotoSuspend(
     parentDir.mkdirs()
     val photoFile = File(
         parentDir,
-        SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
-            .format(System.currentTimeMillis()) + ".jpg",
+        mediaFileName("jpg"),
     )
     val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
     imageCapture.takePicture(
@@ -2818,8 +2816,7 @@ internal fun startVideoRecording(
     try {
         val videoFile = File(
             context.getExternalFilesDir(null),
-            SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
-                .format(System.currentTimeMillis()) + ".mp4"
+            mediaFileName("mp4")
         )
 
         val fileOutputOptions = androidx.camera.video.FileOutputOptions.Builder(videoFile).build()
@@ -3147,7 +3144,7 @@ internal fun createDatasetBatchResultFolder(
 ): File {
     val root = File(context.getExternalFilesDir(null), "datasets")
     root.mkdirs()
-    val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+    val ts = timestampCompact()
     val safeOp = operationLabel.replace(Regex("[\\\\/:*?\"<>|]"), "_")
     val folderName = when (sourceFolderPaths.size) {
         1 -> {
@@ -3900,8 +3897,7 @@ internal suspend fun createZipFromUris(
 ): File? {
     return withContext(Dispatchers.IO) {
         try {
-            val zipFileName =
-                "${zipPrefix}_${SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US).format(System.currentTimeMillis())}.zip"
+            val zipFileName = "${zipPrefix}_${timestampMs()}.zip"
             val zipFile = File(context.getExternalFilesDir(null), zipFileName)
 
             FileOutputStream(zipFile).use { fos ->
@@ -3942,8 +3938,7 @@ internal suspend fun createZipFromFolders(
 ): File? {
     return withContext(Dispatchers.IO) {
         try {
-            val zipFileName =
-                "${zipPrefix}_${SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US).format(System.currentTimeMillis())}.zip"
+            val zipFileName = "${zipPrefix}_${timestampMs()}.zip"
             val zipFile = File(context.getExternalFilesDir(null), zipFileName)
 
             FileOutputStream(zipFile).use { fos ->
@@ -4039,9 +4034,7 @@ internal suspend fun mergeArcorePosesIntoDatasetZip(
 
         outFile = File(
             context.getExternalFilesDir(null),
-            "dataset_arcore_merged_${
-                SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US).format(System.currentTimeMillis())
-            }.zip",
+            "dataset_arcore_merged_${timestampMs()}.zip",
         )
 
         ZipOutputStream(FileOutputStream(outFile)).use { zos ->
@@ -5127,7 +5120,7 @@ fun ServerSettingsScreen(
             value = serverAddress,
             onValueChange = { serverAddress = it },
             label = { Text("서버 주소 (IP 또는 도메인)", color = palette.onBackground) },
-            placeholder = { Text("예: fifth-theatrics-bulldog.ngrok-free.dev", color = Color.LightGray) },
+            placeholder = { Text("예: wise-annex-audacity.ngrok-free.dev", color = Color.LightGray) },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             colors = fieldColors

@@ -4,8 +4,6 @@ import android.content.Context
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -57,7 +55,7 @@ object ThreeDgsChatDocxExport {
         val py = extractFirstPythonFence(fullMarkdown) ?: return null
         return try {
             val outDir = File(context.getExternalFilesDir(null), subdirectory).apply { mkdirs() }
-            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val stamp = timestampCompact()
             val base = "${fileBasePrefix}_$stamp"
             val pyFile = File(outDir, "$base.py")
             val docxFile = File(outDir, "$base.docx")

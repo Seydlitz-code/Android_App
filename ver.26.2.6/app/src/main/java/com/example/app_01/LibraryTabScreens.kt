@@ -4371,7 +4371,7 @@ fun GalleryScreen(
                                     .background(completionBtnBg)
                                     .clickable {
                                         val glbFile = scanGlbFiles(context).firstOrNull()
-                                            ?: spb.filesByKey["glb"]?.takeIf { it.exists() && it.isFile }
+                                            ?: spb.existingFile("glb")
                                         if (glbFile == null) {
                                             android.widget.Toast.makeText(
                                                 context,
@@ -4400,8 +4400,8 @@ fun GalleryScreen(
                                     textAlign = TextAlign.Center
                                 )
                             }
-                            val qualityJson = spb.filesByKey["quality_json"]?.takeIf { it.exists() && it.isFile }
-                            val analysisPngLegacy = spb.filesByKey["quality_png"]?.takeIf { it.exists() && it.isFile }
+                            val qualityJson = spb.existingFile("quality_json")
+                            val analysisPngLegacy = spb.existingFile("quality_png")
                             val hasQualityOrAnalysisView = qualityJson != null || analysisPngLegacy != null
                             Box(
                                 modifier = Modifier
@@ -6262,6 +6262,8 @@ fun GalleryScreen(
     }
 }
 
+internal const val VIDEO_FRAME_SPLIT_COUNT = 200
+
 internal suspend fun extractVideoFramesToDataset(
     context: Context,
     videoUri: Uri,
@@ -6276,16 +6278,18 @@ internal suspend fun extractVideoFramesToDataset(
     retriever.setDataSource(context, videoUri)
 
     val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-    val fps = 10
-    val frameIntervalUs = 1_000_000L / fps
-    val totalFrames = ((durationMs * fps) / 1000).toInt()
+    val totalFrames = VIDEO_FRAME_SPLIT_COUNT
+    val durationUs = durationMs * 1000L
 
     var frameCount = 0
-    var currentTimeUs = 0L
     val startTime = System.currentTimeMillis()
     var lastReportMs = 0L
 
-    while (currentTimeUs < durationMs * 1000) {
+    for (index in 0 until totalFrames) {
+        val currentTimeUs = when {
+            totalFrames <= 1 || durationUs <= 0L -> 0L
+            else -> (durationUs * index) / (totalFrames - 1)
+        }
         val bitmap = retriever.getScaledFrameAtTime(currentTimeUs, MediaMetadataRetriever.OPTION_CLOSEST, 480, 270)
         if (bitmap != null) {
             val frameFile = File(datasetDir, "${frameCount.toString().padStart(6, '0')}.jpg")
@@ -6294,19 +6298,18 @@ internal suspend fun extractVideoFramesToDataset(
             }
             bitmap.recycle()
             frameCount++
-
-            val nowMs = System.currentTimeMillis()
-            if (nowMs - lastReportMs >= 120L) {
-                val elapsedMs = nowMs - startTime
-                val progress = currentTimeUs.toFloat() / (durationMs * 1000).toFloat().coerceAtLeast(1f)
-                val estimateMs = if (progress > 0.001f) (elapsedMs / progress).toLong() else 0L
-                withContext(Dispatchers.Main) {
-                    onProgress(progress.coerceAtMost(1f), frameCount, totalFrames, elapsedMs, estimateMs)
-                }
-                lastReportMs = nowMs
-            }
         }
-        currentTimeUs += frameIntervalUs
+
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastReportMs >= 120L || index == totalFrames - 1) {
+            val elapsedMs = nowMs - startTime
+            val progress = (index + 1).toFloat() / totalFrames.toFloat()
+            val estimateMs = if (progress > 0.001f) (elapsedMs / progress).toLong() else 0L
+            withContext(Dispatchers.Main) {
+                onProgress(progress.coerceAtMost(1f), frameCount, totalFrames, elapsedMs, estimateMs)
+            }
+            lastReportMs = nowMs
+        }
     }
 
     retriever.release()

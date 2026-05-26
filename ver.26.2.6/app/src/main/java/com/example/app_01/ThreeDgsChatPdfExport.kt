@@ -74,7 +74,7 @@ object ThreeDgsChatPdfExport {
         val py = ThreeDgsChatDocxExport.extractFirstPythonFence(fullMarkdown) ?: return null
         return try {
             val outDir = File(context.getExternalFilesDir(null), subdirectory).apply { mkdirs() }
-            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val stamp = timestampCompact()
             val base = "${fileBasePrefix}_$stamp"
             val pyFile = File(outDir, "$base.py")
             val pdfFile = File(outDir, "$base.pdf")

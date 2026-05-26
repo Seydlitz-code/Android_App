@@ -2,9 +2,6 @@ package com.example.app_01
 
 import android.content.Context
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /** AI CAD 라이브러리: OpenSCAD 계열 코드에서 추출한 메쉬를 STL로 저장·목록 표시 */
 object AiCadLibrary {
@@ -26,7 +23,7 @@ object AiCadLibrary {
      */
     fun saveStlFile(context: Context, stlBytes: ByteArray, nameWithoutExt: String? = null): File {
         val dir = getLibraryDir(context)
-        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        val ts = timestampCompact()
         val safe =
             nameWithoutExt?.replace("[^a-zA-Z0-9가-힣_\\-]".toRegex(), "_")?.takeIf { it.isNotBlank() }
         val base = "${safe ?: "model"}_$ts"

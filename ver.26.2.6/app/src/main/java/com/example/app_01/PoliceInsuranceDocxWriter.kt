@@ -7,9 +7,6 @@ import androidx.core.content.FileProvider
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -143,7 +140,7 @@ object PoliceInsuranceDocxWriter {
                 appendLine("[PLY] ${ply.name} (${ply.length() / 1024} KB)")
                 appendLine(ply.absolutePath)
             }
-            bundle.filesByKey["glb"]?.takeIf { it.exists() }?.let { glb ->
+            bundle.existingFile("glb")?.let { glb ->
                 appendLine()
                 appendLine("[GLB] ${glb.name} (${glb.length() / 1024} KB)")
                 appendLine(glb.absolutePath)
@@ -151,7 +148,7 @@ object PoliceInsuranceDocxWriter {
         }
         out.add("1. 서버 결과 메타" to meta.trim())
 
-        bundle.filesByKey["analysis_json"]?.takeIf { it.exists() && it.isFile }?.let { f ->
+        bundle.existingFile("analysis_json")?.let { f ->
             try {
                 f.readText(Charsets.UTF_8)
             } catch (_: Exception) {
@@ -161,8 +158,8 @@ object PoliceInsuranceDocxWriter {
             }
         }
 
-        val qualityJson = bundle.filesByKey["quality_json"]?.takeIf { it.exists() && it.isFile }
-        val qualityTxt = bundle.filesByKey["quality_txt"]?.takeIf { it.exists() && it.isFile }
+        val qualityJson = bundle.existingFile("quality_json")
+        val qualityTxt = bundle.existingFile("quality_txt")
         val qFile = qualityJson ?: qualityTxt
         if (qFile != null) {
             val raw = try {
@@ -222,7 +219,7 @@ object PoliceInsuranceDocxWriter {
     fun writeReports(context: Context, bundle: ServerPipelineResultBundle): PoliceInsuranceExportResult? {
         return try {
             val outDir = File(context.getExternalFilesDir(null), "police_insurance_reports").apply { mkdirs() }
-            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val stamp = timestampCompact()
             val base = "PLY_분석_${bundle.taskId}_$stamp"
             val docx = File(outDir, "$base.docx")
             val py = File(outDir, "${base}_generate_docx.py")

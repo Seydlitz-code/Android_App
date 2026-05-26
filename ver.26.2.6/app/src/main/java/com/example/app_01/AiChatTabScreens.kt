@@ -319,36 +319,24 @@ private const val MAX_3DGS_AUX_ATTACHMENTS = 12
 
 private const val GLTF_MAGIC = 0x46546C67
 
-/** 시각 자료·분석 문단 같이 쓰기 — 모바일 PDF는 문자열만 추출하므로 그림 설명은 반드시 add_paragraph에 병기 */
-private const val REPORT_IMAGE_WORKFLOW_HINT =
-    "보고서에 도식·비교 그림·파손 개요 도면 등 시각 자료가 필요하면 다음 순서를 따르세요: " +
-        "(1) 분석 관점에서 어떤 그림이 필요한지 먼저 정한 뒤, 스크립트 안에서 matplotlib 또는 PIL로 PNG 파일을 생성합니다. " +
-        "(2) 같은 스크립트에서 `document.add_picture(생성된_png_경로, width=Inches(...))` 등으로 본문 적절한 위치에 삽입합니다(PC에서 python-docx 실행 시 Word에 포함). " +
-        "(3) 바로 이어서 `add_paragraph()`로 해당 그림을 설명·해석하는 한국어 분석 텍스트를 작성합니다. " +
-        "모바일 앱은 주로 add_paragraph·add_heading 문자열만 PDF로 추출하므로, 그림의 핵심 내용·결론은 반드시 인접 문단에 텍스트로도 남겨 주세요. " +
-        "앱에서 인식하지 않는 '차트:bar' 등 표식은 사용하지 마세요."
+/** HTML 보고서: 이미지·표·Chart.js 그래프를 WebView에서 렌더링 */
+private const val REPORT_HTML_VISUAL_HINT =
+    "보고서는 단일 ```html``` 블록의 완전한 HTML 문서로 출력하세요. " +
+        "도식·파손 개요·비용 비교가 필요하면 `<img src=\"data:image/png;base64,...\">` 또는 인라인 SVG, " +
+        "수치 비교는 `<table>`과 Chart.js(`<canvas>`+`<script>`)로 표현하세요. " +
+        "각 그림·차트 아래에 한국어 해석 문단을 반드시 포함하세요. " +
+        "python-docx·Python 스크립트는 사용하지 마세요."
 
 /** 파손 분석 모드: 텍스트가 비어 있고 이미지만 보낼 때 LLM에 넣는 기본 요청 */
 private const val DAMAGE_ANALYSIS_DEFAULT_PROMPT =
-    "첨부된 사고 차량 사진을 종합 분석하여, 한국어 python-docx 스크립트(단일 ```python 블록)를 출력하세요. " +
-        REPORT_IMAGE_WORKFLOW_HINT + " " +
+    "첨부된 사고 차량 사진을 종합 분석하여, 한국어 HTML 프레젠테이션 보고서(단일 ```html``` 블록, 완전한 HTML 문서)를 출력하세요. " +
+        REPORT_HTML_VISUAL_HINT + " " +
         "이미지 개별 설명은 절대 금지 — 모든 사진을 하나의 통합 차량 파손 데이터셋으로 분석합니다. " +
-        "보고서는 다음 구조로 작성합니다: " +
-        "【제1페이지: 표지】 보고서 제목·부제·생성일시·작성도구·면책 문구 포함. " +
-        "【제2페이지: 목차】 add_paragraph()로 각 항목 표시 (표 사용 금지). " +
-        "【제3페이지 이후: 본문】 아래 섹션을 각각 page_break로 분리: " +
-        "(1) 차량 모델 정보 — 브랜드·차급·모델·연식·색상·번호판 유추 (간결하게), " +
-        "(2) 사고 발생 형태 분석 — 충돌 유형·방향·접촉 지점·2차 피해, " +
-        "(3) 【핵심】파손 부위 정리 — 모든 가시 파손 부위를 개별 add_paragraph()로 정리, " +
-        "각 항목: [파손 부위 | 파손 유형 | 심각도 | 파손 깊이(추정) | 파손 면적(추정) | 비고], " +
-        "(4) 파손 깊이 상세 분석 — add_paragraph()로 각 부위별 깊이·변형·영향·측정 한계 기록, " +
-        "(5) 【핵심】수리 예상 견적 — add_paragraph()로 각 부위별 수리 방법·공임·부품비·총비용·기간 기록, " +
-        "(6) 사고 원인 추론 — add_paragraph()로 [추론 항목 | 관찰 근거 | 신뢰도] (간결하게), " +
-        "(7) 법적 면책 정보 — 면책 문구와 보고서 생성 시각 포함. " +
-        "모든 데이터는 add_paragraph()로만 표현하세요 (표·table.cell 사용 금지). " +
-        "차트(차트:bar, 차트:pie, 차트:line)도 사용하지 마세요. " +
-        "\"이미지 1에서는\", \"사진에서 보이듯\" 등 개별 사진 언급 표현은 절대 사용하지 말고, " +
-        "차량 전체에 대한 통합 파손 분석 보고서로 작성하세요."
+        "보고서는 `<section class=\"slide\">`로 구분된 표지·목차·본문 구조로 작성합니다: " +
+        "(1) 차량 모델 정보, (2) 사고 발생 형태 분석, (3) 【핵심】파손 부위 정리 — HTML `<table>`로 전체 파손 목록, " +
+        "(4) 파손 깊이 상세 분석, (5) 【핵심】수리 예상 견적 — 표·Chart.js 막대/원형 차트 권장, " +
+        "(6) 사고 원인 추론, (7) 법적 면책 정보. " +
+        "\"이미지 1에서는\", \"사진에서 보이듯\" 등 개별 사진 언급은 금지합니다."
 
 private fun uriFileExtension(uri: Uri): String {
     val name = uri.lastPathSegment?.substringAfterLast('/', missingDelimiterValue = "") ?: ""
@@ -585,7 +573,9 @@ fun ClaudeChatScreen(
     var stlDialogForIndex by remember { mutableStateOf<Int?>(null) }
     var stlSaveNameInput by remember { mutableStateOf("") }
     var stlBusyMessageIndex by remember { mutableStateOf<Int?>(null) }
-    var docxBusyMessageIndex by remember { mutableStateOf<Int?>(null) }
+    var htmlBusyMessageIndex by remember { mutableStateOf<Int?>(null) }
+    var htmlReportViewerFile by remember { mutableStateOf<java.io.File?>(null) }
+    var htmlReportViewerTitle by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     // 스레드 관리 상태
     var currentThreadId by remember { mutableStateOf<String?>(null) }
@@ -800,46 +790,46 @@ fun ClaudeChatScreen(
                             )
                         ) {
                         MarkdownThreeDgsExport(
-                            isExporting = docxBusyMessageIndex == index,
+                            isExporting = htmlBusyMessageIndex == index,
                             onExport = {
                                 scope.launch {
-                                    docxBusyMessageIndex = index
-                                    val docxResult = withContext(Dispatchers.IO) {
-                                        when (aiTabMode) {
-                                            AiChatTabMode.DAMAGE_ANALYSIS ->
-                                                ThreeDgsChatPdfExport.tryExportToPdf(
-                                                    context,
-                                                    msg.text,
-                                                    subdirectory = "damage_llm_exports",
-                                                    fileBasePrefix = "damage_report",
-                                                    docTitle = "교통사고 파손·부위 분석 보고서",
-                                                )
-                                            else ->
-                                                ThreeDgsChatPdfExport.tryExportToPdf(context, msg.text)
-                                        }
+                                    htmlBusyMessageIndex = index
+                                    val (subdir, prefix, title) = when (aiTabMode) {
+                                        AiChatTabMode.DAMAGE_ANALYSIS -> Triple(
+                                            "damage_llm_exports",
+                                            "damage_report",
+                                            "교통사고 파손·부위 분석 보고서",
+                                        )
+                                        else -> Triple(
+                                            "3dgs_llm_exports",
+                                            "3dgs_report",
+                                            "사고 현장 분석 보고서",
+                                        )
                                     }
-                                    docxBusyMessageIndex = null
-                                    if (docxResult == null) {
+                                    val htmlResult = withContext(Dispatchers.IO) {
+                                        ThreeDgsChatHtmlExport.tryExportToHtml(
+                                            context,
+                                            msg.text,
+                                            subdirectory = subdir,
+                                            fileBasePrefix = prefix,
+                                            docTitle = title,
+                                        )
+                                    }
+                                    htmlBusyMessageIndex = null
+                                    if (htmlResult == null) {
                                         Toast.makeText(
                                             context,
-                                            "python 코드 블록이 없거나 저장에 실패했습니다.",
+                                            "HTML 코드 블록이 없거나 저장에 실패했습니다.",
                                             Toast.LENGTH_LONG
                                         ).show()
                                     } else {
-                                        if (docxResult.extractedPieceCount == 0) {
-                                            Toast.makeText(
-                                                context,
-                                                "스크립트에서 문단 문자열을 찾지 못했습니다. .py·.pdf는 저장되었습니다.",
-                                                Toast.LENGTH_LONG
-                                            ).show()
-                                        } else {
-                                            Toast.makeText(
-                                                context,
-                                                "저장: ${docxResult.pdfFile.name}",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                        }
-                                        openPdf(context, docxResult.pdfFile)
+                                        Toast.makeText(
+                                            context,
+                                            "저장: ${htmlResult.htmlFile.name}",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                        htmlReportViewerTitle = title
+                                        htmlReportViewerFile = htmlResult.htmlFile
                                     }
                                 }
                             }
@@ -1084,17 +1074,7 @@ fun ClaudeChatScreen(
 
                 scope.launch {
                     val imageBase64List = imagesForLlm.mapNotNull { uri ->
-                        var bitmap: android.graphics.Bitmap? = null
-                        try {
-                            bitmap = decodeBitmapWithMaxDimension(context, uri, 1280)
-                            bitmap?.let { ClaudeChatClient.bitmapToBase64ForLlm(it) }
-                        } catch (e: Exception) {
-                            null
-                        } finally {
-                            bitmap?.let { bmp ->
-                                try { if (!bmp.isRecycled) bmp.recycle() } catch (_: Exception) {}
-                            }
-                        }
+                        decodeUriToBase64(context, uri)
                     }
                     val dataAppendix = if (aiTabMode == AiChatTabMode.MOBILE_3DGS && auxSnap.isNotEmpty()) {
                         read3dgsDataAppendixForLlm(context, auxSnap)
@@ -1102,13 +1082,13 @@ fun ClaudeChatScreen(
                     val defaultImgPrompt = when (aiTabMode) {
                         AiChatTabMode.MOBILE_3DGS -> when {
                             imageBase64List.size > 1 ->
-                                "첨부된 여러 사고 현장 이미지를 근거로, 한국어 python-docx 스크립트(단일 ```python 블록)를 출력하세요. " +
-                                    REPORT_IMAGE_WORKFLOW_HINT + " " +
-                                    "보고서는 반드시 표지(1페이지)·목차(2페이지)·본문(3페이지 이후) 구조로 작성하고, 다음을 포함하세요: 사고 현장 개요, 사고 발생 형태 분석, 사고 원인 추론, 차량별 파손 부위 및 수리 견적, 종합 수리 견적 요약, 법적 면책 정보. 모든 데이터는 add_paragraph()로만 표현하고 table.cell은 절대 사용하지 마세요. 앱 전용 차트 표식은 사용하지 마세요. 섹션마다 page_break로 분리하세요. 이미지별 개별 설명이 아닌 종합 분석을 제공하세요."
+                                "첨부된 여러 사고 현장 이미지를 근거로, 한국어 HTML 프레젠테이션 보고서(단일 ```html``` 블록, 완전한 HTML 문서)를 출력하세요. " +
+                                    REPORT_HTML_VISUAL_HINT + " " +
+                                    "표지·목차·본문(사고 현장 개요, 사고 형태 분석, 원인 추론, 차량별 파손·수리 견적, 종합 견적, 법적 면책)을 `<section class=\"slide\">`로 구분하세요. 표·Chart.js·이미지/SVG를 적극 활용하세요. 이미지별 개별 설명 금지."
                             imageBase64List.size == 1 ->
-                                "첨부된 사고 현장 이미지를 근거로, 한국어 python-docx 스크립트(단일 ```python 블록)를 출력하세요. " +
-                                    REPORT_IMAGE_WORKFLOW_HINT + " " +
-                                    "보고서는 표지·목차·본문 구조로 작성하고, 사고 현장 개요, 사고 형태 분석, 원인 추론, 차량 파손 및 수리 견적, 법적 면책 정보를 포함하세요. 모든 데이터는 add_paragraph()로만 표현하고 table.cell은 절대 사용하지 마세요. 섹션마다 page_break로 분리하세요."
+                                "첨부된 사고 현장 이미지를 근거로, 한국어 HTML 프레젠테이션 보고서(단일 ```html``` 블록)를 출력하세요. " +
+                                    REPORT_HTML_VISUAL_HINT + " " +
+                                    "표지·목차·본문 구조로 사고 현장 개요, 형태 분석, 원인 추론, 파손·수리 견적, 법적 면책을 포함하세요."
                             else -> ""
                         }
                         AiChatTabMode.DAMAGE_ANALYSIS -> when {
@@ -1145,13 +1125,13 @@ fun ClaudeChatScreen(
                                 when {
                                     imageBase64List.isNotEmpty() -> defaultImgPrompt
                                     dataAppendix.isNotBlank() ->
-                                        "첨부 데이터 파일(JSON·PLY/GLB·ZIP 등)을 반영해 사고 현장 분석 보고서를 작성하세요. " +
-                                            REPORT_IMAGE_WORKFLOW_HINT + " " +
-                                            "보고서는 표지(1페이지)·목차(2페이지)·본문(3페이지 이후) 구조로, 사고 현장 개요·사고 형태 분석·원인 추론·차량별 파손 부위 및 수리 견적·종합 수리 견적 요약·법적 면책 정보를 포함하세요. 모든 데이터는 add_paragraph()로만 표현하고 table.cell과 앱 전용 차트 표식은 사용하지 마세요. 섹션마다 page_break로 분리하고, 한국어 python-docx 스크립트(단일 ```python 블록)로만 출력하세요."
+                                        "첨부 데이터 파일(JSON·PLY/GLB·ZIP 등)을 반영해 사고 현장 분석 HTML 보고서를 작성하세요. " +
+                                            REPORT_HTML_VISUAL_HINT + " " +
+                                            "표지·목차·본문(현장 개요·형태 분석·원인 추론·파손·수리 견적·면책)을 `<section class=\"slide\">`로 구분하고, 단일 ```html``` 완전 문서로 출력하세요."
                                     else ->
-                                        "이 앱의 Mobile 3DGS 사고 현장 분석 시스템을 위한 보고서 샘플을 작성하세요. " +
-                                            REPORT_IMAGE_WORKFLOW_HINT + " " +
-                                            "보고서는 표지·목차·본문 구조로, 사고 현장 개요·사고 형태 분석·원인 추론·차량 파손 및 수리 견적·종합 수리 견적 요약·법적 면책 정보를 포함한 한국어 python-docx 스크립트(단일 ```python 블록)로 출력하세요. 모든 데이터는 add_paragraph()로만 표현하고 table.cell과 앱 전용 차트 표식은 사용하지 마세요. 섹션마다 page_break로 분리하세요."
+                                        "이 앱의 Mobile 3DGS 사고 현장 분석 시스템용 HTML 보고서 샘플을 작성하세요. " +
+                                            REPORT_HTML_VISUAL_HINT + " " +
+                                            "표지·목차·본문 구조의 한국어 HTML 프레젠테이션(단일 ```html``` 블록)로 출력하세요."
                                 }
                             }
                             val fullText = if (dataAppendix.isNotBlank()) {
@@ -1173,9 +1153,9 @@ fun ClaudeChatScreen(
                                 if (imageBase64List.isNotEmpty()) {
                                     DAMAGE_ANALYSIS_DEFAULT_PROMPT
                                 } else {
-                                    "사고 차량 사진을 종합 분석하여 표지·목차·본문 구조의 차량 파손 분석 보고서를 한국어 python-docx 스크립트(단일 ```python 블록)로 출력하세요. " +
-                                        REPORT_IMAGE_WORKFLOW_HINT + " " +
-                                        "이미지 개별 언급 없이, 파손 부위별 정리를 add_paragraph()로 하고, 차량 모델 정보·사고 형태 분석·원인 추론·수리 예상 견적·법적 면책 정보를 포함하세요. 모든 데이터는 add_paragraph()로만 표현하고 table.cell과 앱 전용 차트 표식은 사용하지 마세요. 섹션마다 page_break로 분리하세요."
+                                    "사고 차량 사진을 종합 분석하여 표지·목차·본문 구조의 차량 파손 분석 HTML 보고서(단일 ```html``` 블록)를 출력하세요. " +
+                                        REPORT_HTML_VISUAL_HINT + " " +
+                                        "파손 목록·수리 견적은 HTML `<table>`과 Chart.js로 표현하고, 차량 모델·사고 형태·원인·면책 정보를 포함하세요."
                                 }
                             }
                             ClaudeChatClient.streamDamageAnalysisReportMessage(
@@ -1320,8 +1300,8 @@ fun ClaudeChatScreen(
                                 Text(
                                     text = when (aiTabMode) {
                                         AiChatTabMode.AI_CAD -> "모델·치수 입력"
-                                        AiChatTabMode.MOBILE_3DGS -> "Word 보고서 스크립트 요청 또는 맥락 입력…"
-                                        AiChatTabMode.DAMAGE_ANALYSIS -> "파손 보고서 스크립트 요청 또는 맥락 입력…"
+                                        AiChatTabMode.MOBILE_3DGS -> "HTML 보고서 요청 또는 맥락 입력…"
+                                        AiChatTabMode.DAMAGE_ANALYSIS -> "파손 HTML 보고서 요청 또는 맥락 입력…"
                                         else -> "메시지 입력…"
                                     },
                                     color = palette.placeholder,
@@ -1472,6 +1452,19 @@ fun ClaudeChatScreen(
                     allThreads = ChatThreadStorage.loadAll(context)
                 },
                 onClose = { isDrawerOpen = false }
+            )
+        }
+
+        val reportFile = htmlReportViewerFile
+        if (reportFile != null) {
+            HtmlReportWebViewScreen(
+                htmlFile = reportFile,
+                title = htmlReportViewerTitle.ifBlank { "보고서" },
+                modifier = Modifier.fillMaxSize(),
+                onClose = {
+                    htmlReportViewerFile = null
+                    htmlReportViewerTitle = ""
+                },
             )
         }
 
@@ -2407,7 +2400,7 @@ private fun ThreadListItem(
                     else -> "클로드"
                 }
                 val isAiCad = thread.modeName == "AI_CAD"
-                val isDocxScript = thread.modeName == "MOBILE_3DGS" ||
+                val isHtmlReport = thread.modeName == "MOBILE_3DGS" ||
                     thread.modeName == "DAMAGE_ANALYSIS"
                 Box(
                     modifier = Modifier
@@ -2415,7 +2408,7 @@ private fun ThreadListItem(
                         .background(
                             when {
                                 isAiCad -> palette.brand.copy(alpha = 0.15f)
-                                isDocxScript -> Color(0xFFE8A838).copy(alpha = 0.2f)
+                                isHtmlReport -> Color(0xFFE8A838).copy(alpha = 0.2f)
                                 else -> Color(0xFF4A4AFF).copy(alpha = 0.18f)
                             }
                         )
@@ -2425,7 +2418,7 @@ private fun ThreadListItem(
                         text = modeLabel,
                         color = when {
                             isAiCad -> palette.brand
-                            isDocxScript -> Color(0xFFC9780A)
+                            isHtmlReport -> Color(0xFFC9780A)
                             else -> Color(0xFF9898FF)
                         },
                         fontSize = 10.sp,
@@ -2856,13 +2849,13 @@ private fun MarkdownText(
     val palette = LocalAppUiPalette.current
     val resolvedColor = textColor ?: palette.markdownDefault
     val blocks = remember(text) { parseMarkdownBlocks(text) }
-    val firstPythonIdx = remember(blocks, threeDgsExport) {
+    val firstHtmlIdx = remember(blocks, threeDgsExport) {
         if (threeDgsExport == null) {
             -1
         } else {
             blocks.indexOfFirst { b ->
                 if (b !is MarkdownBlock.CodeBlock) return@indexOfFirst false
-                ThreeDgsChatDocxExport.shouldOfferDocxExportForCodeBlock(b.language, b.code)
+                ThreeDgsChatHtmlExport.shouldOfferHtmlExportForCodeBlock(b.language, b.code)
             }
         }
     }
@@ -2921,8 +2914,8 @@ private fun MarkdownText(
                     }
                 }
                 is MarkdownBlock.CodeBlock -> {
-                    if (idx == firstPythonIdx && threeDgsExport != null) {
-                        MarkdownPythonCodeBlock3dgs(
+                    if (idx == firstHtmlIdx && threeDgsExport != null) {
+                        MarkdownHtmlReportCodeBlock(
                             code = block.code,
                             isExporting = threeDgsExport.isExporting,
                             onExport = threeDgsExport.onExport,
@@ -2950,9 +2943,9 @@ private fun MarkdownText(
     }
 }
 
-/** 3DGS: python-docx 스크립트 블록 + Word 저장 버튼 */
+/** 3DGS·파손 분석: HTML 보고서 블록 + 저장·웹 뷰어 열기 */
 @Composable
-private fun MarkdownPythonCodeBlock3dgs(
+private fun MarkdownHtmlReportCodeBlock(
     code: String,
     isExporting: Boolean,
     onExport: () -> Unit,
@@ -2974,7 +2967,7 @@ private fun MarkdownPythonCodeBlock3dgs(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "python",
+                    text = "html",
                     color = palette.codeBlockMeta,
                     fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace
@@ -3001,7 +2994,7 @@ private fun MarkdownPythonCodeBlock3dgs(
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = "PDF 저장·열기",
+                            text = "HTML 저장·열기",
                             color = palette.brand,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold
@@ -3075,20 +3068,3 @@ private fun MarkdownCodeBlock(language: String, code: String) {
     }
 }
 
-private fun openPdf(context: Context, pdfFile: File) {
-    try {
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            pdfFile,
-        )
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "application/pdf")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(Intent.createChooser(intent, "PDF로 열기"))
-    } catch (e: Exception) {
-        Toast.makeText(context, "PDF 뷰어를 설치한 뒤 다시 시도하세요.", Toast.LENGTH_LONG).show()
-    }
-}

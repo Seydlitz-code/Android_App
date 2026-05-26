@@ -1833,10 +1833,7 @@ fun CameraScreen(
                                                     recording = recordingInstance
                                                     isRecording = true
                                                     recordingTime = 0L
-                                                    val sessionId = SimpleDateFormat(
-                                                        "yyyy-MM-dd-HH-mm-ss-SSS",
-                                                        Locale.US
-                                                    ).format(System.currentTimeMillis())
+                                                    val sessionId = timestampMsString()
                                                     val root = File(context.getExternalFilesDir(null), "datasets")
                                                     if (!root.exists()) {
                                                         root.mkdirs()

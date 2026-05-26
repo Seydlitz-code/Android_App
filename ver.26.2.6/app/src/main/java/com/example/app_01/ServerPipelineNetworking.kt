@@ -58,7 +58,7 @@ internal const val DOWNLOAD_ENDPOINT = "/download"
 internal const val RESULTS_ENDPOINT = "/results"
 
 /** Jetson DA3 파이프라인 기본 호스트(새 설치·설정 초기화 시 사용). HTTPS + 443 */
-internal const val DEFAULT_SERVER_ADDRESS = "fifth-theatrics-bulldog.ngrok-free.dev"
+internal const val DEFAULT_SERVER_ADDRESS = "wise-annex-audacity.ngrok-free.dev"
 internal const val DEFAULT_SERVER_PORT = 443
 internal const val DEFAULT_USE_HTTPS = true
 
@@ -141,7 +141,7 @@ internal fun saveServerSettings(context: Context, address: String, port: Int, us
 
 /**
  * DA3 서버 오리진 (`https://host` … 비표준 포트만 `:포트` 포함).
- * 기본(HTTPS·443)이면 호스트만 두어 `https://fifth-theatrics-bulldog.ngrok-free.dev/upload` 형태와 맞춥니다.
+ * 기본(HTTPS·443)이면 호스트만 두어 `https://wise-annex-audacity.ngrok-free.dev/upload` 형태와 맞춥니다.
  */
 internal fun buildServerOriginFromParts(address: String, port: Int, useHttps: Boolean): String {
     val protocol = if (useHttps) "https" else "http"
@@ -1305,17 +1305,7 @@ internal suspend fun runServer3dgsAnalysisInBackground(
     val imageBase64List = withContext(Dispatchers.IO) {
         val uris = pending.imageUris
         uris.mapNotNull { uri ->
-            var bitmap: android.graphics.Bitmap? = null
-            try {
-                bitmap = decodeBitmapWithMaxDimension(context, uri, 1280)
-                bitmap?.let { ClaudeChatClient.bitmapToBase64ForLlm(it) }
-            } catch (_: Exception) {
-                null
-            } finally {
-                bitmap?.let { bmp ->
-                    try { if (!bmp.isRecycled) bmp.recycle() } catch (_: Exception) {}
-                }
-            }
+            decodeUriToBase64(context, uri)
         }
     }
     val result = ClaudeChatClient.streamMobile3dGsAnalysisMessage(
@@ -1357,7 +1347,7 @@ internal suspend fun runServer3dgsAnalysisInBackground(
 internal fun buildPoliceInsurance3dgsPayload(
     context: Context,
     bundle: ServerPipelineResultBundle,
-    basePrompt: String = "첨부된 PLY·3DGS·JSON 분석 파일과 사고 현장 이미지를 바탕으로, 사고 현장 분석 보고서를 작성하세요. 보고서에 도식 등 시각 자료가 필요하면 matplotlib/PIL로 PNG를 생성한 뒤 document.add_picture로 삽입하고, 바로 이어 add_paragraph로 분석 텍스트를 작성하세요(모바일 PDF는 문자열만 추출하므로 그림 요지는 반드시 문단에 적습니다). 보고서는 표지(1페이지)·목차(2페이지)·본문(3페이지 이후) 구조로, 사고 현장 개요, 사고 형태 분석, 사고 원인 추론, 차량별 파손 부위 및 수리 견적, 종합 수리 견적 요약, 법적 면책 정보를 포함하세요. 모든 데이터는 add_paragraph()로만 표현하고 table.cell과 앱 전용 차트 표식은 사용하지 마세요. 섹션마다 page_break로 분리하세요. 한국어 python-docx 스크립트(단일 ```python 블록)로만 출력하세요.",
+    basePrompt: String = "첨부된 PLY·3DGS·JSON 분석 파일과 사고 현장 이미지를 바탕으로, 사고 현장 분석 HTML 프레젠테이션 보고서를 작성하세요. 단일 ```html``` 블록의 완전한 HTML 문서로 출력하고, 도식·비교표·수리 견적은 `<table>`, Chart.js `<canvas>`, `<img src=\"data:image/png;base64,...\">` 또는 인라인 SVG로 표현하세요. 표지·목차·본문(현장 개요, 사고 형태, 원인 추론, 차량별 파손·수리 견적, 종합 견적, 법적 면책)을 `<section class=\"slide\">`로 구분하세요. python-docx·Python 스크립트는 사용하지 마세요.",
     galleryImageUris: List<Uri> = emptyList(),
 ): Pair<String, List<Uri>> {
     val sb = StringBuilder(basePrompt)
@@ -1371,7 +1361,7 @@ internal fun buildPoliceInsurance3dgsPayload(
             .append(ply.length() / 1024).append(" KB)\n")
             .append(ply.absolutePath).append('\n')
     }
-    bundle.filesByKey["glb"]?.takeIf { it.exists() }?.let { glb ->
+    bundle.existingFile("glb")?.let { glb ->
         sb.append("\n[GLB] ").append(glb.name).append(" (").append(glb.length() / 1024)
             .append(" KB)\n").append(glb.absolutePath).append('\n')
     }
