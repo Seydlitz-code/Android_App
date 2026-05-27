@@ -8,7 +8,16 @@ enum class CaptureMode {
 }
 
 enum class ResolutionPreset(val width: Int, val height: Int) {
-    RESOLUTION_1024x1024(1024, 1024)
+    RESOLUTION_640x480(640, 480),
+    RESOLUTION_512x512(512, 512);
+
+    val aspectRatio: Float get() = width.toFloat() / height.toFloat()
+
+    companion object {
+        /** ARCore 메타 저장 ON → 640×480, OFF → 512×512 */
+        fun forArCoreEnabled(enabled: Boolean): ResolutionPreset =
+            if (enabled) RESOLUTION_640x480 else RESOLUTION_512x512
+    }
 }
 
 enum class MainTab {

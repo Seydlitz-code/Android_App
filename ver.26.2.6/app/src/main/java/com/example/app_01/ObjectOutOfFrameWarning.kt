@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * 경차 촬영(OBJECT) 모드에서만 사용:
  * - MediaPipe ObjectDetector로 프레임 내 사물 bounding box 추출
- * - 중앙 1000x1000 가상 사각형을 벗어났는지 판단
+ * - 중앙 640x480 가상 사각형을 벗어났는지 판단
  */
 object ObjectOutOfFrameWarning {
 
@@ -63,7 +63,8 @@ object ObjectOutOfFrameWarning {
         context: Context,
         bitmapUpright: Bitmap,
         focusPointNorm: Pair<Float, Float>?,
-        squareSizePx: Int = 1000,
+        frameWidthPx: Int = 640,
+        frameHeightPx: Int = 480,
         minIntervalMs: Long = 350L
     ): Boolean? {
         val now = SystemClock.elapsedRealtime()
@@ -89,15 +90,21 @@ object ObjectOutOfFrameWarning {
 
         val w = bitmapUpright.width
         val h = bitmapUpright.height
-        val size = squareSizePx.coerceAtMost(minOf(w, h)).coerceAtLeast(200)
-        val left = (w - size) / 2f
-        val top = (h - size) / 2f
-        val square = RectF(left, top, left + size, top + size)
+        val scale = minOf(
+            w.toFloat() / frameWidthPx,
+            h.toFloat() / frameHeightPx,
+            1f,
+        )
+        val frameWidth = (frameWidthPx * scale).coerceAtLeast(200f)
+        val frameHeight = (frameHeightPx * scale).coerceAtLeast(150f)
+        val left = (w - frameWidth) / 2f
+        val top = (h - frameHeight) / 2f
+        val frame = RectF(left, top, left + frameWidth, top + frameHeight)
 
-        return (targetBox.left < square.left ||
-            targetBox.top < square.top ||
-            targetBox.right > square.right ||
-            targetBox.bottom > square.bottom)
+        return (targetBox.left < frame.left ||
+            targetBox.top < frame.top ||
+            targetBox.right > frame.right ||
+            targetBox.bottom > frame.bottom)
     }
 
     private fun pickTargetBox(

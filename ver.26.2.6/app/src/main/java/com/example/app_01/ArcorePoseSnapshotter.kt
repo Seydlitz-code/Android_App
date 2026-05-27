@@ -18,17 +18,78 @@ import com.google.ar.core.TrackingState
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import kotlin.math.abs
 
 /**
  * CameraX와 동시에 후면 카메라를 잡고 있을 수 없어, 촬영 파일이 준비된 뒤 잠시 세션을 연다.
  *
- * - **사진**: 단일 프레임.
- * - **동영상 전체**: 파일 재생 길이만큼 종료 직후 ARCore를 ~30Hz로 샘플링한 `frames[]`(녹화 프레임과 1:1 픽셀 동기는 아님).
- * - 데이터셋 스크린샷별 매칭은 [captureDatasetScreenshotsBestEffort] 참고.
+ * poses.json 전송 시:
+ * - fx/fy/cx/cy·imageWidth/imageHeight → [CaptureFrameMeta]의 실제 촬영 해상도로 스케일
+ * - timestampNs → 이미지 촬영 시각([CaptureFrameMeta.imageTimestampNs])과 1:1 매칭
  */
 object ArcorePoseSnapshotter {
 
     private const val MAX_DATASET_ARCORE_FRAMES = 500
+
+    private data class ScaledIntrinsics(
+        val fx: Double,
+        val fy: Double,
+        val cx: Double,
+        val cy: Double,
+        val imageWidth: Int,
+        val imageHeight: Int,
+    )
+
+    private data class FrameBuildConfig(
+        val captureWidth: Int,
+        val captureHeight: Int,
+        val imageTimestampNs: Long?,
+        val videoTimeSec: Double? = null,
+        val datasetScreenshotIndex: Int? = null,
+        val timestampMatchMethod: String = "index_pairing",
+    )
+
+    /** ARCore intrinsics → 실제 저장 JPEG 해상도 기준으로 선형 스케일 */
+    private fun scaleIntrinsicsToCaptureResolution(
+        focal: FloatArray,
+        principal: FloatArray,
+        arcoreWidth: Int,
+        arcoreHeight: Int,
+        captureWidth: Int,
+        captureHeight: Int,
+    ): ScaledIntrinsics {
+        if (arcoreWidth <= 0 || arcoreHeight <= 0) {
+            return ScaledIntrinsics(
+                fx = focal[0].toDouble(),
+                fy = focal[1].toDouble(),
+                cx = principal[0].toDouble(),
+                cy = principal[1].toDouble(),
+                imageWidth = captureWidth,
+                imageHeight = captureHeight,
+            )
+        }
+        val scaleX = captureWidth.toDouble() / arcoreWidth.toDouble()
+        val scaleY = captureHeight.toDouble() / arcoreHeight.toDouble()
+        return ScaledIntrinsics(
+            fx = focal[0] * scaleX,
+            fy = focal[1] * scaleY,
+            cx = principal[0] * scaleX,
+            cy = principal[1] * scaleY,
+            imageWidth = captureWidth,
+            imageHeight = captureHeight,
+        )
+    }
+
+    private fun configFromMeta(meta: CaptureFrameMeta?): FrameBuildConfig {
+        val width = meta?.captureWidth ?: ResolutionPreset.RESOLUTION_640x480.width
+        val height = meta?.captureHeight ?: ResolutionPreset.RESOLUTION_640x480.height
+        return FrameBuildConfig(
+            captureWidth = width,
+            captureHeight = height,
+            imageTimestampNs = meta?.imageTimestampNs,
+            timestampMatchMethod = if (meta?.videoOffsetNs != null) "video_offset" else "index_pairing",
+        )
+    }
 
     /** 포즈·Intrinsics 스냅샷 전용: 평면/깊이/조명 추정 등 부가 파이프라인을 끄고 CPU·GPU 부하를 줄인다. */
     private fun configForPoseSnapshotOnly(session: Session): Config =
@@ -50,6 +111,18 @@ object ArcorePoseSnapshotter {
 
     fun capturePhotoMetadataOrNull(context: Context, imageFileName: String): JSONObject? {
         if (!availabilityInstalled(context)) return null
+        val meta = CaptureFrameMetaRegistry.get(imageFileName)
+        val buildConfig = if (meta != null) {
+            configFromMeta(meta)
+        } else {
+            val preset = captureResolutionForContext(context)
+            FrameBuildConfig(
+                captureWidth = preset.width,
+                captureHeight = preset.height,
+                imageTimestampNs = null,
+                timestampMatchMethod = "single_photo",
+            )
+        }
 
         return runArCoreSession(context) { session ->
             var chosen: Frame? = null
@@ -62,15 +135,36 @@ object ArcorePoseSnapshotter {
                 i++
             }
             val frame = chosen ?: return@runArCoreSession null
-            JSONObject().put("frames", JSONArray().put(frameJsonObject(frame, imageFileName, null, null, null)))
+            JSONObject().put(
+                "frames",
+                JSONArray().put(
+                    frameJsonObject(
+                        frame,
+                        imageFileName,
+                        buildConfig.copy(
+                            imageTimestampNs = buildConfig.imageTimestampNs
+                                ?: meta?.imageTimestampNs
+                                ?: frame.timestamp,
+                            timestampMatchMethod = "single_photo",
+                        ),
+                        frameIndex = null,
+                    ),
+                ),
+            )
         }
     }
 
     /**
-     * 동영상 전체: 재생 [duration] 구간을 녹화 종료 직후 **실시간**으로 ARCore를 샘플링한다.
-     * 각 항목의 `filename`은 동영상 파일명, `frameIndex`, `videoTimeSec`는 간격 기준 타임라인 위치.
+     * 동영상 전체: 재생 길이 구간에 맞춰 ARCore를 샘플링하고,
+     * [recordingStartTimestampNs] + frameIndex × interval 로 이미지 타임라인과 정렬한다.
      */
-    fun captureFullVideoTimelineOrNull(context: Context, videoFile: File): JSONObject? {
+    fun captureFullVideoTimelineOrNull(
+        context: Context,
+        videoFile: File,
+        recordingStartTimestampNs: Long? = VideoRecordingSessionRegistry.recordingStartTimestampNs,
+        captureWidth: Int = captureResolutionForContext(context).width,
+        captureHeight: Int = captureResolutionForContext(context).height,
+    ): JSONObject? {
         if (!availabilityInstalled(context)) return null
         if (!videoFile.isFile) return null
 
@@ -86,6 +180,8 @@ object ArcorePoseSnapshotter {
         val targetWallMs = durationMs.coerceIn(100L, 600_000L)
         val intervalMs = 33L
         val maxFrames = 1200
+        val timelineStartNs = recordingStartTimestampNs
+            ?: (SystemClock.elapsedRealtimeNanos() - targetWallMs * 1_000_000L)
 
         return runArCoreSession(context) { session ->
             val warmupDeadline = SystemClock.elapsedRealtime() + 1_000L
@@ -100,8 +196,20 @@ object ArcorePoseSnapshotter {
             while (SystemClock.elapsedRealtime() - wallStart < targetWallMs && idx < maxFrames) {
                 val arFrame = session.update()
                 val videoTimeSec = (idx * intervalMs) / 1000.0
+                val imageTimestampNs = timelineStartNs + idx * intervalMs * 1_000_000L
                 frames.put(
-                    frameJsonObject(arFrame, videoFile.name, idx, videoTimeSec, null),
+                    frameJsonObject(
+                        arFrame,
+                        videoFile.name,
+                        FrameBuildConfig(
+                            captureWidth = captureWidth,
+                            captureHeight = captureHeight,
+                            imageTimestampNs = imageTimestampNs,
+                            videoTimeSec = videoTimeSec,
+                            timestampMatchMethod = "video_timeline",
+                        ),
+                        frameIndex = idx,
+                    ),
                 )
                 idx++
                 try {
@@ -112,17 +220,33 @@ object ArcorePoseSnapshotter {
             }
             if (frames.length() == 0) {
                 val arFrame = session.update()
-                frames.put(frameJsonObject(arFrame, videoFile.name, 0, 0.0, null))
+                frames.put(
+                    frameJsonObject(
+                        arFrame,
+                        videoFile.name,
+                        FrameBuildConfig(
+                            captureWidth = captureWidth,
+                            captureHeight = captureHeight,
+                            imageTimestampNs = timelineStartNs,
+                            videoTimeSec = 0.0,
+                            timestampMatchMethod = "video_timeline",
+                        ),
+                        frameIndex = 0,
+                    ),
+                )
             }
             JSONObject()
                 .put("mediaType", "video_full_timeline")
                 .put("videoFileName", videoFile.name)
                 .put("durationMs", durationMs)
                 .put("sampleIntervalMs", intervalMs)
+                .put("recordingStartTimestampNs", timelineStartNs)
+                .put("captureWidth", captureWidth)
+                .put("captureHeight", captureHeight)
                 .put(
                     "captureNoteKo",
-                    "녹화 종료 직후, 동영상 재생 길이와 같은 실시간 구간에서 ARCore 포즈를 샘플링했습니다. " +
-                        "디코딩된 영상의 각 프레임과 1:1 시각 동기는 보장되지 않습니다.",
+                    "녹화 시작 시각 기준으로 videoTimeSec·timestampNs를 정렬했습니다. " +
+                        "포즈는 녹화 종료 후 ARCore 세션에서 샘플링되며, intrinsics는 실제 촬영 해상도로 스케일됩니다.",
                 )
                 .put("frames", frames)
         }
@@ -131,13 +255,20 @@ object ArcorePoseSnapshotter {
     private const val MAX_INDIVIDUAL_FALLBACK_FRAMES = 80
 
     /**
-     * 데이터셋 스크린샷 파일명(정렬된 순서)마다 ARCore 프레임을 채운다.
-     * 한 세션 배치가 실패하거나 일부만 성공하면, 누락분에 한해 **새 세션으로 1프레임씩** 재시도한다.
-     * ARCore 미설치 시 빈 맵(이미지·ZIP은 호출측에서 그대로 저장).
+     * 촬영 순서대로 ARCore 프레임을 1:1 샘플링하고 [orderedMeta]의 imageTimestampNs와 매칭한다.
      */
     fun captureDatasetScreenshotsBestEffort(
         context: Context,
         imageFileNamesInOrder: List<String>,
+    ): LinkedHashMap<String, JSONObject> {
+        val orderedMeta = CaptureFrameMetaRegistry.orderedMetaFor(imageFileNamesInOrder)
+        return captureDatasetScreenshotsBestEffort(context, orderedMeta, imageFileNamesInOrder)
+    }
+
+    fun captureDatasetScreenshotsBestEffort(
+        context: Context,
+        orderedMeta: List<CaptureFrameMeta>,
+        imageFileNamesInOrder: List<String> = orderedMeta.map { it.fileName },
     ): LinkedHashMap<String, JSONObject> {
         val result = LinkedHashMap<String, JSONObject>()
         if (!availabilityInstalled(context) || imageFileNamesInOrder.isEmpty()) {
@@ -149,8 +280,9 @@ object ArcorePoseSnapshotter {
         } else {
             imageFileNamesInOrder
         }
+        val metaByName = orderedMeta.associateBy { it.fileName }
 
-        val fromBatch = runDatasetBatchSession(context, names)
+        val fromBatch = runDatasetBatchSession(context, names, metaByName)
         for ((k, v) in fromBatch) {
             result[k] = v
         }
@@ -162,7 +294,8 @@ object ArcorePoseSnapshotter {
         for (i in 0 until limit) {
             val fileName = missing[i]
             val idx = names.indexOf(fileName)
-            captureSingleDatasetFrameInNewSession(context, fileName, idx.coerceAtLeast(0))?.let {
+            val meta = metaByName[fileName]
+            captureSingleDatasetFrameInNewSession(context, fileName, idx.coerceAtLeast(0), meta)?.let {
                 result[fileName] = it
             }
             try {
@@ -173,9 +306,51 @@ object ArcorePoseSnapshotter {
         return result
     }
 
+    /**
+     * 동영상 타임라인 JSON에서 각 데이터셋 이미지에 가장 가까운 포즈를 찾아 반환한다.
+     */
+    fun matchDatasetImagesToTimeline(
+        timelineRoot: JSONObject,
+        datasetMeta: List<CaptureFrameMeta>,
+    ): LinkedHashMap<String, JSONObject> {
+        val framesArr = timelineRoot.optJSONArray("frames") ?: return linkedMapOf()
+        if (framesArr.length() == 0 || datasetMeta.isEmpty()) return linkedMapOf()
+
+        val timeline = ArrayList<Pair<Long, JSONObject>>(framesArr.length())
+        for (i in 0 until framesArr.length()) {
+            val jo = framesArr.optJSONObject(i) ?: continue
+            val ts = jo.optLong("timestampNs", jo.optLong("imageTimestampNs", -1L))
+            if (ts >= 0L) timeline.add(ts to jo)
+        }
+        timeline.sortBy { it.first }
+        if (timeline.isEmpty()) return linkedMapOf()
+
+        val out = LinkedHashMap<String, JSONObject>()
+        for ((index, meta) in datasetMeta.withIndex()) {
+            val targetTs = meta.imageTimestampNs
+            val nearest = timeline.minByOrNull { abs(it.first - targetTs) } ?: continue
+            val matched = JSONObject(nearest.second.toString()).apply {
+                put("filename", meta.fileName)
+                put("imageTimestampNs", meta.imageTimestampNs)
+                put("timestampNs", meta.imageTimestampNs)
+                put("arcoreTimestampNs", nearest.second.optLong("arcoreTimestampNs", nearest.first))
+                put(
+                    "timestampMatchDeltaNs",
+                    abs(nearest.first - meta.imageTimestampNs),
+                )
+                put("timestampMatchMethod", "nearest_timeline_sample")
+                meta.videoOffsetNs?.let { put("videoOffsetNs", it) }
+                put("datasetScreenshotIndex", index)
+            }
+            out[meta.fileName] = matched
+        }
+        return out
+    }
+
     private fun runDatasetBatchSession(
         context: Context,
         names: List<String>,
+        metaByName: Map<String, CaptureFrameMeta>,
     ): LinkedHashMap<String, JSONObject> {
         val batch = runArCoreSession(context) { session ->
             val out = LinkedHashMap<String, JSONObject>()
@@ -187,12 +362,34 @@ object ArcorePoseSnapshotter {
             names.forEachIndexed { index, fileName ->
                 try {
                     val arFrame = session.update()
+                    val meta = metaByName[fileName]
+                    val buildConfig = if (meta != null) {
+                        FrameBuildConfig(
+                            captureWidth = meta.captureWidth,
+                            captureHeight = meta.captureHeight,
+                            imageTimestampNs = meta.imageTimestampNs,
+                            videoTimeSec = meta.videoOffsetNs?.let { it / 1_000_000_000.0 },
+                            datasetScreenshotIndex = index,
+                            timestampMatchMethod = if (meta.videoOffsetNs != null) {
+                                "video_offset_index"
+                            } else {
+                                "index_pairing"
+                            },
+                        )
+                    } else {
+                        val preset = captureResolutionForContext(context)
+                        FrameBuildConfig(
+                            captureWidth = preset.width,
+                            captureHeight = preset.height,
+                            imageTimestampNs = null,
+                            datasetScreenshotIndex = index,
+                        )
+                    }
                     out[fileName] = frameJsonObject(
                         arFrame,
                         fileName,
-                        null,
-                        null,
-                        index,
+                        buildConfig,
+                        frameIndex = null,
                     )
                     Thread.sleep(8L)
                 } catch (_: Throwable) {
@@ -203,11 +400,11 @@ object ArcorePoseSnapshotter {
         return batch ?: linkedMapOf()
     }
 
-    /** 배치 세션이 깨졌을 때, 파일 하나당 짧은 ARCore 세션으로 1프레임만 수집 */
     private fun captureSingleDatasetFrameInNewSession(
         context: Context,
         fileName: String,
         datasetIndex: Int,
+        meta: CaptureFrameMeta?,
     ): JSONObject? {
         return runArCoreSession(context) { session ->
             val warmupDeadline = SystemClock.elapsedRealtime() + 800L
@@ -215,16 +412,32 @@ object ArcorePoseSnapshotter {
                 session.update()
             }
             val arFrame = session.update()
-            frameJsonObject(arFrame, fileName, null, null, datasetIndex)
+            val buildConfig = if (meta != null) {
+                FrameBuildConfig(
+                    captureWidth = meta.captureWidth,
+                    captureHeight = meta.captureHeight,
+                    imageTimestampNs = meta.imageTimestampNs,
+                    videoTimeSec = meta.videoOffsetNs?.let { it / 1_000_000_000.0 },
+                    datasetScreenshotIndex = datasetIndex,
+                )
+            } else {
+                val preset = captureResolutionForContext(context)
+                FrameBuildConfig(
+                    captureWidth = preset.width,
+                    captureHeight = preset.height,
+                    imageTimestampNs = null,
+                    datasetScreenshotIndex = datasetIndex,
+                )
+            }
+            frameJsonObject(arFrame, fileName, buildConfig, frameIndex = null)
         }
     }
 
     private fun frameJsonObject(
         frame: Frame,
         mediaFileName: String,
+        buildConfig: FrameBuildConfig,
         frameIndex: Int?,
-        videoTimeSec: Double?,
-        datasetScreenshotIndex: Int?,
     ): JSONObject {
         val camera = frame.camera
         val intr = camera.imageIntrinsics
@@ -235,30 +448,39 @@ object ArcorePoseSnapshotter {
         intr.getPrincipalPoint(principal, 0)
         intr.getImageDimensions(dims, 0)
 
+        val scaled = scaleIntrinsicsToCaptureResolution(
+            focal,
+            principal,
+            dims[0],
+            dims[1],
+            buildConfig.captureWidth,
+            buildConfig.captureHeight,
+        )
+
         val pose = camera.displayOrientedPose
         val t = FloatArray(3)
         val q = FloatArray(4)
         pose.getTranslation(t, 0)
         pose.getRotationQuaternion(q, 0)
 
+        val arcoreTimestampNs = frame.timestamp
+        val imageTimestampNs = buildConfig.imageTimestampNs ?: arcoreTimestampNs
+
         val obj = JSONObject()
         obj.put("filename", mediaFileName)
         if (frameIndex != null) obj.put("frameIndex", frameIndex)
-        if (videoTimeSec != null) obj.put("videoTimeSec", videoTimeSec)
-        if (datasetScreenshotIndex != null) {
-            obj.put("datasetScreenshotIndex", datasetScreenshotIndex)
-            obj.put(
-                "capturePipelineNote",
-                "동영상 데이터셋 스크린샷과 1:1로 묶인 ARCore 값; 포즈는 녹화 종료 후 동일 순서로 샘플링됨 " +
-                    "(녹화 중 셔터 시각과 픽셀 동기는 ARCore 공유 카메라 없이 불가).",
-            )
+        buildConfig.videoTimeSec?.let { obj.put("videoTimeSec", it) }
+        buildConfig.datasetScreenshotIndex?.let { idx ->
+            obj.put("datasetScreenshotIndex", idx)
         }
-        obj.put("fx", focal[0].toDouble())
-        obj.put("fy", focal[1].toDouble())
-        obj.put("cx", principal[0].toDouble())
-        obj.put("cy", principal[1].toDouble())
-        obj.put("imageWidth", dims[0])
-        obj.put("imageHeight", dims[1])
+        obj.put("fx", scaled.fx)
+        obj.put("fy", scaled.fy)
+        obj.put("cx", scaled.cx)
+        obj.put("cy", scaled.cy)
+        obj.put("imageWidth", scaled.imageWidth)
+        obj.put("imageHeight", scaled.imageHeight)
+        obj.put("arcoreSourceWidth", dims[0])
+        obj.put("arcoreSourceHeight", dims[1])
         obj.put("tx", t[0].toDouble())
         obj.put("ty", t[1].toDouble())
         obj.put("tz", t[2].toDouble())
@@ -267,7 +489,14 @@ object ArcorePoseSnapshotter {
         obj.put("qz", q[2].toDouble())
         obj.put("qw", q[3].toDouble())
         obj.put("trackingState", camera.trackingState.name)
-        obj.put("timestampNs", frame.timestamp)
+        obj.put("imageTimestampNs", imageTimestampNs)
+        obj.put("arcoreTimestampNs", arcoreTimestampNs)
+        obj.put("timestampNs", imageTimestampNs)
+        obj.put(
+            "timestampMatchDeltaNs",
+            abs(arcoreTimestampNs - imageTimestampNs),
+        )
+        obj.put("timestampMatchMethod", buildConfig.timestampMatchMethod)
         return obj
     }
 

@@ -258,6 +258,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -343,6 +345,8 @@ private suspend fun runBatchedArcoreMetadataSave(
     var failures = 0
     try {
         val map = withContext(Dispatchers.IO) {
+            val fileNames = photoFiles.map { it.name }
+            val orderedMeta = CaptureFrameMetaRegistry.orderedMetaFor(fileNames)
             if (photoFiles.size == 1) {
                 val f = photoFiles[0]
                 val root = ArcorePoseSnapshotter.capturePhotoMetadataOrNull(context, f.name)
@@ -351,7 +355,8 @@ private suspend fun runBatchedArcoreMetadataSave(
             } else {
                 ArcorePoseSnapshotter.captureDatasetScreenshotsBestEffort(
                     context,
-                    photoFiles.map { it.name },
+                    orderedMeta,
+                    fileNames,
                 )
             }
         }
@@ -425,6 +430,7 @@ fun CameraScreen(
     var arcoreMetaEnabled by remember {
         mutableStateOf(CameraArCorePrefs.isArCoreMetaEnabled(context))
     }
+    val selectedResolution = ResolutionPreset.forArCoreEnabled(arcoreMetaEnabled)
     var cameraRebindNonce by remember { mutableIntStateOf(0) }
     var pendingArcoreForVideo by remember { mutableStateOf(false) }
     var pendingVideoDatasetDirForArcore by remember { mutableStateOf<File?>(null) }
@@ -440,6 +446,15 @@ fun CameraScreen(
         onDispose { mediaActionSound.release() }
     }
     val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                arcoreMetaEnabled = CameraArCorePrefs.isArCoreMetaEnabled(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
     var videoCapture: VideoCapture<androidx.camera.video.Recorder>? by remember { mutableStateOf(null) }
     var lensFacing by remember { mutableStateOf(CameraSelector.LENS_FACING_BACK) }
@@ -473,7 +488,6 @@ fun CameraScreen(
     var previewOriginInRoot by remember { mutableStateOf<Offset?>(null) }
     var datasetDir by remember { mutableStateOf<File?>(null) }
     var isDatasetCollectionEnabled by remember { mutableStateOf(true) }
-    var selectedResolution by remember { mutableStateOf(ResolutionPreset.RESOLUTION_1024x1024) }
     var azimuthDegrees by remember { mutableStateOf(0f) }
     /**
      * 그리드 오버레이 및 커버리지 기록 전용 방위각.
@@ -607,7 +621,7 @@ fun CameraScreen(
         onDispose { meshAnalysisExecutor.shutdown() }
     }
 
-    // [추가] 경차 촬영(OBJECT) 전용: 사물이 중앙 가상 사각형(1000x1000) 밖으로 벗어났는지 경고
+    // [추가] 경차 촬영(OBJECT) 전용: 사물이 중앙 가상 사각형(640x480) 밖으로 벗어났는지 경고
     DisposableEffect(Unit) {
         onDispose {
             try {
@@ -1150,7 +1164,7 @@ fun CameraScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(1f)
+                    .aspectRatio(selectedResolution.aspectRatio)
                     .clip(RectangleShape)
                     .onGloballyPositioned { coords ->
                         previewOriginInRoot = coords.positionInRoot()
@@ -1889,12 +1903,17 @@ fun CameraScreen(
                                                                     }
                                                                 }
 
+                                                                val captureRes = captureResolutionForContext(context)
                                                                 val timelineJson =
                                                                     withContext(Dispatchers.IO) {
                                                                         ArcorePoseSnapshotter
                                                                             .captureFullVideoTimelineOrNull(
                                                                                 context,
                                                                                 videoFile,
+                                                                                recordingStartTimestampNs =
+                                                                                    VideoRecordingSessionRegistry.recordingStartTimestampNs,
+                                                                                captureWidth = captureRes.width,
+                                                                                captureHeight = captureRes.height,
                                                                             )
                                                                     }
                                                                 if (timelineJson == null) {
@@ -1947,6 +1966,36 @@ fun CameraScreen(
                                                                     )
                                                                     datasetDirForCleanup?.let { d ->
                                                                         if (d.exists() && d.isDirectory) {
+                                                                            val imageFiles = d.listFiles()
+                                                                                ?.filter { f ->
+                                                                                    f.isFile &&
+                                                                                        f.name.endsWith(
+                                                                                            ".jpg",
+                                                                                            ignoreCase = true,
+                                                                                        )
+                                                                                }
+                                                                                ?.sortedBy { it.name }
+                                                                                ?: emptyList()
+                                                                            if (imageFiles.isNotEmpty() && timelineJson != null) {
+                                                                                val meta =
+                                                                                    CaptureFrameMetaRegistry.orderedMetaFor(
+                                                                                        imageFiles.map { it.name },
+                                                                                    )
+                                                                                val matched =
+                                                                                    ArcorePoseSnapshotter.matchDatasetImagesToTimeline(
+                                                                                        timelineJson,
+                                                                                        meta,
+                                                                                    )
+                                                                                if (matched.isNotEmpty()) {
+                                                                                    ArcoreLibrary.saveVideoDatasetArcoreZip(
+                                                                                        context,
+                                                                                        d,
+                                                                                        imageFiles,
+                                                                                        matched,
+                                                                                        videoFile,
+                                                                                    )
+                                                                                }
+                                                                            }
                                                                             val fs = d.listFiles()
                                                                             if (fs == null || fs.isEmpty()) {
                                                                                 d.delete()
@@ -1964,6 +2013,7 @@ fun CameraScreen(
                                                                     ).show()
                                                                 }
                                                             } finally {
+                                                                VideoRecordingSessionRegistry.markStop()
                                                                 withContext(Dispatchers.Main) {
                                                                     cameraRebindNonce++
                                                                 }

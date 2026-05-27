@@ -2748,6 +2748,23 @@ internal suspend fun saveEditedImage(
     }
 }
 
+internal fun recordCaptureFrameMeta(
+    context: Context,
+    fileName: String,
+    imageTimestampNs: Long,
+) {
+    val preset = captureResolutionForContext(context)
+    CaptureFrameMetaRegistry.record(
+        CaptureFrameMeta(
+            fileName = fileName,
+            imageTimestampNs = imageTimestampNs,
+            captureWidth = preset.width,
+            captureHeight = preset.height,
+            videoOffsetNs = VideoRecordingSessionRegistry.offsetNsAtCapture(imageTimestampNs),
+        ),
+    )
+}
+
 internal fun takePhoto(
     context: Context,
     imageCapture: ImageCapture,
@@ -2769,6 +2786,11 @@ internal fun takePhoto(
             }
 
             override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                recordCaptureFrameMeta(
+                    context,
+                    photoFile.name,
+                    SystemClock.elapsedRealtimeNanos(),
+                )
                 onPhotoTaken(Uri.fromFile(photoFile), photoFile)
             }
         }
@@ -2801,6 +2823,11 @@ internal suspend fun takePhotoSuspend(
             }
 
             override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                recordCaptureFrameMeta(
+                    context,
+                    photoFile.name,
+                    SystemClock.elapsedRealtimeNanos(),
+                )
                 resumeOk(Pair(Uri.fromFile(photoFile), photoFile))
             }
         },
@@ -2835,12 +2862,14 @@ internal fun startVideoRecording(
             .start(ContextCompat.getMainExecutor(context)) { event ->
                 when (event) {
                     is VideoRecordEvent.Start -> {
+                        VideoRecordingSessionRegistry.markStart()
                     }
                     is VideoRecordEvent.Finalize -> {
                         if (!event.hasError()) {
                             val videoUri = Uri.fromFile(videoFile)
                             onVideoSaved(videoUri, videoFile)
                         } else {
+                            VideoRecordingSessionRegistry.markStop()
                             event.cause?.printStackTrace()
                         }
                     }
@@ -2975,6 +3004,42 @@ internal fun saveBitmapToFile(bitmap: android.graphics.Bitmap, file: File) {
     }
 }
 
+internal fun normalizeCapturedBitmap(
+    bitmap: android.graphics.Bitmap,
+    targetWidth: Int,
+    targetHeight: Int,
+): android.graphics.Bitmap {
+    val targetAspect = targetWidth.toFloat() / targetHeight
+    val sourceWidth = bitmap.width
+    val sourceHeight = bitmap.height
+    val sourceAspect = sourceWidth.toFloat() / sourceHeight
+
+    val cropWidth: Int
+    val cropHeight: Int
+    val xOffset: Int
+    val yOffset: Int
+    if (sourceAspect > targetAspect) {
+        cropHeight = sourceHeight
+        cropWidth = (sourceHeight * targetAspect).toInt().coerceAtMost(sourceWidth)
+        xOffset = (sourceWidth - cropWidth) / 2
+        yOffset = 0
+    } else {
+        cropWidth = sourceWidth
+        cropHeight = (sourceWidth / targetAspect).toInt().coerceAtMost(sourceHeight)
+        xOffset = 0
+        yOffset = (sourceHeight - cropHeight) / 2
+    }
+
+    val croppedBitmap = android.graphics.Bitmap.createBitmap(
+        bitmap, xOffset, yOffset, cropWidth, cropHeight,
+    )
+    return if (cropWidth == targetWidth && cropHeight == targetHeight) {
+        croppedBitmap
+    } else {
+        android.graphics.Bitmap.createScaledBitmap(croppedBitmap, targetWidth, targetHeight, true)
+    }
+}
+
 internal suspend fun captureDatasetImageAndAwait(
     context: Context,
     sectorIndex: Int,
@@ -3022,22 +3087,15 @@ internal suspend fun captureDatasetImageAndAwait(
                             return
                         }
 
-                        val originalWidth = bitmap.width
-                        val originalHeight = bitmap.height
-                        val size = if (originalWidth < originalHeight) originalWidth else originalHeight
-                        val xOffset = (originalWidth - size) / 2
-                        val yOffset = (originalHeight - size) / 2
-
-                        var croppedBitmap = android.graphics.Bitmap.createBitmap(
-                            bitmap, xOffset, yOffset, size, size,
+                        val captureTimestampNs = SystemClock.elapsedRealtimeNanos()
+                        val capturePreset = ResolutionPreset.forArCoreEnabled(
+                            CameraArCorePrefs.isArCoreMetaEnabled(context),
                         )
-
-                        if (size != 1024) {
-                            croppedBitmap = android.graphics.Bitmap.createScaledBitmap(
-                                croppedBitmap, 1024, 1024, true,
-                            )
-                        }
-                        bitmap = croppedBitmap
+                        bitmap = normalizeCapturedBitmap(
+                            bitmap!!,
+                            capturePreset.width,
+                            capturePreset.height,
+                        )
 
                         if (validationCallback != null) {
                             if (!validationCallback.invoke(bitmap!!)) {
@@ -3050,6 +3108,7 @@ internal suspend fun captureDatasetImageAndAwait(
                         }
 
                         saveBitmapToFile(bitmap!!, file)
+                        recordCaptureFrameMeta(context, file.name, captureTimestampNs)
                         resumeOk(true)
                     } catch (e: Exception) {
                         e.printStackTrace()
