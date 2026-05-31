@@ -1,6 +1,8 @@
 package com.example.app_01
 
+import android.graphics.BitmapFactory
 import android.os.SystemClock
+import java.io.File
 import java.util.Collections
 
 /** 촬영 직후 기록되는 프레임 메타 — ARCore poses.json과 1:1로 묶을 때 사용 */
@@ -13,6 +15,22 @@ data class CaptureFrameMeta(
     /** 동영상 녹화 중 촬영 시 녹화 시작 대비 오프셋(ns). 단일·연속 사진은 null. */
     val videoOffsetNs: Long? = null,
 )
+
+/** 저장된 JPEG 실제 픽셀 크기 (EXIF 회전 반영 전 파일 기준). */
+fun readJpegFileDimensions(file: File): Pair<Int, Int>? {
+    if (!file.isFile || file.length() <= 0L) return null
+    return try {
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, opts)
+        if (opts.outWidth > 0 && opts.outHeight > 0) {
+            opts.outWidth to opts.outHeight
+        } else {
+            null
+        }
+    } catch (_: Exception) {
+        null
+    }
+}
 
 object CaptureFrameMetaRegistry {
     private val byFileName = Collections.synchronizedMap(LinkedHashMap<String, CaptureFrameMeta>())

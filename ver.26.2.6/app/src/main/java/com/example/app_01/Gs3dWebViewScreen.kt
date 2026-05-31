@@ -9,6 +9,7 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -53,6 +54,8 @@ fun Gs3dWebViewScreen(
         }
     }
     android.util.Log.i("Gs3dWebView", "Loading URL: $validatedUrl")
+
+    BackHandler(onBack = onClose)
 
     Column(modifier = modifier.fillMaxSize()) {
         Row(

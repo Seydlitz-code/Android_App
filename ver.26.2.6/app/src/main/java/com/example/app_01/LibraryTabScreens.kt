@@ -4474,12 +4474,7 @@ fun GalleryScreen(
                                     .clip(RoundedCornerShape(8.dp))
                                     .background(completionBtnBg)
                                     .clickable {
-                                        val payload = buildPoliceInsurance3dgsPayload(
-                                            context,
-                                            spb,
-                                            basePrompt = "위 입력 파일을 기반으로 사고현장 분석 보고서를 작성하라",
-                                            galleryImageUris = loadCapturedAndDatasetImageUrisForReportSync(context),
-                                        )
+                                        val payload = buildPoliceInsurance3dgsPayload(context, spb)
                                         onServerPipelineStart3dgsAi(
                                             Pending3dgsServerAutoSend(
                                                 nonce = System.nanoTime(),
@@ -5511,10 +5506,11 @@ fun GalleryScreen(
                                                         if (pipelineResult == null) {
                                                             mainHandler.post {
                                                                 isUploading = false
-                                                                uploadResultPopupMessage =
-                                                                    if (uploadMessage == noServerResponseMsg) noServerResponseMsg else "업로드 실패"
+                                                                uploadResultPopupMessage = formatServerUploadFailurePopup(
+                                                                    uploadMessage,
+                                                                    noServerResponseMsg,
+                                                                )
                                                                 showUploadResultPopup = true
-                                                                if (uploadMessage != noServerResponseMsg) uploadMessage = "업로드 실패"
                                                             }
                                                         }
                                                     } catch (t: Throwable) {
@@ -5639,10 +5635,11 @@ fun GalleryScreen(
                                                         if (!pipelineOk) {
                                                             mainHandler.post {
                                                                 isUploading = false
-                                                                uploadResultPopupMessage =
-                                                                    if (uploadMessage == noServerResponseMsg) noServerResponseMsg else "업로드 실패"
+                                                                uploadResultPopupMessage = formatServerUploadFailurePopup(
+                                                                    uploadMessage,
+                                                                    noServerResponseMsg,
+                                                                )
                                                                 showUploadResultPopup = true
-                                                                if (uploadMessage != noServerResponseMsg) uploadMessage = "업로드 실패"
                                                             }
                                                         }
                                                     } catch (t: Throwable) {
@@ -5719,12 +5716,11 @@ fun GalleryScreen(
                                                                     ).show()
                                                                 }
                                                             } else {
-                                                                uploadResultPopupMessage =
-                                                                    if (uploadMessage == noServerResponseMsg) noServerResponseMsg else "업로드 실패"
+                                                                uploadResultPopupMessage = formatServerUploadFailurePopup(
+                                                                    uploadMessage,
+                                                                    noServerResponseMsg,
+                                                                )
                                                                 showUploadResultPopup = true
-                                                                if (uploadMessage != noServerResponseMsg) {
-                                                                    uploadMessage = "업로드 실패"
-                                                                }
                                                             }
                                                         }
                                                     } catch (t: Throwable) {

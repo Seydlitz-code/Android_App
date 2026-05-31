@@ -113,6 +113,16 @@ API 키는 `local.properties`의 `claude_api_key`, `openai_api_key`, `gemini_api
 - **`GET /results/{task_id}`** 로 파일 목록·URL 확보 후 순차 다운로드 (버퍼·yield 간격으로 UI·OOM 완화).
 - 신뢰되지 않은 HTTPS 환경용 커스텀 SSL 우회 옵션 등이 포함되어 있습니다(현장 디바이스 편의 목적 — 운영 시 보안 검토 필요).
 
+### 7.6 서버 연결 기본값·LAN 전환 (ver 5.29 작업 중)
+
+- **기본 서버**: `192.168.0.17:8000` · **HTTP** (`DEFAULT_USE_HTTPS = false`). 동일 Wi‑Fi LAN에서 PC FastAPI(`uvicorn main:app --host 0.0.0.0 --port 8000`)에 직접 연결하는 구성을 전제로 합니다.
+- **레거시 ngrok 마이그레이션**: `AppApplication.onCreate` → `migrateLegacyServerSettingsIfNeeded()` — 기존 ngrok 호스트·443·HTTPS 설정을 LAN 기본값으로 자동 교체.
+- **LAN 호스트 정규화**: `isLikelyLanHost`, `normalizeServerUseHttps` — 사설 IP에 HTTPS가 켜져 있으면 HTTP로 강제 정규화(SSL 오류 방지).
+- **연결 테스트 강화**: `testServerConnection` → `ServerConnectionTestResult` — `/`, `/docs`, `/openapi.json`, `/health`, `/upload` 순으로 GET 프로브 후 `/upload` 도달 여부 확인. 성공 시 설정 자동 저장.
+- **콜백 URL**: `resolvePipelineCallbackUrlForUpload` — 같은 Wi‑Fi에서는 휴대폰 로컬 IP(`PipelineCallbackHttpServer`)를 `callback_url`로 우선 사용.
+- **업로드 실패 UX**: `formatServerUploadFailurePopup` — 진행 메시지에 서버 상세 오류가 있으면 팝업에 그대로 표시.
+- **네트워크 보안**: `res/xml/network_security_config.xml` — LAN cleartext HTTP 허용(매니페스트 `networkSecurityConfig` 참조).
+
 ### 7.4 다운로드 후 처리 (`ServerPipelinePostDownload.kt`)
 
 - 매니페스트 기록 (`writeServerTaskArtifactManifest`).
@@ -137,6 +147,7 @@ API 키는 `local.properties`의 `claude_api_key`, `openai_api_key`, `gemini_api
 
 - CameraX Preview/ImageCapture/VideoCapture 및 분석용 ImageAnalysis 등 모드별 바인딩.
 - **ARCore**: 세션·포즈 메타를 프레임과 함께 기록 (`ArcorePoseSnapshotter`, `ArcoreLibrary`, `JsonLibrary.saveArCoreFramesJson` 등과 연계).
+  - **ver 5.28~5.29**: `TRACKING` 상태 프레임만 `poses.json`에 포함. JPEG **실제 저장 해상도**(`readJpegFileDimensions`, `CaptureFrameMetaRegistry`)로 intrinsics 스케일. 동영상 타임라인은 인덱스 기반 매칭(`video_timeline_index`). CameraX `imageInfo.timestamp`를 촬영 시각으로 사용.
 - 연속 촬영·동영상·모바일 스페이스 스캔 관련 보조 UI (`MobileSpace*` 클래스들과 연동).
 
 ---
@@ -186,6 +197,10 @@ API 키는 `local.properties`의 `claude_api_key`, `openai_api_key`, `gemini_api
 | `ClaudeChatClient.kt` / `AnthropicApi.kt` | Anthropic API 호출 |
 | `ChatThreadStorage.kt` | 채팅 스레드 영속화 |
 | `ArcoreLibrary.kt` / `ArcorePoseSnapshotter.kt` | ARCore 에셋·포즈 |
+| `CaptureFrameMetaRegistry.kt` | 촬영 프레임 메타(JPEG 해상도·타임스탬프) — poses.json 1:1 매칭 |
+| `HtmlReportWebViewScreen.kt` / `ThreeDgsChatHtmlExport.kt` | HTML 보고서 WebView·내보내기 (ver 5.27) |
+| `ThreeDgsChatPdfExport.kt` | 채팅 PDF 내보내기 (ver 5.19) |
+| `res/xml/network_security_config.xml` | LAN cleartext HTTP 허용 (ver 5.29) |
 | `BackgroundRemovalProcessor.kt` / `GlareRemovalProcessor.kt` | 이미지 후처리 |
 | `AppUiPalette.kt` / `ui/theme/Theme.kt` | 테마·색상 |
 
@@ -196,12 +211,94 @@ API 키는 `local.properties`의 `claude_api_key`, `openai_api_key`, `gemini_api
 ## 14. 빌드·실행 시 참고
 
 - **Gradle**: `ver.26.2.6` 디렉터리에서 `./gradlew assembleDebug` 등.
-- **클리어텍스트**: 매니페스트 `usesCleartextTraffic=true` — 로컬/테스트 편의용; 배포 빌드에서는 네트워크 보안 설정 검토 권장.
+- **클리어텍스트**: 매니페스트 `usesCleartextTraffic=true` + `network_security_config.xml` — LAN HTTP 업·다운로드 허용; 외부 배포 시 보안 검토 권장.
 - **대용량 에셋**: `noCompress`에 `tflite`, `onnx`, `gz` 등이 포함되어 있습니다.
 
 ---
 
-## 15. 문서 유지보수
+## 15. 업데이트 기록
+
+Git 커밋 메시지·변경 파일을 기준으로 정리했습니다. 최신 항목이 위에 옵니다.
+
+### ver 5.29 (작업 중, 미커밋)
+
+| 영역 | 내용 |
+|------|------|
+| 서버·네트워크 | ngrok 기본값 → **LAN HTTP**(`192.168.0.17:8000`) 전환. 레거시 설정 자동 마이그레이션, LAN HTTPS 정규화, 다중 경로 연결 테스트·실패 메시지 상세화, 업로드 로그·`Accept: application/json` 헤더 |
+| 네트워크 보안 | `network_security_config.xml` 추가 — 사설 IP·localhost cleartext 허용 |
+| ARCore | `TRACKING` 전용 프레임 필터·`waitForTrackingFrame`, JPEG 실제 픽셀 크기 반영, 동영상 타임라인 인덱스 매칭, intrinsics 재스케일 |
+| UI/UX | `Gs3dWebViewScreen`·`HtmlReportWebViewScreen` 시스템 뒤로가기(`BackHandler`) 처리. 서버 설정 화면 LAN 안내 문구·플레이스홀더 갱신 |
+| 업로드 UX | `formatServerUploadFailurePopup` — 서버 오류 상세를 팝업에 표시 |
+
+### ver 5.28 (2026-05-28)
+
+- **ARCore 버그 수정**: `ArcorePoseSnapshotter` 대폭 개선 — 포즈·intrinsics·타임스탬프 매칭 정확도 향상, `CaptureFrameMetaRegistry` 확장.
+- **카메라**: `CameraTabScreens` ARCore 메타 저장 시 `TRACKING` 검증, `ObjectOutOfFrameWarning` 조정.
+- **최적화**: `AppMainEnums`, `MainActivity` 촬영 메타 기록 경로 정리.
+
+### ver 5.27 (2026-05-27)
+
+- **AI 채팅 리팩터**: `ClaudeChatClient.kt`·`AiChatTabScreens.kt` 클린코드 기반 함수 최적화.
+- **HTML 보고서**: `HtmlReportWebViewScreen.kt`, `ThreeDgsChatHtmlExport.kt` 신규 — 채팅 결과 HTML 미리보기·내보내기.
+- **공통 유틸**: `AppExtensions.kt` 추가.
+- **기타**: `PoliceInsuranceDocxWriter`, `LibraryTabScreens`, `ServerPipelineNetworking` 소규모 개선.
+
+### ver 5.21.x (2026-05-21)
+
+- **5.21.4** — AI 탭 UI/UX 버그 픽스.
+- **5.21.3 / 5.21.2** — 연속 패치(커밋 메시지: 버전 업데이트).
+- **5.21.1** — 미사용 스크립트·실험 폴더(`cv_test_py`, `cv_test_cpp`) 정리. **`PROJECT_INDEX.md` 최초 작성**. `ArcoreLibrary`, `PipelineCallbackHttpServer` 보강.
+- **5.21** — **서로 다른 Wi‑Fi 환경 통신**: `resolvePipelineCallbackUrlForUpload` — LAN일 때 휴대폰 로컬 콜백 URL 우선. `PlyLibrary.kt` 추가. 라이브러리·카메라 UI 대규모 리팩터.
+
+### ver 5.20 (2026-05-20)
+
+- **서버 전송 방식 수정**: `LibraryTabScreens` 업로드 플로우 개선.
+
+### ver 5.19 (2026-05-19)
+
+- **대규모 기능 추가**: AI 채팅·카메라·라이브러리·프로필 전면 개편.
+- **PDF 내보내기**: `ThreeDgsChatPdfExport.kt` 신규(약 500줄).
+- **3DGS WebView**: `Gs3dWebViewScreen.kt` 개선.
+- **캐시·서버**: `AppCacheCleaner`, `ServerPipelineNetworking` 확장.
+
+### ver 5.16 ~ 5.17 (2026-05-16 ~ 05-17)
+
+- **5.16.2 / 5.16** — **서버 다운로드 중 강제 종료(OOM) 수정**. `ServerPipelineNetworking.kt`를 `MainActivity`에서 분리(1,500줄+). `AppWarningLog`, `AppCacheCleaner`, `ServerPipelinePostDownload.kt`, `PointCloudQualityReport.kt` 추가. `PipelineCallbackHttpServer` 스트리밍·OOM 방어 강화.
+- **5.7 (5.17)** — **3DGS WebView 수신 오류 수정**. 콜백 서버·라이브러리·프로필 리팩터.
+
+### ver 5.11 ~ 5.9 (2026-05-09 ~ 05-11)
+
+- **5.11.2 / 5.11** — 서버 파일 다운로드 크래시 수정. 다운로드 후 분석 파이프라인 단일화. `PipelineCallbackHttpServer` 이벤트 처리 개선.
+- **5.9** — **서버 업로드**: `file_pc`·`file_gs`(ARCore ZIP) 동시 멀티파트 전송. `PipelineCallbackHttpServer.kt` 신규(161줄). `ServerTaskArtifactHelpers` 확장.
+
+### ver 5.8.x ~ 5.7 (2026-05-07 ~ 05-08)
+
+- **5.8.2 / 5.8.1 / 5.7.3 / 5.7.2 / 5.7** — 연속 안정화·최적화 패치(카메라, 라이브러리, 서버 연동 세부 조정).
+
+### ver 5.6 ~ 5.5 (2026-05-05 ~ 05-06)
+
+- 버전 업데이트·기능 보완(커밋 메시지: 버전 업데이트).
+
+### ver 4.29 (2026-04-29)
+
+- 버전 업데이트.
+
+### ver 3.x — 초기 AI CAD·3D 뷰어 (2026-03 ~ 04)
+
+| 버전 | 주요 내용 |
+|------|-----------|
+| **기능 업데이트 (4월)** | 3D 뷰어·라이브러리 UI 개선. `Model3dThumbnail.kt`, `ModelLibraryPaths.kt`, `ObjViewer.kt` 대폭 확장 |
+| **VGGT 뷰어 (4/3)** | AI CAD 파이프라인 전체 도입 — `AiCadPipeline.kt`, OpenSCAD→STL→GLB(`StlToGlbConverter.kt`), `ClaudeChatClient` 확장, `GlareRemovalProcessor.kt`, 채팅 스레드 저장(`ChatThreadStorage.kt`) |
+| **3.18 ~ 3.19 (3월)** | 초기 Compose 앱 골격·카메라·라이브러리 기반 구축 |
+
+### 저장소 초기 (2026-02-09)
+
+- **Initial commit** — `ver.26.2.6` Android 프로젝트 생성.
+
+---
+
+## 16. 문서 유지보수
 
 - 이 인덱스는 코드 스냅샷 기준이며, 화면 이름·문구 리팩터링 후에는 해당 파일 경로만 확인하면 됩니다.
+- **업데이트 기록(§15)** 은 커밋·작업 트리 변경 시 함께 갱신하세요.
 - 서버 API 계약은 실제 배포되는 **`main.py`(저장소 외부)** 와 주석·상수를 반드시 교차 검증하세요 (`PipelineCallbackEvents`, multipart 필드명 등).

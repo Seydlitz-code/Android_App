@@ -804,11 +804,7 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                 if (bundle.taskId !in server3dgsLlmAutoHandledTaskIds) {
                                     server3dgsLlmAutoHandledTaskIds =
                                         server3dgsLlmAutoHandledTaskIds + bundle.taskId
-                                    val payload = buildPoliceInsurance3dgsPayload(
-                                        context,
-                                        bundle,
-                                        galleryImageUris = loadCapturedAndDatasetImageUrisForReportSync(context),
-                                    )
+                                    val payload = buildPoliceInsurance3dgsPayload(context, bundle)
                                     val jobPayload = Pending3dgsServerAutoSend(
                                         nonce = System.nanoTime(),
                                         promptText = payload.first,
@@ -2752,14 +2748,20 @@ internal fun recordCaptureFrameMeta(
     context: Context,
     fileName: String,
     imageTimestampNs: Long,
+    captureWidth: Int? = null,
+    captureHeight: Int? = null,
+    imageFile: File? = null,
 ) {
+    val fromFile = imageFile?.let { readJpegFileDimensions(it) }
     val preset = captureResolutionForContext(context)
+    val width = captureWidth ?: fromFile?.first ?: preset.width
+    val height = captureHeight ?: fromFile?.second ?: preset.height
     CaptureFrameMetaRegistry.record(
         CaptureFrameMeta(
             fileName = fileName,
             imageTimestampNs = imageTimestampNs,
-            captureWidth = preset.width,
-            captureHeight = preset.height,
+            captureWidth = width,
+            captureHeight = height,
             videoOffsetNs = VideoRecordingSessionRegistry.offsetNsAtCapture(imageTimestampNs),
         ),
     )
@@ -2790,6 +2792,7 @@ internal fun takePhoto(
                     context,
                     photoFile.name,
                     SystemClock.elapsedRealtimeNanos(),
+                    imageFile = photoFile,
                 )
                 onPhotoTaken(Uri.fromFile(photoFile), photoFile)
             }
@@ -2827,6 +2830,7 @@ internal suspend fun takePhotoSuspend(
                     context,
                     photoFile.name,
                     SystemClock.elapsedRealtimeNanos(),
+                    imageFile = photoFile,
                 )
                 resumeOk(Pair(Uri.fromFile(photoFile), photoFile))
             }
@@ -3087,7 +3091,7 @@ internal suspend fun captureDatasetImageAndAwait(
                             return
                         }
 
-                        val captureTimestampNs = SystemClock.elapsedRealtimeNanos()
+                        val captureTimestampNs = image.imageInfo.timestamp
                         val capturePreset = ResolutionPreset.forArCoreEnabled(
                             CameraArCorePrefs.isArCoreMetaEnabled(context),
                         )
@@ -3108,7 +3112,14 @@ internal suspend fun captureDatasetImageAndAwait(
                         }
 
                         saveBitmapToFile(bitmap!!, file)
-                        recordCaptureFrameMeta(context, file.name, captureTimestampNs)
+                        recordCaptureFrameMeta(
+                            context,
+                            file.name,
+                            captureTimestampNs,
+                            captureWidth = bitmap!!.width,
+                            captureHeight = bitmap!!.height,
+                            imageFile = file,
+                        )
                         resumeOk(true)
                     } catch (e: Exception) {
                         e.printStackTrace()
@@ -3883,56 +3894,6 @@ internal fun loadCapturedImageUrisOnlySync(context: Context): List<Uri> {
     }
 }
 
-/** 서버 3DGS·보고서 LLM으로 보낼 이미지 개수 상한 (비전 API 부담·요청 크기 완화) */
-internal const val MAX_SCENE_IMAGES_FOR_3DGS_PAYLOAD = 48
-
-private fun isLocalReportImageFile(file: File): Boolean {
-    if (!file.isFile) return false
-    return when (file.extension.lowercase(Locale.ROOT)) {
-        "jpg", "jpeg", "png", "webp", "heic", "heif" -> true
-        else -> false
-    }
-}
-
-/**
- * 3DGS 분석 보고서 첨부용 이미지 URI: **메인 갤러리** + **`datasets/` 하위** 사고·촬영 폴더.
- *
- * [loadCapturedMediaSync]는 의도적으로 `datasets/`를 스캔에서 빼므로, 그대로만 쓰면 데이터셋에만 있는
- * 사고 현장 사진이 LLM 시각 입력에서 빠집니다. 서버에서 내려준 topview/sideview 등은
- * [buildPoliceInsurance3dgsPayload]에서 별도로 붙습니다.
- */
-internal fun loadCapturedAndDatasetImageUrisForReportSync(
-    context: Context,
-    maxCount: Int = MAX_SCENE_IMAGES_FOR_3DGS_PAYLOAD,
-): List<Uri> {
-    val capped = maxCount.coerceIn(8, 96)
-    val entries = mutableListOf<Pair<Uri, Long>>()
-    for (uri in loadCapturedMediaSync(context)) {
-        val path = uri.path ?: continue
-        val f = File(path)
-        if (!isLocalReportImageFile(f)) continue
-        entries.add(uri to mediaSortTimeMillis(f))
-    }
-    val mediaDir = context.getExternalFilesDir(null)
-    if (mediaDir != null) {
-        val dsRoot = File(mediaDir, "datasets")
-        if (dsRoot.isDirectory) {
-            dsRoot.walkTopDown()
-                .filter { isLocalReportImageFile(it) }
-                .forEach { file ->
-                    entries.add(Uri.fromFile(file) to mediaSortTimeMillis(file))
-                }
-        }
-    }
-    return entries
-        .distinctBy { p ->
-            runCatching { File(p.first.path!!).canonicalPath }.getOrDefault(p.first.toString())
-        }
-        .sortedByDescending { it.second }
-        .take(capped)
-        .map { it.first }
-}
-
 internal fun resolveDisplayName(context: Context, uri: Uri): String? {
     return try {
         if (uri.scheme == "content") {
@@ -4195,7 +4156,7 @@ internal suspend fun uploadZipAndRunPipeline(
         val taskId = startResult.taskId
         if (taskId.isNullOrBlank()) {
             val detail = startResult.errorDetail?.trim().takeUnless { it.isNullOrBlank() } ?: noResponseMsg
-            mainHandler.post { onProgress(0, detail) }
+            withContext(Dispatchers.Main) { onProgress(0, detail) }
             appCtx.stopService(Intent(appCtx, AppForegroundService::class.java))
             return null
         }
@@ -5179,7 +5140,7 @@ fun ServerSettingsScreen(
             value = serverAddress,
             onValueChange = { serverAddress = it },
             label = { Text("서버 주소 (IP 또는 도메인)", color = palette.onBackground) },
-            placeholder = { Text("예: wise-annex-audacity.ngrok-free.dev", color = Color.LightGray) },
+            placeholder = { Text("예: 192.168.0.17", color = Color.LightGray) },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             colors = fieldColors
@@ -5195,7 +5156,7 @@ fun ServerSettingsScreen(
                 }
             },
             label = { Text("포트 번호", color = palette.onBackground) },
-            placeholder = { Text("예: 443", color = Color.LightGray) },
+            placeholder = { Text("예: 8000", color = Color.LightGray) },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             colors = fieldColors
@@ -5227,6 +5188,12 @@ fun ServerSettingsScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        Text(
+            text = "동일 Wi‑Fi LAN · HTTP (기본 $DEFAULT_SERVER_ADDRESS:$DEFAULT_SERVER_PORT). PC 서버는 --host 0.0.0.0 으로 실행해야 합니다.",
+            fontSize = 12.sp,
+            color = palette.onBackgroundMuted,
+            lineHeight = 16.sp,
+        )
         Text(
             text = "업로드: $UPLOAD_ENDPOINT",
             fontSize = 14.sp,
@@ -5279,11 +5246,17 @@ fun ServerSettingsScreen(
                     testResult = null
                     coroutineScope.launch {
                         val port = serverPort.toIntOrNull() ?: DEFAULT_SERVER_PORT
-                        val success = testServerConnection(context, serverAddress, port, useHttps)
-                        testResult = if (success) {
-                            "연결 성공!"
+                        val addr = serverAddress.trim()
+                        val httpsForTest = normalizeServerUseHttps(addr, useHttps)
+                        val testOutcome = testServerConnection(context, addr, port, httpsForTest)
+                        if (testOutcome.success) {
+                            saveServerSettings(context, addr, port, httpsForTest)
+                            if (httpsForTest != useHttps) {
+                                useHttps = httpsForTest
+                            }
+                            testResult = "연결 성공! (설정 저장됨 · 업로드에 동일 주소 사용)\n${testOutcome.message}"
                         } else {
-                            "연결 실패. 서버 주소, 포트, 프로토콜을 확인하세요."
+                            testResult = testOutcome.message
                         }
                         isTesting = false
                     }

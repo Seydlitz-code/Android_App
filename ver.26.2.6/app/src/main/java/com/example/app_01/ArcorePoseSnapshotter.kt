@@ -24,12 +24,15 @@ import kotlin.math.abs
  * CameraX와 동시에 후면 카메라를 잡고 있을 수 없어, 촬영 파일이 준비된 뒤 잠시 세션을 연다.
  *
  * poses.json 전송 시:
- * - fx/fy/cx/cy·imageWidth/imageHeight → [CaptureFrameMeta]의 실제 촬영 해상도로 스케일
- * - timestampNs → 이미지 촬영 시각([CaptureFrameMeta.imageTimestampNs])과 1:1 매칭
+ * - fx/fy/cx/cy·imageWidth/imageHeight → [CaptureFrameMeta]의 **저장 JPEG 실제 해상도**로 스케일
+ * - timestampNs → 촬영 시각([CaptureFrameMeta.imageTimestampNs]) 기준 (인덱스·타임라인 정렬)
+ * - trackingState == TRACKING 인 프레임만 포함
  */
 object ArcorePoseSnapshotter {
 
     private const val MAX_DATASET_ARCORE_FRAMES = 500
+    /** 단일 사진 직후 ARCore — 이 이내면 실시간 캡처로 간주 */
+    private const val SINGLE_PHOTO_MAX_DELTA_NS = 5_000_000_000L
 
     private data class ScaledIntrinsics(
         val fx: Double,
@@ -80,15 +83,59 @@ object ArcorePoseSnapshotter {
         )
     }
 
-    private fun configFromMeta(meta: CaptureFrameMeta?): FrameBuildConfig {
-        val width = meta?.captureWidth ?: ResolutionPreset.RESOLUTION_640x480.width
-        val height = meta?.captureHeight ?: ResolutionPreset.RESOLUTION_640x480.height
-        return FrameBuildConfig(
-            captureWidth = width,
-            captureHeight = height,
-            imageTimestampNs = meta?.imageTimestampNs,
-            timestampMatchMethod = if (meta?.videoOffsetNs != null) "video_offset" else "index_pairing",
+    private fun configFromMeta(meta: CaptureFrameMeta): FrameBuildConfig =
+        FrameBuildConfig(
+            captureWidth = meta.captureWidth,
+            captureHeight = meta.captureHeight,
+            imageTimestampNs = meta.imageTimestampNs,
+            timestampMatchMethod = if (meta.videoOffsetNs != null) "video_offset" else "index_pairing",
         )
+
+    /**
+     * TRACKING 상태 프레임만 반환. PAUSED/STOPPED 는 버리고 재시도한다.
+     */
+    private fun waitForTrackingFrame(
+        session: Session,
+        maxAttempts: Int = 60,
+        deadlineMs: Long = 2_500L,
+    ): Frame? {
+        val deadline = SystemClock.elapsedRealtime() + deadlineMs
+        var attempts = 0
+        while (attempts < maxAttempts && SystemClock.elapsedRealtime() < deadline) {
+            val frame = session.update()
+            if (frame.camera.trackingState == TrackingState.TRACKING) {
+                return frame
+            }
+            attempts++
+            try {
+                Thread.sleep(20L)
+            } catch (_: InterruptedException) {
+                break
+            }
+        }
+        return null
+    }
+
+    private fun rescaleIntrinsicsInJson(
+        frameJo: JSONObject,
+        targetWidth: Int,
+        targetHeight: Int,
+    ) {
+        val srcW = frameJo.optInt("imageWidth", targetWidth)
+        val srcH = frameJo.optInt("imageHeight", targetHeight)
+        if (srcW <= 0 || srcH <= 0 || (srcW == targetWidth && srcH == targetHeight)) {
+            frameJo.put("imageWidth", targetWidth)
+            frameJo.put("imageHeight", targetHeight)
+            return
+        }
+        val sx = targetWidth.toDouble() / srcW.toDouble()
+        val sy = targetHeight.toDouble() / srcH.toDouble()
+        frameJo.put("fx", frameJo.optDouble("fx") * sx)
+        frameJo.put("fy", frameJo.optDouble("fy") * sy)
+        frameJo.put("cx", frameJo.optDouble("cx") * sx)
+        frameJo.put("cy", frameJo.optDouble("cy") * sy)
+        frameJo.put("imageWidth", targetWidth)
+        frameJo.put("imageHeight", targetHeight)
     }
 
     /** 포즈·Intrinsics 스냅샷 전용: 평면/깊이/조명 추정 등 부가 파이프라인을 끄고 CPU·GPU 부하를 줄인다. */
@@ -125,16 +172,7 @@ object ArcorePoseSnapshotter {
         }
 
         return runArCoreSession(context) { session ->
-            var chosen: Frame? = null
-            val deadlineMs = SystemClock.elapsedRealtime() + 1_200L
-            var i = 0
-            while (i < 24 && SystemClock.elapsedRealtime() < deadlineMs) {
-                val frame = session.update()
-                chosen = frame
-                if (frame.camera.trackingState == TrackingState.TRACKING) break
-                i++
-            }
-            val frame = chosen ?: return@runArCoreSession null
+            val frame = waitForTrackingFrame(session) ?: return@runArCoreSession null
             JSONObject().put(
                 "frames",
                 JSONArray().put(
@@ -184,17 +222,14 @@ object ArcorePoseSnapshotter {
             ?: (SystemClock.elapsedRealtimeNanos() - targetWallMs * 1_000_000L)
 
         return runArCoreSession(context) { session ->
-            val warmupDeadline = SystemClock.elapsedRealtime() + 1_000L
-            while (SystemClock.elapsedRealtime() < warmupDeadline) {
-                val f = session.update()
-                if (f.camera.trackingState == TrackingState.TRACKING) break
-            }
+            waitForTrackingFrame(session, maxAttempts = 48, deadlineMs = 1_200L)
 
             val frames = JSONArray()
             val wallStart = SystemClock.elapsedRealtime()
             var idx = 0
             while (SystemClock.elapsedRealtime() - wallStart < targetWallMs && idx < maxFrames) {
-                val arFrame = session.update()
+                val arFrame = waitForTrackingFrame(session, maxAttempts = 8, deadlineMs = 400L)
+                    ?: break
                 val videoTimeSec = (idx * intervalMs) / 1000.0
                 val imageTimestampNs = timelineStartNs + idx * intervalMs * 1_000_000L
                 frames.put(
@@ -219,21 +254,7 @@ object ArcorePoseSnapshotter {
                 }
             }
             if (frames.length() == 0) {
-                val arFrame = session.update()
-                frames.put(
-                    frameJsonObject(
-                        arFrame,
-                        videoFile.name,
-                        FrameBuildConfig(
-                            captureWidth = captureWidth,
-                            captureHeight = captureHeight,
-                            imageTimestampNs = timelineStartNs,
-                            videoTimeSec = 0.0,
-                            timestampMatchMethod = "video_timeline",
-                        ),
-                        frameIndex = 0,
-                    ),
-                )
+                return@runArCoreSession null
             }
             JSONObject()
                 .put("mediaType", "video_full_timeline")
@@ -316,32 +337,34 @@ object ArcorePoseSnapshotter {
         val framesArr = timelineRoot.optJSONArray("frames") ?: return linkedMapOf()
         if (framesArr.length() == 0 || datasetMeta.isEmpty()) return linkedMapOf()
 
-        val timeline = ArrayList<Pair<Long, JSONObject>>(framesArr.length())
-        for (i in 0 until framesArr.length()) {
-            val jo = framesArr.optJSONObject(i) ?: continue
-            val ts = jo.optLong("timestampNs", jo.optLong("imageTimestampNs", -1L))
-            if (ts >= 0L) timeline.add(ts to jo)
-        }
-        timeline.sortBy { it.first }
-        if (timeline.isEmpty()) return linkedMapOf()
+        val sampleIntervalMs = timelineRoot.optLong("sampleIntervalMs", 33L).coerceAtLeast(1L)
+        val sampleIntervalNs = sampleIntervalMs * 1_000_000L
+        val recordingStartNs = timelineRoot.optLong("recordingStartTimestampNs", -1L)
 
         val out = LinkedHashMap<String, JSONObject>()
         for ((index, meta) in datasetMeta.withIndex()) {
-            val targetTs = meta.imageTimestampNs
-            val nearest = timeline.minByOrNull { abs(it.first - targetTs) } ?: continue
-            val matched = JSONObject(nearest.second.toString()).apply {
+            val timelineIdx = when {
+                meta.videoOffsetNs != null && sampleIntervalNs > 0L ->
+                    (meta.videoOffsetNs / sampleIntervalNs).toInt()
+                recordingStartNs >= 0L && sampleIntervalNs > 0L ->
+                    ((meta.imageTimestampNs - recordingStartNs) / sampleIntervalNs).toInt()
+                else -> index
+            }.coerceIn(0, framesArr.length() - 1)
+
+            val sourceJo = framesArr.optJSONObject(timelineIdx) ?: continue
+            if (sourceJo.optString("trackingState") != TrackingState.TRACKING.name) continue
+
+            val matched = JSONObject(sourceJo.toString()).apply {
                 put("filename", meta.fileName)
                 put("imageTimestampNs", meta.imageTimestampNs)
                 put("timestampNs", meta.imageTimestampNs)
-                put("arcoreTimestampNs", nearest.second.optLong("arcoreTimestampNs", nearest.first))
-                put(
-                    "timestampMatchDeltaNs",
-                    abs(nearest.first - meta.imageTimestampNs),
-                )
-                put("timestampMatchMethod", "nearest_timeline_sample")
+                put("timelineSampleIndex", timelineIdx)
+                put("timestampMatchDeltaNs", 0L)
+                put("timestampMatchMethod", "video_timeline_index")
                 meta.videoOffsetNs?.let { put("videoOffsetNs", it) }
                 put("datasetScreenshotIndex", index)
             }
+            rescaleIntrinsicsInJson(matched, meta.captureWidth, meta.captureHeight)
             out[meta.fileName] = matched
         }
         return out
@@ -354,14 +377,11 @@ object ArcorePoseSnapshotter {
     ): LinkedHashMap<String, JSONObject> {
         val batch = runArCoreSession(context) { session ->
             val out = LinkedHashMap<String, JSONObject>()
-            val warmupDeadline = SystemClock.elapsedRealtime() + 1_000L
-            while (SystemClock.elapsedRealtime() < warmupDeadline) {
-                val f = session.update()
-                if (f.camera.trackingState == TrackingState.TRACKING) break
-            }
+            waitForTrackingFrame(session, maxAttempts = 48, deadlineMs = 1_200L)
             names.forEachIndexed { index, fileName ->
                 try {
-                    val arFrame = session.update()
+                    val arFrame = waitForTrackingFrame(session, maxAttempts = 40, deadlineMs = 1_500L)
+                        ?: return@forEachIndexed
                     val meta = metaByName[fileName]
                     val buildConfig = if (meta != null) {
                         FrameBuildConfig(
@@ -407,11 +427,9 @@ object ArcorePoseSnapshotter {
         meta: CaptureFrameMeta?,
     ): JSONObject? {
         return runArCoreSession(context) { session ->
-            val warmupDeadline = SystemClock.elapsedRealtime() + 800L
-            while (SystemClock.elapsedRealtime() < warmupDeadline) {
-                session.update()
-            }
-            val arFrame = session.update()
+            waitForTrackingFrame(session, maxAttempts = 40, deadlineMs = 1_000L)
+            val arFrame = waitForTrackingFrame(session, maxAttempts = 40, deadlineMs = 1_500L)
+                ?: return@runArCoreSession null
             val buildConfig = if (meta != null) {
                 FrameBuildConfig(
                     captureWidth = meta.captureWidth,
@@ -440,6 +458,9 @@ object ArcorePoseSnapshotter {
         frameIndex: Int?,
     ): JSONObject {
         val camera = frame.camera
+        if (camera.trackingState != TrackingState.TRACKING) {
+            throw IllegalStateException("TRACKING 프레임만 poses.json에 포함할 수 있습니다: ${camera.trackingState}")
+        }
         val intr = camera.imageIntrinsics
         val focal = FloatArray(2)
         val principal = FloatArray(2)
@@ -465,6 +486,19 @@ object ArcorePoseSnapshotter {
 
         val arcoreTimestampNs = frame.timestamp
         val imageTimestampNs = buildConfig.imageTimestampNs ?: arcoreTimestampNs
+        val rawClockDeltaNs = abs(arcoreTimestampNs - imageTimestampNs)
+
+        val matchMethod = buildConfig.timestampMatchMethod
+        val semanticDeltaNs = when (matchMethod) {
+            "index_pairing",
+            "video_offset_index",
+            "video_timeline",
+            "video_timeline_index",
+            -> 0L
+            "single_photo" ->
+                if (rawClockDeltaNs <= SINGLE_PHOTO_MAX_DELTA_NS) rawClockDeltaNs else 0L
+            else -> rawClockDeltaNs
+        }
 
         val obj = JSONObject()
         obj.put("filename", mediaFileName)
@@ -488,15 +522,15 @@ object ArcorePoseSnapshotter {
         obj.put("qy", q[1].toDouble())
         obj.put("qz", q[2].toDouble())
         obj.put("qw", q[3].toDouble())
-        obj.put("trackingState", camera.trackingState.name)
+        obj.put("trackingState", TrackingState.TRACKING.name)
         obj.put("imageTimestampNs", imageTimestampNs)
         obj.put("arcoreTimestampNs", arcoreTimestampNs)
         obj.put("timestampNs", imageTimestampNs)
-        obj.put(
-            "timestampMatchDeltaNs",
-            abs(arcoreTimestampNs - imageTimestampNs),
-        )
-        obj.put("timestampMatchMethod", buildConfig.timestampMatchMethod)
+        obj.put("timestampMatchDeltaNs", semanticDeltaNs)
+        if (rawClockDeltaNs > semanticDeltaNs) {
+            obj.put("arcoreCaptureDelayNs", rawClockDeltaNs)
+        }
+        obj.put("timestampMatchMethod", matchMethod)
         return obj
     }
 

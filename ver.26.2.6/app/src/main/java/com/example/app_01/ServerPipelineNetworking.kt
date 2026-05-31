@@ -50,17 +50,32 @@ import org.json.JSONObject
 
 // --- 서버 설정 · 엔드포인트 (MainActivity UI 등 동일 패키지에서 참조) ---
 internal const val UPLOAD_ENDPOINT = "/upload"
-/** FastAPI 기본 문서 — 연결 테스트용 GET(가벼움). `/upload`는 POST만 있어 HEAD/GET이 405여도 “테스트 성공”으로 오해할 수 있음 */
+/** FastAPI 기본 문서 — 연결 테스트 후보 경로 중 하나. 운영 서버에서 비활성일 수 있음 */
 internal const val SERVER_CONNECTIVITY_GET_PATH = "/docs"
+/** LAN 연결 테스트 시 순서대로 시도하는 GET 경로 (HTTP 응답만 있으면 도달로 간주) */
+private val SERVER_CONNECTIVITY_PROBE_PATHS = listOf(
+    "/",
+    SERVER_CONNECTIVITY_GET_PATH,
+    "/openapi.json",
+    "/health",
+    UPLOAD_ENDPOINT,
+)
 internal const val STATUS_ENDPOINT = "/status"
 internal const val DOWNLOAD_ENDPOINT = "/download"
 /** FastAPI `GET /results/{task_id}` — 결과 파일 목록 + 개별 다운로드 URL */
 internal const val RESULTS_ENDPOINT = "/results"
 
-/** Jetson DA3 파이프라인 기본 호스트(새 설치·설정 초기화 시 사용). HTTPS + 443 */
-internal const val DEFAULT_SERVER_ADDRESS = "wise-annex-audacity.ngrok-free.dev"
-internal const val DEFAULT_SERVER_PORT = 443
-internal const val DEFAULT_USE_HTTPS = true
+/** Jetson/FastAPI 파이프라인 — 동일 Wi‑Fi LAN 기본값 (HTTP) */
+internal const val DEFAULT_SERVER_ADDRESS = "192.168.0.17"
+internal const val DEFAULT_SERVER_PORT = 8000
+internal const val DEFAULT_USE_HTTPS = false
+
+/*
+ * ── ngrok 터널(레거시) 기본값 — 외부 터널 사용 시 아래 상수로 되돌리고 DEFAULT_* 를 주석 처리 ──
+ * internal const val DEFAULT_SERVER_ADDRESS = "wise-annex-audacity.ngrok-free.dev"
+ * internal const val DEFAULT_SERVER_PORT = 443
+ * internal const val DEFAULT_USE_HTTPS = true
+ */
 
 /** 업로드 시 `callback_url` 경로 — 베이스는 [buildServerOrigin]과 동일해야 함. */
 private const val PIPELINE_CALLBACK_PATH = "/pipeline/callback"
@@ -89,6 +104,90 @@ private const val SAM3_DEFAULT_PORT = 8001
 private const val PREF_SERVER_ADDRESS = "server_address"
 private const val PREF_SERVER_PORT = "server_port"
 private const val PREF_USE_HTTPS = "use_https"
+private const val LEGACY_NGROK_SERVER_ADDRESS = "wise-annex-audacity.ngrok-free.dev"
+private const val PREF_SERVER_SETTINGS_LAN_MIGRATED = "server_settings_lan_migrated_v1"
+
+private val LAN_HOST_REGEX = Regex(
+    """^(?:192\.168\.(?:\d{1,2}|1\d\d|2[0-4]\d|25[0-5])\.(?:\d{1,2}|1\d\d|2[0-4]\d|25[0-5])|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|localhost|127\.0\.0\.1)$""",
+    RegexOption.IGNORE_CASE,
+)
+
+/** 사설/LAN IP·localhost — HTTP(비 TLS)가 일반적 */
+internal fun isLikelyLanHost(address: String): Boolean {
+    val h = address.trim().lowercase(Locale.US)
+    return LAN_HOST_REGEX.matches(h)
+}
+
+/** LAN IP에 HTTPS를 켠 경우 업로드 SSL 오류를 막기 위해 HTTP로 정규화 */
+internal fun normalizeServerUseHttps(address: String, useHttps: Boolean): Boolean {
+    if (!useHttps) return false
+    return if (isLikelyLanHost(address)) false else true
+}
+
+/**
+ * ngrok → LAN 전환 후 남은 SharedPreferences(호스트·443·HTTPS)를 LAN 기본값으로 맞춥니다.
+ * 연결 테스트는 UI 입력값, 업로드는 저장값을 쓰므로 불일치 시 「테스트 성공·전송 실패」가 납니다.
+ */
+internal fun migrateLegacyServerSettingsIfNeeded(context: Context) {
+    val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+    val addr = prefs.getString(PREF_SERVER_ADDRESS, DEFAULT_SERVER_ADDRESS) ?: DEFAULT_SERVER_ADDRESS
+    var port = prefs.getInt(PREF_SERVER_PORT, DEFAULT_SERVER_PORT)
+    var https = prefs.getBoolean(PREF_USE_HTTPS, DEFAULT_USE_HTTPS)
+    var changed = false
+
+    if (!prefs.getBoolean(PREF_SERVER_SETTINGS_LAN_MIGRATED, false)) {
+        if (addr.equals(LEGACY_NGROK_SERVER_ADDRESS, ignoreCase = true) ||
+            addr.contains("ngrok", ignoreCase = true)
+        ) {
+            prefs.edit()
+                .putString(PREF_SERVER_ADDRESS, DEFAULT_SERVER_ADDRESS)
+                .putInt(PREF_SERVER_PORT, DEFAULT_SERVER_PORT)
+                .putBoolean(PREF_USE_HTTPS, DEFAULT_USE_HTTPS)
+                .putBoolean(PREF_SERVER_SETTINGS_LAN_MIGRATED, true)
+                .apply()
+            return
+        }
+        prefs.edit().putBoolean(PREF_SERVER_SETTINGS_LAN_MIGRATED, true).apply()
+    }
+
+    if (isLikelyLanHost(addr)) {
+        if (https) {
+            https = false
+            changed = true
+        }
+        if (port == 443) {
+            port = DEFAULT_SERVER_PORT
+            changed = true
+        }
+    }
+    val normalizedHttps = normalizeServerUseHttps(addr, https)
+    if (normalizedHttps != https) {
+        https = normalizedHttps
+        changed = true
+    }
+    if (changed) {
+        prefs.edit()
+            .putInt(PREF_SERVER_PORT, port)
+            .putBoolean(PREF_USE_HTTPS, https)
+            .apply()
+    }
+}
+
+/** 업로드 실패 팝업 — 진행 메시지에 서버 상세 오류가 있으면 그대로 표시 */
+internal fun formatServerUploadFailurePopup(
+    progressMessage: String?,
+    noServerResponseMsg: String,
+): String {
+    val msg = progressMessage?.trim().orEmpty()
+    if (msg == noServerResponseMsg) return noServerResponseMsg
+    if (msg.isNotEmpty() &&
+        msg != "업로드 준비 중..." &&
+        msg != "파일 업로드 중…"
+    ) {
+        return msg
+    }
+    return "업로드 실패"
+}
 
 /**
  * 스트림 읽기·쓰기 버퍼 — 2 MiB.
@@ -116,32 +215,39 @@ private fun multipartZipFilenameForServer(raw: String, fallback: String): String
 }
 
 internal fun getServerAddress(context: Context): String {
+    migrateLegacyServerSettingsIfNeeded(context)
     val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
     return prefs.getString(PREF_SERVER_ADDRESS, DEFAULT_SERVER_ADDRESS) ?: DEFAULT_SERVER_ADDRESS
 }
 
 internal fun getServerPort(context: Context): Int {
+    migrateLegacyServerSettingsIfNeeded(context)
     val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
     return prefs.getInt(PREF_SERVER_PORT, DEFAULT_SERVER_PORT)
 }
 
 internal fun getUseHttps(context: Context): Boolean {
+    migrateLegacyServerSettingsIfNeeded(context)
     val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
-    return prefs.getBoolean(PREF_USE_HTTPS, DEFAULT_USE_HTTPS)
+    val addr = prefs.getString(PREF_SERVER_ADDRESS, DEFAULT_SERVER_ADDRESS) ?: DEFAULT_SERVER_ADDRESS
+    val raw = prefs.getBoolean(PREF_USE_HTTPS, DEFAULT_USE_HTTPS)
+    return normalizeServerUseHttps(addr, raw)
 }
 
 internal fun saveServerSettings(context: Context, address: String, port: Int, useHttps: Boolean) {
+    val host = address.trim()
+    val normalizedHttps = normalizeServerUseHttps(host, useHttps)
     val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
     prefs.edit()
-        .putString(PREF_SERVER_ADDRESS, address)
+        .putString(PREF_SERVER_ADDRESS, host)
         .putInt(PREF_SERVER_PORT, port)
-        .putBoolean(PREF_USE_HTTPS, useHttps)
+        .putBoolean(PREF_USE_HTTPS, normalizedHttps)
         .apply()
 }
 
 /**
- * DA3 서버 오리진 (`https://host` … 비표준 포트만 `:포트` 포함).
- * 기본(HTTPS·443)이면 호스트만 두어 `https://wise-annex-audacity.ngrok-free.dev/upload` 형태와 맞춥니다.
+ * DA3 서버 오리진 (`http://host:port` … 표준 포트 80/443 은 생략).
+ * LAN 예: `http://192.168.0.17:8000/upload`
  */
 internal fun buildServerOriginFromParts(address: String, port: Int, useHttps: Boolean): String {
     val protocol = if (useHttps) "https" else "http"
@@ -157,14 +263,14 @@ internal fun buildServerOrigin(context: Context): String =
         getUseHttps(context),
     )
 
-/** `POST /upload`의 `callback_url` — FastAPI(ngrok) 쪽 자체 엔드포인트용. [resolvePipelineCallbackUrlForUpload] 가 우선합니다. */
+/** `POST /upload`의 `callback_url` — 원격 서버 엔드포인트. [resolvePipelineCallbackUrlForUpload] 가 LAN 우선. */
 internal fun getPipelineCallbackUrl(context: Context): String =
     buildServerOrigin(context) + PIPELINE_CALLBACK_PATH
 
 /**
  * 업로드 폼의 `callback_url`.
  *
- * **원인:** [getPipelineCallbackUrl] 만 쓰면 값이 `https://…ngrok…/pipeline/callback` 이 되어,
+ * **원인:** [getPipelineCallbackUrl] 만 쓰면 값이 원격 서버 URL(`…/pipeline/callback`)이 되어,
  * Jetson 워커는 **원격 서버**로만 POST 하고, 휴대폰에서 띄운 [PipelineCallbackHttpServer]에는 도달하지 않습니다.
  * 같은 Wi‑Fi에서는 `http://(휴대폰 IPv4):(NanoHTTPd포트)/pipeline/callback` 을 넘겨야 푸시가 기기로 옵니다.
  *
@@ -193,34 +299,33 @@ internal fun resolvePipelineCallbackUrlForUpload(
     return remote
 }
 
-/**
- * ngrok 무료 터널(`*.ngrok-free.dev` / `*.ngrok-free.app` 등)은 기본적으로
- * **브라우저 경고 HTML** 또는 비 JSON 응답을 끼워 넣을 수 있어 `POST /upload` 가 실패하는데,
- * `GET /docs` 같은 가벼운 요청은 200으로 통과해 「연결 성공」만 뜨는 불일치가 납니다.
- * 공식 우회 헤더로 경고 페이지 건너뛰기.
+/*
+ * ngrok 무료 터널(`*.ngrok-free.dev` 등)용 브라우저 경고 HTML 우회 — LAN(HTTP) 전환으로 비활성.
+ * 외부 ngrok 재사용 시 아래 주석을 해제하고 [buildOkHttpClientBase] 의 addInterceptor 도 복구하세요.
  *
  * @see [ngrok docs — Skip browser warning](https://ngrok.com/docs/errors/http-403-permission/)
+ *
+ * private object NgrokFreeBrowserWarningInterceptor : Interceptor {
+ *     override fun intercept(chain: Interceptor.Chain): Response {
+ *         val req = chain.request()
+ *         if (!isNgrokFreeStyleHost(req.url.host)) {
+ *             return chain.proceed(req)
+ *         }
+ *         val next = req.newBuilder()
+ *             .header("ngrok-skip-browser-warning", "true")
+ *             .build()
+ *         return chain.proceed(next)
+ *     }
+ *
+ *     private fun isNgrokFreeStyleHost(host: String): Boolean {
+ *         val h = host.lowercase(Locale.US)
+ *         return h.endsWith(".ngrok-free.dev") ||
+ *             h.endsWith(".ngrok-free.app") ||
+ *             h.endsWith(".ngrok.app") ||
+ *             h.endsWith(".ngrok.io")
+ *     }
+ * }
  */
-private object NgrokFreeBrowserWarningInterceptor : Interceptor {
-    override fun intercept(chain: Interceptor.Chain): Response {
-        val req = chain.request()
-        if (!isNgrokFreeStyleHost(req.url.host)) {
-            return chain.proceed(req)
-        }
-        val next = req.newBuilder()
-            .header("ngrok-skip-browser-warning", "true")
-            .build()
-        return chain.proceed(next)
-    }
-
-    private fun isNgrokFreeStyleHost(host: String): Boolean {
-        val h = host.lowercase(Locale.US)
-        return h.endsWith(".ngrok-free.dev") ||
-            h.endsWith(".ngrok-free.app") ||
-            h.endsWith(".ngrok.app") ||
-            h.endsWith(".ngrok.io")
-    }
-}
 
 private val okHttpBaseLock = Any()
 @Volatile
@@ -245,7 +350,7 @@ internal fun createOkHttpClient(useHttps: Boolean = DEFAULT_USE_HTTPS): OkHttpCl
 
 internal fun buildOkHttpClientBase(useHttps: Boolean): OkHttpClient {
     val builder = OkHttpClient.Builder()
-        .addInterceptor(NgrokFreeBrowserWarningInterceptor)
+        // .addInterceptor(NgrokFreeBrowserWarningInterceptor) // ngrok 터널 사용 시에만 활성화
         .connectTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
@@ -510,8 +615,13 @@ internal suspend fun startServerTaskWithZip(
             val requestBody = multipartBuilder.build()
 
             val url = buildServerOrigin(context) + UPLOAD_ENDPOINT
+            android.util.Log.i(
+                "ServerPipelineUpload",
+                "POST $url https=$useHttps pcBytes=${zipPcFile.length()} gsBytes=${gs?.length() ?: 0}",
+            )
             val request = Request.Builder()
                 .url(url)
+                .header("Accept", "application/json")
                 .post(requestBody)
                 .build()
 
@@ -570,7 +680,8 @@ internal suspend fun startServerTaskWithZip(
         } catch (e: ConnectException) {
             ServerUploadStartResult(
                 null,
-                "서버에 연결할 수 없습니다(연결 거부·방화벽·포트). (${e.message})",
+                "서버에 연결할 수 없습니다(연결 거부). PC에서 서버를 0.0.0.0:${getServerPort(context)} 으로 실행했는지, " +
+                    "휴대폰과 PC가 같은 Wi‑Fi인지 확인하세요. (${e.message})",
             )
         } catch (e: SSLException) {
             ServerUploadStartResult(
@@ -1344,84 +1455,108 @@ internal suspend fun runServer3dgsAnalysisInBackground(
     }
 }
 
+/** 사고 현장 분석 HTML 보고서 — LLM 시각·텍스트 입력 계약 (이모지 금지, 표·그래프·입력 이미지 삽입) */
+internal const val ACCIDENT_SCENE_REPORT_VISUAL_HINT =
+    "보고서는 단일 ```html``` 블록의 완전한 HTML 문서로 출력하세요. " +
+        "첨부된 topview·sideview 2D 투영 이미지 2장은 `<img src=\"data:image/png;base64,...\">`로 본문에 반드시 삽입하세요. " +
+        "quality_report.json 수치는 `<table>`과 Chart.js(`<canvas>`+`<script>`) 그래프로 시각화하세요. " +
+        "각 표·그래프·이미지 아래 한국어 해석 문단을 포함하세요. " +
+        "이모지·Unicode 장식 기호는 HTML 본문·제목·표·캡션 어디에도 사용하지 마세요. " +
+        "python-docx·Python 스크립트는 사용하지 마세요."
+
+/** 서버 DA3 산출물 4종(PLY·topview·sideview·quality_report.json)만 근거로 쓰도록 LLM에 전달하는 기본 지시 */
+internal const val ACCIDENT_SCENE_REPORT_BASE_PROMPT =
+    "서버 DA3 파이프라인 산출물만 입력으로 사용하여 사고 현장 분석 HTML 프레젠테이션 보고서를 작성하세요. " +
+        "입력으로 허용되는 항목은 (1) DA3 포인트 클라우드 3D 모델 PLY 메타데이터, " +
+        "(2) topview·sideview 2D 투영 이미지 2장, (3) 포인트 클라우드 평가표 quality_report.json 뿐입니다. " +
+        "촬영 원본·갤러리 사진·GLB·analysis JSON·CSV 등 기타 파일은 근거로 사용하지 마세요. " +
+        ACCIDENT_SCENE_REPORT_VISUAL_HINT + " " +
+        "표지·목차·본문(포인트 클라우드 품질 평가, 3D 장면 개요, 상·하향 투영 해석, 사고 형태 분석, 원인 추론, 한계·면책)을 " +
+        "`<section class=\"slide\">`로 구분하세요."
+
+private fun readPlyHeaderExcerptForReport(file: File, maxChars: Int = 2_400): String {
+    if (!file.isFile) return ""
+    return try {
+        file.inputStream().bufferedReader(Charsets.UTF_8).use { reader ->
+            val sb = StringBuilder()
+            while (sb.length < maxChars) {
+                val line = reader.readLine() ?: break
+                sb.appendLine(line)
+                if (line.trim() == "end_header") break
+            }
+            sb.toString().take(maxChars)
+        }
+    } catch (_: Exception) {
+        ""
+    }
+}
+
+/**
+ * 사고 현장 분석 보고서 LLM 페이로드.
+ * **서버 수신 데이터 중** PLY·topview·sideview·quality_report.json 만 텍스트·비전 입력으로 사용합니다.
+ * 촬영 갤러리·데이터셋 원본 이미지는 포함하지 않습니다.
+ */
 internal fun buildPoliceInsurance3dgsPayload(
     context: Context,
     bundle: ServerPipelineResultBundle,
-    basePrompt: String = "첨부된 PLY·3DGS·JSON 분석 파일과 사고 현장 이미지를 바탕으로, 사고 현장 분석 HTML 프레젠테이션 보고서를 작성하세요. 단일 ```html``` 블록의 완전한 HTML 문서로 출력하고, 도식·비교표·수리 견적은 `<table>`, Chart.js `<canvas>`, `<img src=\"data:image/png;base64,...\">` 또는 인라인 SVG로 표현하세요. 표지·목차·본문(현장 개요, 사고 형태, 원인 추론, 차량별 파손·수리 견적, 종합 견적, 법적 면책)을 `<section class=\"slide\">`로 구분하세요. python-docx·Python 스크립트는 사용하지 마세요.",
-    galleryImageUris: List<Uri> = emptyList(),
+    basePrompt: String = ACCIDENT_SCENE_REPORT_BASE_PROMPT,
 ): Pair<String, List<Uri>> {
     val sb = StringBuilder(basePrompt)
-    sb.append("\n\n--- 서버 결과 메타 ---\n")
+    sb.append("\n\n--- 서버 DA3 입력 (보고서 작성에 사용할 4종) ---\n")
     sb.append("task_id: ").append(bundle.taskId).append('\n')
-    sb.append("다운로드된 파일 키: ").append(bundle.filesByKey.keys.sorted().joinToString(", ")).append('\n')
+
+    val maxTotal = 120_000
+    val maxPerFile = 24_000
 
     val ply = bundle.plyFile
     if (ply.exists()) {
-        sb.append("\n[PLY] ").append(ply.name).append(" (")
-            .append(ply.length() / 1024).append(" KB)\n")
-            .append(ply.absolutePath).append('\n')
-    }
-    bundle.existingFile("glb")?.let { glb ->
-        sb.append("\n[GLB] ").append(glb.name).append(" (").append(glb.length() / 1024)
-            .append(" KB)\n").append(glb.absolutePath).append('\n')
+        sb.append("\n--- DA3 포인트 클라우드 3D 모델 (PLY) ---\n")
+        sb.append("파일: ").append(ply.name).append(" (").append(ply.length() / 1024).append(" KB)\n")
+        val header = readPlyHeaderExcerptForReport(ply)
+        if (header.isNotBlank()) {
+            sb.append("--- PLY ASCII 헤더 ---\n").append(header).append('\n')
+        }
+    } else {
+        sb.append("\n[경고] DA3 PLY 파일 없음\n")
     }
 
-    val textKeys = listOf(
-        "analysis_json" to "analysis_result.json",
-        /** 서버는 [quality_json] 단일 파일로 교체 (txt/png 제거). 레거시 번들용 [quality_txt] 유지 */
-        "quality_json" to "quality_report.json",
-        "quality_txt" to "quality_report.txt",
-        "vehicle_csv" to "vehicle_analysis.csv",
-        "contact_csv" to "contact_analysis.csv",
-        "contact_points_csv" to "contact_candidate_points.csv",
-    )
-    val maxPerFile = 24_000
-    val maxTotal = 120_000
-    for ((key, label) in textKeys) {
-        val f = bundle.filesByKey[key] ?: continue
-        if (sb.length >= maxTotal) break
+    val qualityFile = bundle.filesByKey["quality_json"]
+    if (qualityFile != null && qualityFile.isFile) {
         val raw = try {
-            f.readText(Charsets.UTF_8)
+            qualityFile.readText(Charsets.UTF_8)
         } catch (_: Exception) {
-            continue
+            ""
         }
-        val enriched = if (key == "quality_json") {
-            val summary = parsePointCloudQualityReportJson(f)?.let { formatPointCloudQualityReportKorean(it) }
-            if (!summary.isNullOrBlank()) "$summary\n\n--- 원본 JSON ---\n$raw" else raw
-        } else raw
-        val chunk = if (enriched.length > maxPerFile) {
-            enriched.take(maxPerFile) + "\n...(이하 생략, 원문 ${enriched.length}자)..."
-        } else enriched
-        sb.append("\n--- ").append(label).append(" (").append(f.name).append(") ---\n")
-            .append(chunk).append('\n')
+        if (raw.isNotBlank()) {
+            val enriched = parsePointCloudQualityReportJson(qualityFile)?.let { summary ->
+                formatPointCloudQualityReportKorean(summary) + "\n\n--- 원본 JSON ---\n$raw"
+            } ?: raw
+            val chunk = if (enriched.length > maxPerFile) {
+                enriched.take(maxPerFile) + "\n...(이하 생략, 원문 ${enriched.length}자)..."
+            } else enriched
+            sb.append("\n--- 포인트 클라우드 평가표 (quality_report.json) ---\n")
+                .append(chunk).append('\n')
+        }
+    } else {
+        sb.append("\n[경고] quality_report.json 없음\n")
     }
+
+    sb.append("\n--- 2D 투영 이미지 (비전 입력) ---\n")
+    sb.append("topview: ").append(bundle.filesByKey["topview"]?.name ?: "(없음)").append('\n')
+    sb.append("sideview: ").append(bundle.filesByKey["sideview"]?.name ?: "(없음)").append('\n')
+    sb.append("위 2장을 HTML 본문에 data URI로 삽입하고 장면 해석에 활용하세요.\n")
+
     var text = sb.toString()
     if (text.length > maxTotal) {
         text = text.take(maxTotal) + "\n...(전체 본문 길이 제한으로 잘림)"
     }
 
-    val imageExts = setOf("png", "jpg", "jpeg", "webp")
-    val uris = ArrayList<Uri>()
-
-    if (galleryImageUris.isNotEmpty()) {
-        uris.addAll(galleryImageUris)
-    }
-
-    val preferredOrder = listOf("topview", "sideview", "quality_png", "analysis_png")
-    val seen = HashSet<String>()
-    fun addFile(f: File) {
-        val path = f.absolutePath
-        if (path in seen || !f.exists() || !f.isFile) return
-        if (f.extension.lowercase() !in imageExts) return
+    val uris = ArrayList<Uri>(2)
+    for (key in listOf("topview", "sideview")) {
+        val f = bundle.filesByKey[key] ?: continue
+        if (!f.isFile) continue
         val u = uriToShareableContentUri(context, Uri.fromFile(f)) ?: Uri.fromFile(f)
-        seen.add(path)
         uris.add(u)
-    }
-    for (k in preferredOrder) {
-        bundle.filesByKey[k]?.let(::addFile)
-    }
-    for (f in bundle.filesByKey.values) {
-        addFile(f)
     }
     return text to uris
 }
@@ -1540,36 +1675,162 @@ internal suspend fun downloadPlyResult(
 }
 
 /**
- * 서버 연결 테스트 (GET [SERVER_CONNECTIVITY_GET_PATH]).
+ * 서버 연결 테스트 결과 — [message]에 실패 원인(연결 거부·404·HTTPS 오류 등)을 담습니다.
  */
-internal suspend fun testServerConnection(
-    @Suppress("UNUSED_PARAMETER") context: Context,
-    serverAddress: String,
-    serverPort: Int,
-    useHttps: Boolean
-): Boolean {
-    return withContext(Dispatchers.IO) {
-        try {
-            val client = createOkHttpClient(useHttps).newBuilder()
-                .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(10, TimeUnit.SECONDS)
-                .build()
+internal data class ServerConnectionTestResult(
+    val success: Boolean,
+    val message: String,
+)
 
-            val url =
-                buildServerOriginFromParts(serverAddress.trim(), serverPort, useHttps) + SERVER_CONNECTIVITY_GET_PATH
-            val request = Request.Builder()
+private data class HttpProbeResult(
+    val httpCode: Int?,
+    val contentType: String?,
+    val errorDetail: String?,
+)
+
+private fun probeHttpGet(client: OkHttpClient, url: String): HttpProbeResult {
+    return try {
+        client.newCall(
+            Request.Builder()
                 .url(url)
                 .get()
+                .header("Accept", "*/*")
+                .header("Connection", "close")
+                .build(),
+        ).execute().use { resp ->
+            HttpProbeResult(resp.code, resp.header("Content-Type").orEmpty(), null)
+        }
+    } catch (e: ConnectException) {
+        HttpProbeResult(null, null, "연결 거부 — 서버가 꺼져 있거나 PC 방화벽·포트를 확인하세요.")
+    } catch (e: SocketTimeoutException) {
+        HttpProbeResult(null, null, "연결 시간 초과 — PC와 휴대폰이 같은 Wi‑Fi인지 확인하세요.")
+    } catch (e: UnknownHostException) {
+        HttpProbeResult(null, null, "주소를 찾을 수 없습니다: ${e.message}")
+    } catch (e: SSLException) {
+        HttpProbeResult(null, null, "SSL/TLS 오류 — LAN 서버는 HTTPS를 끄고 HTTP로 접속하세요.")
+    } catch (e: IOException) {
+        HttpProbeResult(null, null, "네트워크 오류: ${e.message ?: e.javaClass.simpleName}")
+    }
+}
+
+private fun isNgrokHtmlInterstitial(code: Int, contentType: String): Boolean =
+    code == 403 && contentType.contains("text/html", ignoreCase = true)
+
+/** HTTP 응답 코드가 「서버에 도달함」을 의미하는지 (404·405 포함, 5xx·연결 실패 제외) */
+private fun httpCodeIndicatesServerReachable(code: Int): Boolean = code in 200..499
+
+/**
+ * 서버 연결 테스트 — LAN FastAPI에 맞게 여러 GET 경로를 시도하고 [UPLOAD_ENDPOINT] 도달 여부를 확인합니다.
+ * UI 입력값을 실제 업로드와 맞추려면 성공 시 [saveServerSettings] 로 저장하세요.
+ */
+internal suspend fun testServerConnection(
+    context: Context,
+    serverAddress: String,
+    serverPort: Int,
+    useHttps: Boolean,
+): ServerConnectionTestResult {
+    return withContext(Dispatchers.IO) {
+        try {
+            migrateLegacyServerSettingsIfNeeded(context)
+            val host = serverAddress.trim()
+            if (host.isEmpty()) {
+                return@withContext ServerConnectionTestResult(false, "서버 주소가 비어 있습니다.")
+            }
+            val https = normalizeServerUseHttps(host, useHttps)
+            val origin = buildServerOriginFromParts(host, serverPort, https)
+            val client = createOkHttpClient(https).newBuilder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
+                .writeTimeout(20, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
                 .build()
 
-            val response = client.newCall(request).execute()
-            val success = response.code in 200..499
-            response.close()
+            var lastProbeError: String? = null
+            var anyReachable = false
+            for (path in SERVER_CONNECTIVITY_PROBE_PATHS) {
+                val url = origin + path
+                val probe = probeHttpGet(client, url)
+                val code = probe.httpCode
+                val ct = probe.contentType.orEmpty()
+                when {
+                    code == null -> {
+                        lastProbeError = probe.errorDetail ?: "GET $path 실패"
+                        android.util.Log.w("ServerPipelineTest", "GET $url — ${lastProbeError}")
+                    }
+                    isNgrokHtmlInterstitial(code, ct) -> {
+                        lastProbeError = "ngrok 브라우저 경고(403). ngrok 터널용 헤더가 필요합니다."
+                        android.util.Log.w("ServerPipelineTest", "GET $url — ngrok interstitial")
+                    }
+                    httpCodeIndicatesServerReachable(code) -> {
+                        android.util.Log.i("ServerPipelineTest", "GET $url → HTTP $code (reachable)")
+                        anyReachable = true
+                        break
+                    }
+                    else -> {
+                        lastProbeError = "GET $path → HTTP $code"
+                        android.util.Log.w("ServerPipelineTest", "GET $url → HTTP $code")
+                    }
+                }
+            }
 
-            success
+            if (!anyReachable) {
+                val hint = if (isLikelyLanHost(host)) {
+                    "\nPC에서 서버를 0.0.0.0:$serverPort 로 실행했는지 확인하세요.\n예: uvicorn main:app --host 0.0.0.0 --port $serverPort"
+                } else {
+                    ""
+                }
+                val detail = lastProbeError ?: "서버에 연결할 수 없습니다."
+                return@withContext ServerConnectionTestResult(
+                    false,
+                    "연결 실패: $detail$hint",
+                )
+            }
+
+            val uploadProbe = probeHttpGet(client, origin + UPLOAD_ENDPOINT)
+            val uploadCode = uploadProbe.httpCode
+            when {
+                uploadCode == null -> {
+                    return@withContext ServerConnectionTestResult(
+                        false,
+                        "연결 실패: ${uploadProbe.errorDetail ?: "$UPLOAD_ENDPOINT 에 접근할 수 없습니다."}",
+                    )
+                }
+                uploadCode == 404 -> {
+                    return@withContext ServerConnectionTestResult(
+                        false,
+                        "연결은 되었으나 $UPLOAD_ENDPOINT 가 없습니다(HTTP 404). FastAPI DA3 서버(main.py)인지 확인하세요.",
+                    )
+                }
+                isNgrokHtmlInterstitial(uploadCode, uploadProbe.contentType.orEmpty()) -> {
+                    return@withContext ServerConnectionTestResult(
+                        false,
+                        "연결 실패: ngrok HTML 차단(403). LAN IP·HTTP를 사용하거나 ngrok 우회 설정이 필요합니다.",
+                    )
+                }
+                uploadCode >= 500 -> {
+                    return@withContext ServerConnectionTestResult(
+                        false,
+                        "연결은 되었으나 $UPLOAD_ENDPOINT 서버 오류(HTTP $uploadCode).",
+                    )
+                }
+                uploadCode == 405 || uploadCode in 200..499 -> {
+                    android.util.Log.i(
+                        "ServerPipelineTest",
+                        "Upload endpoint OK: GET ${origin + UPLOAD_ENDPOINT} → HTTP $uploadCode",
+                    )
+                }
+            }
+
+            ServerConnectionTestResult(
+                true,
+                "연결 성공! ($origin$UPLOAD_ENDPOINT)",
+            )
         } catch (e: Exception) {
-            e.printStackTrace()
-            false
+            android.util.Log.w("ServerPipelineTest", "connection test failed", e)
+            ServerConnectionTestResult(
+                false,
+                "연결 실패: ${e.message ?: e.javaClass.simpleName}",
+            )
         }
     }
 }

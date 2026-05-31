@@ -364,7 +364,7 @@ private suspend fun runBatchedArcoreMetadataSave(
             if (photoFiles.size == 1) {
                 val f = photoFiles[0]
                 val frameJo = map[f.name]
-                if (frameJo == null) {
+                if (frameJo == null || frameJo.optString("trackingState") != "TRACKING") {
                     failures++
                 } else {
                     val frameAligned = JSONObject(frameJo.toString()).apply {
@@ -387,15 +387,19 @@ private suspend fun runBatchedArcoreMetadataSave(
                     val filesInZip = photoFiles.filter { it.isFile }
                     val allFrames = JSONArray()
                     var imgIdx = 0
-                    for (f in filesInZip) {
-                        val zipBase = "img_${imgIdx.toString().padStart(6, '0')}.jpg"
-                        successfulFrames[f.name]?.let { jo ->
+                for (f in filesInZip) {
+                    val zipBase = "img_${imgIdx.toString().padStart(6, '0')}.jpg"
+                    successfulFrames[f.name]?.let { jo ->
+                        if (jo.optString("trackingState") != "TRACKING") {
+                            failures++
+                        } else {
                             val c = JSONObject(jo.toString())
                             c.put("filename", zipBase)
                             allFrames.put(c)
                         }
-                        imgIdx++
                     }
+                    imgIdx++
+                }
                     val rootJson = JSONObject().put("frames", allFrames)
                     if (allFrames.length() > 0) {
                         JsonLibrary.saveArCoreFramesJson(context, rootJson)

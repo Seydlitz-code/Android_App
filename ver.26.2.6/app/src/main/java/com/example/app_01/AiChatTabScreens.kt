@@ -319,13 +319,8 @@ private const val MAX_3DGS_AUX_ATTACHMENTS = 12
 
 private const val GLTF_MAGIC = 0x46546C67
 
-/** HTML 보고서: 이미지·표·Chart.js 그래프를 WebView에서 렌더링 */
-private const val REPORT_HTML_VISUAL_HINT =
-    "보고서는 단일 ```html``` 블록의 완전한 HTML 문서로 출력하세요. " +
-        "도식·파손 개요·비용 비교가 필요하면 `<img src=\"data:image/png;base64,...\">` 또는 인라인 SVG, " +
-        "수치 비교는 `<table>`과 Chart.js(`<canvas>`+`<script>`)로 표현하세요. " +
-        "각 그림·차트 아래에 한국어 해석 문단을 반드시 포함하세요. " +
-        "python-docx·Python 스크립트는 사용하지 마세요."
+/** HTML 보고서: 이미지·표·Chart.js 그래프를 WebView에서 렌더링 (사고 현장 분석 = 서버 DA3 4종만) */
+private const val REPORT_HTML_VISUAL_HINT = ACCIDENT_SCENE_REPORT_VISUAL_HINT
 
 /** 파손 분석 모드: 텍스트가 비어 있고 이미지만 보낼 때 LLM에 넣는 기본 요청 */
 private const val DAMAGE_ANALYSIS_DEFAULT_PROMPT =
@@ -371,6 +366,25 @@ private fun Uri.looksLikeRasterImagePath(): Boolean {
 private fun Uri.isChatPickVideoUri(): Boolean {
     val pl = path?.lowercase(Locale.getDefault()) ?: return false
     return pl.endsWith(".mp4") || pl.endsWith(".mov") || pl.endsWith(".webm")
+}
+
+/** 사고 현장 분석 보고서 허용 비전 입력: 서버 DA3 topview·sideview 투영만 */
+private fun Uri.isDa3ReportProjectionImage(): Boolean {
+    if (isChatPickVideoUri()) return false
+    val pl = path?.lowercase(Locale.getDefault()) ?: return false
+    if (!pl.endsWith(".png") && !pl.endsWith(".jpg") && !pl.endsWith(".jpeg") && !pl.endsWith(".webp")) {
+        return false
+    }
+    val base = pl.substringAfterLast('/')
+    return base.contains("topview") || base.contains("sideview") ||
+        base.contains("top_view") || base.contains("side_view")
+}
+
+/** 사고 현장 분석 보고서 허용 텍스트 부록: PLY·quality_report.json 만 */
+private fun Uri.isDa3ReportAllowedAuxFile(): Boolean {
+    val pl = path?.lowercase(Locale.getDefault()) ?: return false
+    if (pl.endsWith(".ply")) return true
+    return pl.endsWith(".json") && pl.contains("quality_report")
 }
 
 private fun Uri.isLikelyImageOrVideoUri(context: Context): Boolean {
@@ -617,7 +631,7 @@ fun ClaudeChatScreen(
     LaunchedEffect(serverArtifactLibraryVersion) {
         val pair = withContext(Dispatchers.IO) {
             val infos = scanServerTaskManifestInfos(context)
-            da3MergedRasterUrisForAiPicker(infos) to da3QualityJsonUrisForServerTasks(infos)
+            da3ReportProjectionUrisForServerTasks(infos) to da3ReportQualityJsonUrisForServerTasks(infos)
         }
         serverDa3RasterUris = pair.first
         serverDa3QualityJsonUris = pair.second
@@ -1005,13 +1019,12 @@ fun ClaudeChatScreen(
                 if (isStreaming) return@sendLambda
                 val text = messageText.trim()
                 val images = attachedImages
-                val imagesForLlmRaw = if (
-                    aiTabMode == AiChatTabMode.MOBILE_3DGS ||
-                        aiTabMode == AiChatTabMode.DAMAGE_ANALYSIS
-                ) {
-                    images.filter { !it.isChatPickVideoUri() }
-                } else {
-                    images
+                val imagesForLlmRaw = when (aiTabMode) {
+                    AiChatTabMode.MOBILE_3DGS ->
+                        images.filter { !it.isChatPickVideoUri() && it.isDa3ReportProjectionImage() }
+                    AiChatTabMode.DAMAGE_ANALYSIS ->
+                        images.filter { !it.isChatPickVideoUri() }
+                    else -> images
                 }
                 val imagesForLlm = if (imagesForLlmRaw.size > MAX_LLM_VISION_IMAGES_PER_REQUEST) {
                     Toast.makeText(
@@ -1024,7 +1037,11 @@ fun ClaudeChatScreen(
                     imagesForLlmRaw
                 }
                 val rawAuxSnap =
-                    if (aiTabMode == AiChatTabMode.MOBILE_3DGS) attachedAuxUris else emptyList()
+                    if (aiTabMode == AiChatTabMode.MOBILE_3DGS) {
+                        attachedAuxUris.filter { it.isDa3ReportAllowedAuxFile() }
+                    } else {
+                        emptyList()
+                    }
                 val auxSnap = if (rawAuxSnap.size > MAX_3DGS_AUX_ATTACHMENTS) {
                     Toast.makeText(
                         context,
@@ -1081,15 +1098,15 @@ fun ClaudeChatScreen(
                     } else ""
                     val defaultImgPrompt = when (aiTabMode) {
                         AiChatTabMode.MOBILE_3DGS -> when {
-                            imageBase64List.size > 1 ->
-                                "첨부된 여러 사고 현장 이미지를 근거로, 한국어 HTML 프레젠테이션 보고서(단일 ```html``` 블록, 완전한 HTML 문서)를 출력하세요. " +
-                                    REPORT_HTML_VISUAL_HINT + " " +
-                                    "표지·목차·본문(사고 현장 개요, 사고 형태 분석, 원인 추론, 차량별 파손·수리 견적, 종합 견적, 법적 면책)을 `<section class=\"slide\">`로 구분하세요. 표·Chart.js·이미지/SVG를 적극 활용하세요. 이미지별 개별 설명 금지."
+                            imageBase64List.size >= 2 ->
+                                ACCIDENT_SCENE_REPORT_BASE_PROMPT + " " +
+                                    "첨부 topview·sideview 2장과 본문 PLY·quality_report.json 데이터를 모두 반영하세요."
                             imageBase64List.size == 1 ->
-                                "첨부된 사고 현장 이미지를 근거로, 한국어 HTML 프레젠테이션 보고서(단일 ```html``` 블록)를 출력하세요. " +
-                                    REPORT_HTML_VISUAL_HINT + " " +
-                                    "표지·목차·본문 구조로 사고 현장 개요, 형태 분석, 원인 추론, 파손·수리 견적, 법적 면책을 포함하세요."
-                            else -> ""
+                                ACCIDENT_SCENE_REPORT_BASE_PROMPT + " " +
+                                    "투영 이미지 1장만 첨부되었습니다. 가능한 범위에서 분석하되, topview·sideview 2장 부재를 한계 섹션에 명시하세요."
+                            dataAppendix.isNotBlank() ->
+                                ACCIDENT_SCENE_REPORT_BASE_PROMPT
+                            else -> ACCIDENT_SCENE_REPORT_BASE_PROMPT
                         }
                         AiChatTabMode.DAMAGE_ANALYSIS -> when {
                             imageBase64List.isNotEmpty() -> DAMAGE_ANALYSIS_DEFAULT_PROMPT
@@ -1121,21 +1138,9 @@ fun ClaudeChatScreen(
                             }
                         )
                         AiChatTabMode.MOBILE_3DGS -> {
-                            val basePrompt = text.ifBlank {
-                                when {
-                                    imageBase64List.isNotEmpty() -> defaultImgPrompt
-                                    dataAppendix.isNotBlank() ->
-                                        "첨부 데이터 파일(JSON·PLY/GLB·ZIP 등)을 반영해 사고 현장 분석 HTML 보고서를 작성하세요. " +
-                                            REPORT_HTML_VISUAL_HINT + " " +
-                                            "표지·목차·본문(현장 개요·형태 분석·원인 추론·파손·수리 견적·면책)을 `<section class=\"slide\">`로 구분하고, 단일 ```html``` 완전 문서로 출력하세요."
-                                    else ->
-                                        "이 앱의 Mobile 3DGS 사고 현장 분석 시스템용 HTML 보고서 샘플을 작성하세요. " +
-                                            REPORT_HTML_VISUAL_HINT + " " +
-                                            "표지·목차·본문 구조의 한국어 HTML 프레젠테이션(단일 ```html``` 블록)로 출력하세요."
-                                }
-                            }
+                            val basePrompt = text.ifBlank { defaultImgPrompt }
                             val fullText = if (dataAppendix.isNotBlank()) {
-                                basePrompt + "\n\n--- 첨부 데이터 파일 요약(JSON·PLY·GLB·ZIP 등) ---\n" + dataAppendix
+                                basePrompt + "\n\n--- 첨부 DA3 데이터 (PLY·quality_report.json 등) ---\n" + dataAppendix
                             } else {
                                 basePrompt
                             }
@@ -2041,7 +2046,7 @@ private fun ClaudeImageSelectDialog(
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Text(
-                                        "DA3 분석용 이미지가 없습니다.\n상·하향 미리보기·품질·분석 PNG 등이 포함된 작업을 내려받으세요.",
+                                        "DA3 2D 투영 이미지(topview·sideview)가 없습니다.\n서버 파이프라인 결과를 내려받으세요.",
                                         color = palette.onBackgroundMuted,
                                         fontSize = 14.sp,
                                         textAlign = TextAlign.Center,
@@ -2074,7 +2079,7 @@ private fun ClaudeImageSelectDialog(
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Text(
-                                        "DA3 품질평가용 JSON이 없습니다.\nquality_report 등 JSON이 포함된 작업을 내려받으세요.",
+                                        "포인트 클라우드 평가표(quality_report.json)가 없습니다.\n서버 파이프라인 결과를 내려받으세요.",
                                         color = palette.onBackgroundMuted,
                                         fontSize = 14.sp,
                                         textAlign = TextAlign.Center,

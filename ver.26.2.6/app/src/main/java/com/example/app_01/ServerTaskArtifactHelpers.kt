@@ -234,6 +234,21 @@ internal fun da3AnalysisRasterUrisForServerTasks(infos: List<ServerTaskManifestI
     return out.distinct()
 }
 
+/** 사고 현장 분석 보고서용: topview·sideview 2D 투영만 */
+internal fun da3ReportProjectionUrisForServerTasks(infos: List<ServerTaskManifestInfo>): List<Uri> =
+    previewUrisForServerTasks(infos)
+
+/** 사고 현장 분석 보고서용: quality_report.json 만 */
+internal fun da3ReportQualityJsonUrisForServerTasks(infos: List<ServerTaskManifestInfo>): List<Uri> {
+    val out = ArrayList<Uri>()
+    for (info in infos) {
+        info.filesByKey["quality_json"]?.takeIf { it.exists() && it.isFile }?.let {
+            out.add(Uri.fromFile(it))
+        }
+    }
+    return out.distinct()
+}
+
 /**
  * AI 파일 선택 팝업용: 라이브러리 「DA3분석」에 해당하는 래스터를 한 목록으로 합칩니다.
  * (top/side 미리보기 + quality/analysis PNG 등). 동일 파일은 canonical 경로 기준 한 번만 유지합니다.

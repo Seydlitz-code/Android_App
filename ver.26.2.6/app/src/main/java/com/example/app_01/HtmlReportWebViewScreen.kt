@@ -9,6 +9,7 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -49,6 +50,8 @@ fun HtmlReportWebViewScreen(
     val baseUrl = remember(htmlFile.absolutePath) {
         "file://${htmlFile.parentFile?.absolutePath?.replace('\\', '/')}/"
     }
+
+    BackHandler(onBack = onClose)
 
     Column(modifier = modifier.fillMaxSize()) {
         Row(
