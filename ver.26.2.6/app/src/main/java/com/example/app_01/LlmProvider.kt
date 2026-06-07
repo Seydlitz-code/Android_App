@@ -4,13 +4,15 @@ package com.example.app_01
 enum class LlmProvider {
     CLAUDE,
     OPENAI,
-    GEMINI;
+    GEMINI,
+    OPENCODE_GO;
 
     companion object {
         fun fromStoredName(s: String?): LlmProvider {
             return when (s?.trim()?.uppercase()) {
                 "OPENAI", "GPT" -> OPENAI
                 "GEMINI", "GOOGLE" -> GEMINI
+                "OPENCODE_GO", "OPENCODE", "OPENCODEGO" -> OPENCODE_GO
                 else -> CLAUDE
             }
         }
@@ -19,6 +21,7 @@ enum class LlmProvider {
             CLAUDE -> "CLAUDE"
             OPENAI -> "OPENAI"
             GEMINI -> "GEMINI"
+            OPENCODE_GO -> "OPENCODE_GO"
         }
     }
 }

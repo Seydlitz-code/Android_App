@@ -4,9 +4,9 @@ import android.content.Context
 import android.content.SharedPreferences
 
 /**
- * LLM 제공자 및 제공자별 API 키.
+ * LLM 제공자 및 제공자별 API 키, 선택 모델.
  * - 기본 제공자: 클로드(Anthropic)
- * - 키 미저장 시: [BuildConfig]의 claude_api_key / openai_api_key / gemini_api_key(local.properties)
+ * - 키 미저장 시: [BuildConfig]의 claude_api_key / openai_api_key / gemini_api_key / opencode_go_api_key(local.properties)
  */
 object LlmApiKeyStore {
     private const val PREF_NAME = "app_settings"
@@ -14,8 +14,16 @@ object LlmApiKeyStore {
     private const val KEY_CLAUDE = "llm_key_claude"
     private const val KEY_OPENAI = "llm_key_openai"
     private const val KEY_GEMINI = "llm_key_gemini"
+    private const val KEY_OPENCODE_GO = "llm_key_opencode_go"
     /** 구버전 단일 키 → 클로드 키로 이전 */
     private const val LEGACY_LLM_API_KEY = "llm_api_key"
+
+    private const val KEY_MODEL_CLAUDE = "llm_model_claude"
+    private const val KEY_MODEL_OPENAI = "llm_model_openai"
+    private const val KEY_MODEL_GEMINI = "llm_model_gemini"
+    private const val KEY_MODEL_OPENCODE_GO = "llm_model_opencode_go"
+
+    private const val KEY_OPENCODE_GO_BASE_URL = "llm_opencode_go_base_url"
 
     private fun prefs(context: Context): SharedPreferences =
         context.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -49,6 +57,7 @@ object LlmApiKeyStore {
                 LlmProvider.CLAUDE -> BuildConfig.CLAUDE_API_KEY?.trim().orEmpty()
                 LlmProvider.OPENAI -> BuildConfig.OPENAI_API_KEY?.trim().orEmpty()
                 LlmProvider.GEMINI -> BuildConfig.GEMINI_API_KEY?.trim().orEmpty()
+                LlmProvider.OPENCODE_GO -> BuildConfig.OPENCODE_GO_API_KEY?.trim().orEmpty()
             }
         } catch (_: Throwable) {
             ""
@@ -59,6 +68,14 @@ object LlmApiKeyStore {
         LlmProvider.CLAUDE -> KEY_CLAUDE
         LlmProvider.OPENAI -> KEY_OPENAI
         LlmProvider.GEMINI -> KEY_GEMINI
+        LlmProvider.OPENCODE_GO -> KEY_OPENCODE_GO
+    }
+
+    private fun modelPref(provider: LlmProvider): String = when (provider) {
+        LlmProvider.CLAUDE -> KEY_MODEL_CLAUDE
+        LlmProvider.OPENAI -> KEY_MODEL_OPENAI
+        LlmProvider.GEMINI -> KEY_MODEL_GEMINI
+        LlmProvider.OPENCODE_GO -> KEY_MODEL_OPENCODE_GO
     }
 
     /** [provider]에 대해 실제 요청에 쓸 키 */
@@ -90,19 +107,56 @@ object LlmApiKeyStore {
             .apply()
     }
 
-    /** 한 번에 제공자 + 세 키 저장 */
+    /** 선택된 제공자의 모델 ID (미저장이면 기본 모델) */
+    fun getSelectedModel(context: Context, provider: LlmProvider): String {
+        val p = prefs(context)
+        val prefName = modelPref(provider)
+        val stored = p.getString(prefName, null)?.trim()
+        return if (!stored.isNullOrEmpty()) stored else LlmModels.defaultModelFor(provider)
+    }
+
+    fun saveModel(context: Context, provider: LlmProvider, modelApiId: String) {
+        prefs(context).edit()
+            .putString(modelPref(provider), modelApiId.trim())
+            .apply()
+    }
+
+    /** Opencode GO Base URL — 미저장·구버전 경로는 [LlmEndpoints] 기본값으로 자동 연결 */
+    fun getOpencodeGoBaseUrl(context: Context): String {
+        val p = prefs(context)
+        val stored = p.getString(KEY_OPENCODE_GO_BASE_URL, null)
+        return LlmEndpoints.effectiveOpencodeGoBaseUrl(stored)
+    }
+
+    fun saveOpencodeGoBaseUrl(context: Context, url: String) {
+        prefs(context).edit()
+            .putString(KEY_OPENCODE_GO_BASE_URL, url.trim())
+            .apply()
+    }
+
+    /** 한 번에 제공자 + 네 키 + 모델 저장 (Opencode GO 서버 URL은 자동) */
     fun saveAll(
         context: Context,
         provider: LlmProvider,
         claudeKey: String,
         openaiKey: String,
-        geminiKey: String
+        geminiKey: String,
+        opencodeGoKey: String,
+        claudeModel: String,
+        openaiModel: String,
+        geminiModel: String,
+        opencodeGoModel: String,
     ) {
         prefs(context).edit()
             .putString(KEY_PROVIDER, LlmProvider.toStoredName(provider))
             .putString(KEY_CLAUDE, claudeKey.trim())
             .putString(KEY_OPENAI, openaiKey.trim())
             .putString(KEY_GEMINI, geminiKey.trim())
+            .putString(KEY_OPENCODE_GO, opencodeGoKey.trim())
+            .putString(KEY_MODEL_CLAUDE, claudeModel.trim())
+            .putString(KEY_MODEL_OPENAI, openaiModel.trim())
+            .putString(KEY_MODEL_GEMINI, geminiModel.trim())
+            .putString(KEY_MODEL_OPENCODE_GO, opencodeGoModel.trim())
             .apply()
     }
 }

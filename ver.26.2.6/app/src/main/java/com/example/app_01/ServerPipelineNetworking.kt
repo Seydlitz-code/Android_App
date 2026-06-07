@@ -1466,13 +1466,28 @@ internal const val ACCIDENT_SCENE_REPORT_VISUAL_HINT =
 
 /** 서버 DA3 산출물 4종(PLY·topview·sideview·quality_report.json)만 근거로 쓰도록 LLM에 전달하는 기본 지시 */
 internal const val ACCIDENT_SCENE_REPORT_BASE_PROMPT =
-    "서버 DA3 파이프라인 산출물만 입력으로 사용하여 사고 현장 분석 HTML 프레젠테이션 보고서를 작성하세요. " +
+    "서버 DA3 파이프라인 산출물을 입력으로 사용하여 사고 현장 분석 HTML 프레젠테이션 보고서를 작성하세요. " +
         "입력으로 허용되는 항목은 (1) DA3 포인트 클라우드 3D 모델 PLY 메타데이터, " +
-        "(2) topview·sideview 2D 투영 이미지 2장, (3) 포인트 클라우드 평가표 quality_report.json 뿐입니다. " +
-        "촬영 원본·갤러리 사진·GLB·analysis JSON·CSV 등 기타 파일은 근거로 사용하지 마세요. " +
+        "(2) topview·sideview 2D 투영 이미지 2장, (3) 포인트 클라우드 평가표 quality_report.json 입니다. " +
         ACCIDENT_SCENE_REPORT_VISUAL_HINT + " " +
         "표지·목차·본문(포인트 클라우드 품질 평가, 3D 장면 개요, 상·하향 투영 해석, 사고 형태 분석, 원인 추론, 한계·면책)을 " +
         "`<section class=\"slide\">`로 구분하세요."
+
+/** 사고 현장 **촬영 사진** 기반 보고서 — 3D 모델·DA3 산출물 없이도 작성 */
+internal const val ACCIDENT_SCENE_PHOTO_REPORT_VISUAL_HINT =
+    "보고서는 단일 ```html``` 블록의 완전한 HTML 문서로 출력하세요. " +
+        "첨부 사고 현장 사진은 `<img>` 1~2개(대표 전경·측면)에 `src=\"embed:photo-1\"` / `src=\"embed:photo-2\"` placeholder 또는 빈 src — " +
+        "앱이 data URI로 치환합니다. `topview.png`·HTTP URL·짧은 base64 placeholder는 금지합니다. " +
+        "관찰·추정은 HTML `<table>`과 Chart.js 그래프(사고 요인·환경 요약 등)로 정리하고 각 시각 요소 아래 한국어 해석을 포함하세요. " +
+        "이모지·Unicode 장식 기호·python-docx·Python은 사용하지 마세요."
+
+internal const val ACCIDENT_SCENE_PHOTO_REPORT_BASE_PROMPT =
+    "첨부된 **사고 현장 촬영 사진**을 종합 분석하여 사고 현장 분석 HTML 프레젠테이션 보고서(단일 ```html``` 블록)를 출력하세요. " +
+        ACCIDENT_SCENE_PHOTO_REPORT_VISUAL_HINT + " " +
+        "모든 사진을 하나의 통합 현장 데이터셋으로 분석하고, \"사진 1에서는…\", \"이미지에서 보이듯…\" 등 개별 사진 나열은 금지합니다. " +
+        "표지·목차·본문(현장 개요, 도로·교통 환경, 차량·물체 배치, 충돌·접촉 흔적 추정, 사고 형태 분석, 원인 가설, 분석 한계·면책)을 " +
+        "`<section class=\"slide\">`로 구분하세요. " +
+        "DA3·PLY·포인트 클라우드 데이터가 없으면 해당 섹션은 생략하거나 「촬영 사진 기반」 한계를 명시하세요."
 
 private fun readPlyHeaderExcerptForReport(file: File, maxChars: Int = 2_400): String {
     if (!file.isFile) return ""

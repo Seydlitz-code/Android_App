@@ -27,6 +27,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -34,6 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import android.net.Uri
 import java.io.File
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -43,9 +45,26 @@ fun HtmlReportWebViewScreen(
     title: String,
     modifier: Modifier = Modifier,
     onClose: () -> Unit,
+    /** 깨진 `<img>` 보강용 첨부·DA3 투영 이미지 URI */
+    attachmentImageUris: List<Uri> = emptyList(),
 ) {
-    val htmlContent = remember(htmlFile.absolutePath) {
-        runCatching { htmlFile.readText(Charsets.UTF_8) }.getOrDefault("")
+    val context = LocalContext.current
+    val htmlContent = remember(htmlFile.absolutePath, attachmentImageUris) {
+        val raw = runCatching { htmlFile.readText(Charsets.UTF_8) }.getOrDefault("")
+        val parent = htmlFile.parentFile ?: return@remember raw
+        if (attachmentImageUris.isEmpty()) return@remember raw
+        val needsPatch = HtmlReportImageEmbedder.htmlNeedsImageEmbedPatch(raw)
+        if (!needsPatch && !raw.contains("<img", ignoreCase = true)) return@remember raw
+        val patched = HtmlReportImageEmbedder.embedAttachedImages(
+            context,
+            raw,
+            parent,
+            attachmentImageUris,
+        )
+        if (patched != raw) {
+            runCatching { htmlFile.writeText(patched, Charsets.UTF_8) }
+        }
+        patched
     }
     val baseUrl = remember(htmlFile.absolutePath) {
         "file://${htmlFile.parentFile?.absolutePath?.replace('\\', '/')}/"
@@ -95,6 +114,11 @@ fun HtmlReportWebViewScreen(
                     settings.domStorageEnabled = true
                     settings.allowFileAccess = true
                     settings.allowContentAccess = true
+                    @Suppress("DEPRECATION")
+                    run {
+                        settings.allowFileAccessFromFileURLs = true
+                        settings.allowUniversalAccessFromFileURLs = true
+                    }
                     settings.useWideViewPort = true
                     settings.loadWithOverviewMode = true
                     webViewClient = object : WebViewClient() {

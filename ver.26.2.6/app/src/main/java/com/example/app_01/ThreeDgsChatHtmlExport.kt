@@ -1,6 +1,11 @@
 package com.example.app_01
 
+import android.content.ContentValues
 import android.content.Context
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -17,22 +22,131 @@ object ThreeDgsChatHtmlExport {
         val extractedFromFence: Boolean,
     )
 
+    data class HtmlDownloadsSaveResult(
+        val fileName: String,
+        val displayPath: String,
+    )
+
     fun tryExportToHtml(
         context: Context,
         fullMarkdown: String,
         subdirectory: String = "3dgs_llm_exports",
         fileBasePrefix: String = "3dgs_report",
         docTitle: String = "3DGS 분석 보고서",
+        /** 보고서 `<img>` 보강용 첨부·DA3 투영 이미지 URI (앱이 data URI로 삽입) */
+        attachmentImageUris: List<Uri> = emptyList(),
     ): HtmlExportResult? {
+        val prepared = prepareHtmlContent(
+            context = context,
+            fullMarkdown = fullMarkdown,
+            subdirectory = subdirectory,
+            docTitle = docTitle,
+            attachmentImageUris = attachmentImageUris,
+        ) ?: return null
+        return try {
+            val htmlFile = File(prepared.outDir, "${fileBasePrefix}_${prepared.stamp}.html")
+            htmlFile.writeText(prepared.html, Charsets.UTF_8)
+            HtmlExportResult(htmlFile = htmlFile, extractedFromFence = prepared.fromFence)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
+    /** HTML 보고서를 기기 **다운로드** 폴더에 저장합니다. */
+    fun trySaveToDownloads(
+        context: Context,
+        fullMarkdown: String,
+        subdirectory: String = "3dgs_llm_exports",
+        fileBasePrefix: String = "3dgs_report",
+        docTitle: String = "3DGS 분석 보고서",
+        attachmentImageUris: List<Uri> = emptyList(),
+    ): HtmlDownloadsSaveResult? {
+        val prepared = prepareHtmlContent(
+            context = context,
+            fullMarkdown = fullMarkdown,
+            subdirectory = subdirectory,
+            docTitle = docTitle,
+            attachmentImageUris = attachmentImageUris,
+        ) ?: return null
+        val fileName = "${fileBasePrefix}_${prepared.stamp}.html"
+        return saveHtmlContentToDownloads(context, prepared.html, fileName)
+    }
+
+    private data class PreparedHtml(
+        val html: String,
+        val outDir: File,
+        val stamp: String,
+        val fromFence: Boolean,
+    )
+
+    private fun prepareHtmlContent(
+        context: Context,
+        fullMarkdown: String,
+        subdirectory: String,
+        docTitle: String,
+        attachmentImageUris: List<Uri>,
+    ): PreparedHtml? {
         val raw = extractHtmlDocument(fullMarkdown) ?: return null
         return try {
             val outDir = File(context.getExternalFilesDir(null), subdirectory).apply { mkdirs() }
             val stamp = timestampCompact()
-            val htmlFile = File(outDir, "${fileBasePrefix}_$stamp.html")
             val fromFence = extractFirstHtmlFence(fullMarkdown) != null
-            val finalHtml = ensureCompleteHtmlDocument(raw, docTitle)
-            htmlFile.writeText(finalHtml, Charsets.UTF_8)
-            HtmlExportResult(htmlFile = htmlFile, extractedFromFence = fromFence)
+            var finalHtml = ensureCompleteHtmlDocument(raw, docTitle)
+            if (attachmentImageUris.isNotEmpty()) {
+                finalHtml = HtmlReportImageEmbedder.embedAttachedImages(
+                    context,
+                    finalHtml,
+                    outDir,
+                    attachmentImageUris,
+                )
+            }
+            PreparedHtml(html = finalHtml, outDir = outDir, stamp = stamp, fromFence = fromFence)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
+    fun saveHtmlContentToDownloads(
+        context: Context,
+        htmlContent: String,
+        fileName: String,
+    ): HtmlDownloadsSaveResult? {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val resolver = context.contentResolver
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "text/html")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: return null
+                resolver.openOutputStream(uri)?.use { stream ->
+                    stream.write(htmlContent.toByteArray(Charsets.UTF_8))
+                } ?: run {
+                    resolver.delete(uri, null, null)
+                    return null
+                }
+                val done = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+                resolver.update(uri, done, null, null)
+                HtmlDownloadsSaveResult(
+                    fileName = fileName,
+                    displayPath = "${Environment.DIRECTORY_DOWNLOADS}/$fileName",
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                if (!dir.exists() && !dir.mkdirs()) return null
+                val outFile = File(dir, fileName)
+                outFile.writeText(htmlContent, Charsets.UTF_8)
+                HtmlDownloadsSaveResult(
+                    fileName = fileName,
+                    displayPath = outFile.absolutePath,
+                )
+            }
         } catch (e: Exception) {
             e.printStackTrace()
             null

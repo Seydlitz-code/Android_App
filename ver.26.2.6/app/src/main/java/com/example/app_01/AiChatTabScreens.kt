@@ -319,13 +319,21 @@ private const val MAX_3DGS_AUX_ATTACHMENTS = 12
 
 private const val GLTF_MAGIC = 0x46546C67
 
-/** HTML 보고서: 이미지·표·Chart.js 그래프를 WebView에서 렌더링 (사고 현장 분석 = 서버 DA3 4종만) */
+/** HTML 보고서: 이미지·표·Chart.js 그래프를 WebView에서 렌더링 (사고 현장 = DA3 산출물 또는 촬영 사진) */
 private const val REPORT_HTML_VISUAL_HINT = ACCIDENT_SCENE_REPORT_VISUAL_HINT
+
+/** 파손부위 분석 HTML — topview/sideview 경로 금지(앱이 첨부 사진을 data URI로 삽입) */
+private const val DAMAGE_REPORT_VISUAL_HINT =
+    "보고서는 단일 ```html``` 블록의 완전한 HTML 문서로 출력하세요. " +
+        "참고 사진은 `<img>` 1~2개(전면·측면 대표)만 두고, src에는 `embed:photo-1` 같은 placeholder만 넣거나 src를 비워 두세요. " +
+        "`topview.png`·`sideview.png`·http URL·짧은 base64 placeholder는 금지합니다(앱이 첨부 사진으로 치환). " +
+        "표·Chart.js 그래프로 파손·견적을 시각화하고, 각 시각 요소 아래 한국어 해석을 포함하세요. " +
+        "이모지·python-docx·Python은 사용하지 마세요."
 
 /** 파손 분석 모드: 텍스트가 비어 있고 이미지만 보낼 때 LLM에 넣는 기본 요청 */
 private const val DAMAGE_ANALYSIS_DEFAULT_PROMPT =
     "첨부된 사고 차량 사진을 종합 분석하여, 한국어 HTML 프레젠테이션 보고서(단일 ```html``` 블록, 완전한 HTML 문서)를 출력하세요. " +
-        REPORT_HTML_VISUAL_HINT + " " +
+        DAMAGE_REPORT_VISUAL_HINT + " " +
         "이미지 개별 설명은 절대 금지 — 모든 사진을 하나의 통합 차량 파손 데이터셋으로 분석합니다. " +
         "보고서는 `<section class=\"slide\">`로 구분된 표지·목차·본문 구조로 작성합니다: " +
         "(1) 차량 모델 정보, (2) 사고 발생 형태 분석, (3) 【핵심】파손 부위 정리 — HTML `<table>`로 전체 파손 목록, " +
@@ -363,14 +371,18 @@ private fun Uri.looksLikeRasterImagePath(): Boolean {
         pl.endsWith(".webp") || pl.endsWith(".heic") || pl.endsWith(".heif")
 }
 
-private fun Uri.isChatPickVideoUri(): Boolean {
-    val pl = path?.lowercase(Locale.getDefault()) ?: return false
-    return pl.endsWith(".mp4") || pl.endsWith(".mov") || pl.endsWith(".webm")
+private fun Uri.isChatPickVideoUri(context: Context): Boolean = isVideoUri(context, this)
+
+private fun Uri.isChatPickImageUri(context: Context): Boolean {
+    if (isVideoUri(context, this)) return false
+    if (looksLikeRasterImagePath()) return true
+    val mime = context.contentResolver.getType(this)?.lowercase(Locale.getDefault()) ?: return false
+    return mime.startsWith("image/")
 }
 
-/** 사고 현장 분석 보고서 허용 비전 입력: 서버 DA3 topview·sideview 투영만 */
-private fun Uri.isDa3ReportProjectionImage(): Boolean {
-    if (isChatPickVideoUri()) return false
+/** 사고 현장 분석 보고서 허용 비전 입력: 서버 DA3 topview·sideview 투영 (HTML embed 우선) */
+private fun Uri.isDa3ReportProjectionImage(context: Context): Boolean {
+    if (isChatPickVideoUri(context)) return false
     val pl = path?.lowercase(Locale.getDefault()) ?: return false
     if (!pl.endsWith(".png") && !pl.endsWith(".jpg") && !pl.endsWith(".jpeg") && !pl.endsWith(".webp")) {
         return false
@@ -378,6 +390,92 @@ private fun Uri.isDa3ReportProjectionImage(): Boolean {
     val base = pl.substringAfterLast('/')
     return base.contains("topview") || base.contains("sideview") ||
         base.contains("top_view") || base.contains("side_view")
+}
+
+/** HTML 보고서 `<img>` 보강용 topview·sideview URI (서버 DA3 → 최근 사용자 첨부 순) */
+private fun resolveAccidentSceneProjectionUris(
+    context: Context,
+    serverDa3RasterUris: List<Uri>,
+    messages: List<ChatMessage>,
+): List<Uri> {
+    if (serverDa3RasterUris.isNotEmpty()) return serverDa3RasterUris
+    val fromUser = messages.asReversed()
+        .firstOrNull { it.isUser && it.imageUris.isNotEmpty() }
+        ?.imageUris
+        .orEmpty()
+    val projections = fromUser.filter { it.isDa3ReportProjectionImage(context) }
+    if (projections.isNotEmpty()) return projections
+    return fromUser.filter { it.isChatPickImageUri(context) }
+}
+
+private fun Uri.isReportRasterImage(context: Context): Boolean = isChatPickImageUri(context)
+
+/**
+ * 해당 assistant 메시지 직전 사용자 첨부에서 HTML `<img>` 보강용 URI를 수집합니다.
+ */
+private fun resolveReportAttachmentUrisForMessage(
+    context: Context,
+    messages: List<ChatMessage>,
+    assistantMessageIndex: Int,
+    serverDa3RasterUris: List<Uri>,
+    mode: AiChatTabMode,
+): List<Uri> {
+    when (mode) {
+        AiChatTabMode.MOBILE_3DGS -> {
+            if (serverDa3RasterUris.isNotEmpty()) return serverDa3RasterUris
+            for (i in assistantMessageIndex - 1 downTo 0) {
+                val m = messages.getOrNull(i) ?: break
+                if (m.isUser) {
+                    val projections = m.imageUris.filter { it.isDa3ReportProjectionImage(context) }
+                    if (projections.isNotEmpty()) return projections
+                    return m.imageUris.filter { it.isChatPickImageUri(context) }
+                }
+            }
+            return emptyList()
+        }
+        AiChatTabMode.DAMAGE_ANALYSIS -> {
+            for (i in assistantMessageIndex - 1 downTo 0) {
+                val m = messages.getOrNull(i) ?: break
+                if (m.isUser) {
+                    return m.imageUris.filter { it.isReportRasterImage(context) }
+                }
+            }
+            return emptyList()
+        }
+        else -> return emptyList()
+    }
+}
+
+private fun resolveReportAttachmentUrisForViewer(
+    context: Context,
+    messages: List<ChatMessage>,
+    serverDa3RasterUris: List<Uri>,
+    mode: AiChatTabMode,
+): List<Uri> {
+    val lastAssistantIdx = messages.indexOfLast { !it.isUser }
+    if (lastAssistantIdx < 0) {
+        return when (mode) {
+            AiChatTabMode.MOBILE_3DGS -> resolveAccidentSceneProjectionUris(context, serverDa3RasterUris, messages)
+            AiChatTabMode.DAMAGE_ANALYSIS ->
+                messages.asReversed()
+                    .firstOrNull { it.isUser && it.imageUris.isNotEmpty() }
+                    ?.imageUris
+                    ?.filter { it.isReportRasterImage(context) }
+                    .orEmpty()
+            else -> emptyList()
+        }
+    }
+    return resolveReportAttachmentUrisForMessage(context, messages, lastAssistantIdx, serverDa3RasterUris, mode)
+}
+
+/** 사고 현장 분석: DA3 PLY·quality JSON 또는 topview/sideview 투영이 첨부되었는지 */
+private fun isAccidentSceneDa3Input(
+    context: Context,
+    imageUris: List<Uri>,
+    auxUris: List<Uri>,
+): Boolean {
+    if (auxUris.any { it.isDa3ReportAllowedAuxFile() }) return true
+    return imageUris.any { it.isDa3ReportProjectionImage(context) }
 }
 
 /** 사고 현장 분석 보고서 허용 텍스트 부록: PLY·quality_report.json 만 */
@@ -388,7 +486,8 @@ private fun Uri.isDa3ReportAllowedAuxFile(): Boolean {
 }
 
 private fun Uri.isLikelyImageOrVideoUri(context: Context): Boolean {
-    if (isChatPickVideoUri()) return true
+    if (isChatPickVideoUri(context)) return true
+    if (isChatPickImageUri(context)) return true
     val pl = path?.lowercase(Locale.getDefault()) ?: ""
     if (pl.endsWith(".jpg") || pl.endsWith(".jpeg") || pl.endsWith(".png") ||
         pl.endsWith(".webp") || pl.endsWith(".heic") || pl.endsWith(".heif")
@@ -555,6 +654,141 @@ private suspend fun read3dgsDataAppendixForLlm(context: Context, uris: List<Uri>
         sb.toString().take(MAX_JSON_APPENDIX_TOTAL_CHARS)
     }
 
+/**
+ * AI 탭 상단 모드 선택 바.
+ * [modeMenuExpanded]를 이 컴포저블 내부에 두어, 드롭다운을 열 때 채팅 목록(LazyColumn) 전체가 재구성되지 않게 합니다.
+ */
+@Composable
+private fun AiChatModeSelectorBar(
+    aiTabMode: AiChatTabMode,
+    onAiTabModeChange: (AiChatTabMode) -> Unit,
+    claudeModelDisplayName: String,
+    onOpenDrawer: () -> Unit,
+    onNewChat: () -> Unit,
+) {
+    val palette = LocalAppUiPalette.current
+    var modeMenuExpanded by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(onClick = onOpenDrawer) {
+            Icon(
+                imageVector = Icons.Filled.Menu,
+                contentDescription = "메뉴",
+                tint = palette.onBackground,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+
+        Box(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { modeMenuExpanded = true }
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = when (aiTabMode) {
+                        AiChatTabMode.CLAUDE -> claudeModelDisplayName
+                        AiChatTabMode.AI_CAD -> "AI CAD"
+                        AiChatTabMode.MOBILE_3DGS -> "사고 현장 분석"
+                        AiChatTabMode.DAMAGE_ANALYSIS -> "파손부위 분석"
+                    },
+                    color = palette.onBackground,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Icon(
+                    imageVector = Icons.Filled.ArrowDropDown,
+                    contentDescription = "모드 선택",
+                    tint = palette.onBackground.copy(alpha = 0.85f),
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+            DropdownMenu(
+                expanded = modeMenuExpanded,
+                onDismissRequest = { modeMenuExpanded = false },
+                modifier = Modifier.background(palette.dropdownMenuBg),
+                properties = androidx.compose.ui.window.PopupProperties(focusable = false),
+            ) {
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            claudeModelDisplayName,
+                            color = palette.onBackground,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                        )
+                    },
+                    onClick = {
+                        onAiTabModeChange(AiChatTabMode.CLAUDE)
+                        modeMenuExpanded = false
+                    }
+                )
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            "AI CAD",
+                            color = palette.onBackground,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                        )
+                    },
+                    onClick = {
+                        onAiTabModeChange(AiChatTabMode.AI_CAD)
+                        modeMenuExpanded = false
+                    }
+                )
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            "사고 현장 분석",
+                            color = palette.onBackground,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                        )
+                    },
+                    onClick = {
+                        onAiTabModeChange(AiChatTabMode.MOBILE_3DGS)
+                        modeMenuExpanded = false
+                    }
+                )
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            "파손부위 분석",
+                            color = palette.onBackground,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                        )
+                    },
+                    onClick = {
+                        onAiTabModeChange(AiChatTabMode.DAMAGE_ANALYSIS)
+                        modeMenuExpanded = false
+                    }
+                )
+            }
+        }
+
+        IconButton(onClick = onNewChat) {
+            Icon(
+                imageVector = Icons.Filled.Edit,
+                contentDescription = "새 채팅",
+                tint = palette.onBackground,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+}
+
 @Composable
 fun ClaudeChatScreen(
     galleryImages: List<Uri>,
@@ -583,11 +817,11 @@ fun ClaudeChatScreen(
     var serverDa3QualityJsonUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var aiTabMode by remember { mutableStateOf(AiChatTabMode.CLAUDE) }
     var aiCadOption by remember { mutableStateOf(ClaudeChatClient.AiCadInputOption.DIMENSIONS_DIRECT) }
-    var modeMenuExpanded by remember { mutableStateOf(false) }
     var stlDialogForIndex by remember { mutableStateOf<Int?>(null) }
     var stlSaveNameInput by remember { mutableStateOf("") }
     var stlBusyMessageIndex by remember { mutableStateOf<Int?>(null) }
     var htmlBusyMessageIndex by remember { mutableStateOf<Int?>(null) }
+    var htmlSaveBusyMessageIndex by remember { mutableStateOf<Int?>(null) }
     var htmlReportViewerFile by remember { mutableStateOf<java.io.File?>(null) }
     var htmlReportViewerTitle by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -595,6 +829,11 @@ fun ClaudeChatScreen(
     var currentThreadId by remember { mutableStateOf<String?>(null) }
     var isDrawerOpen by remember { mutableStateOf(false) }
     var allThreads by remember { mutableStateOf<List<ConversationThread>>(emptyList()) }
+
+    val claudeModelDisplayName = remember {
+        val provider = LlmApiKeyStore.getSelectedProvider(context)
+        LlmModels.displayNameFor(provider, LlmApiKeyStore.getSelectedModel(context, provider))
+    }
 
     LaunchedEffect(stlDialogForIndex) {
         if (stlDialogForIndex != null) stlSaveNameInput = ""
@@ -651,127 +890,20 @@ fun ClaudeChatScreen(
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = { isDrawerOpen = true }) {
-                Icon(
-                    imageVector = Icons.Filled.Menu,
-                    contentDescription = "메뉴",
-                    tint = palette.onBackground,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-
-            Box(modifier = Modifier.weight(1f)) {
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable { modeMenuExpanded = true }
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = when (aiTabMode) {
-                            AiChatTabMode.CLAUDE -> "클로드"
-                            AiChatTabMode.AI_CAD -> "AI CAD"
-                            AiChatTabMode.MOBILE_3DGS -> "사고 현장 분석"
-                            AiChatTabMode.DAMAGE_ANALYSIS -> "파손부위 분석"
-                        },
-                        color = palette.onBackground,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Icon(
-                        imageVector = Icons.Filled.ArrowDropDown,
-                        contentDescription = "모드 선택",
-                        tint = palette.onBackground.copy(alpha = 0.85f),
-                        modifier = Modifier.size(28.dp)
-                    )
-                }
-                DropdownMenu(
-                    expanded = modeMenuExpanded,
-                    onDismissRequest = { modeMenuExpanded = false },
-                    modifier = Modifier.background(palette.dropdownMenuBg)
-                ) {
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                "클로드 AI LLM",
-                                color = palette.onBackground,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                            )
-                        },
-                        onClick = {
-                            aiTabMode = AiChatTabMode.CLAUDE
-                            modeMenuExpanded = false
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                "AI CAD",
-                                color = palette.onBackground,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                            )
-                        },
-                        onClick = {
-                            aiTabMode = AiChatTabMode.AI_CAD
-                            modeMenuExpanded = false
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                "사고 현장 분석",
-                                color = palette.onBackground,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                            )
-                        },
-                        onClick = {
-                            aiTabMode = AiChatTabMode.MOBILE_3DGS
-                            modeMenuExpanded = false
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                "파손부위 분석",
-                                color = palette.onBackground,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                            )
-                        },
-                        onClick = {
-                            aiTabMode = AiChatTabMode.DAMAGE_ANALYSIS
-                            modeMenuExpanded = false
-                        }
-                    )
-                }
-            }
-
-            IconButton(onClick = {
+        AiChatModeSelectorBar(
+            aiTabMode = aiTabMode,
+            onAiTabModeChange = { aiTabMode = it },
+            claudeModelDisplayName = claudeModelDisplayName,
+            onOpenDrawer = { isDrawerOpen = true },
+            onNewChat = {
                 messages.clear()
                 currentThreadId = null
                 streamingText = ""
                 errorMessage = null
                 attachedImages = emptyList()
                 attachedAuxUris = emptyList()
-            }) {
-                Icon(
-                    imageVector = Icons.Filled.Edit,
-                    contentDescription = "새 채팅",
-                    tint = palette.onBackground,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
-        }
+            },
+        )
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -786,7 +918,10 @@ fun ClaudeChatScreen(
             contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            itemsIndexed(messages) { index, msg ->
+            itemsIndexed(
+                items = messages,
+                key = { index, msg -> "msg-$index-${msg.text.hashCode()}-${msg.isUser}" },
+            ) { index, msg ->
                 val code = remember(msg.text) { extractOpenCadCode(msg.text) }
                 val useAiCadWindow =
                     aiTabMode == AiChatTabMode.AI_CAD && !msg.isUser && code != null && msg.imageUris.isEmpty()
@@ -805,21 +940,18 @@ fun ClaudeChatScreen(
                         ) {
                         MarkdownThreeDgsExport(
                             isExporting = htmlBusyMessageIndex == index,
+                            isSaving = htmlSaveBusyMessageIndex == index,
                             onExport = {
                                 scope.launch {
                                     htmlBusyMessageIndex = index
-                                    val (subdir, prefix, title) = when (aiTabMode) {
-                                        AiChatTabMode.DAMAGE_ANALYSIS -> Triple(
-                                            "damage_llm_exports",
-                                            "damage_report",
-                                            "교통사고 파손·부위 분석 보고서",
-                                        )
-                                        else -> Triple(
-                                            "3dgs_llm_exports",
-                                            "3dgs_report",
-                                            "사고 현장 분석 보고서",
-                                        )
-                                    }
+                                    val (subdir, prefix, title) = htmlReportExportParams(aiTabMode)
+                                    val attachmentUris = resolveReportAttachmentUrisForMessage(
+                                        context = context,
+                                        messages = messages,
+                                        assistantMessageIndex = index,
+                                        serverDa3RasterUris = serverDa3RasterUris,
+                                        mode = aiTabMode,
+                                    )
                                     val htmlResult = withContext(Dispatchers.IO) {
                                         ThreeDgsChatHtmlExport.tryExportToHtml(
                                             context,
@@ -827,6 +959,7 @@ fun ClaudeChatScreen(
                                             subdirectory = subdir,
                                             fileBasePrefix = prefix,
                                             docTitle = title,
+                                            attachmentImageUris = attachmentUris,
                                         )
                                     }
                                     htmlBusyMessageIndex = null
@@ -846,7 +979,44 @@ fun ClaudeChatScreen(
                                         htmlReportViewerFile = htmlResult.htmlFile
                                     }
                                 }
-                            }
+                            },
+                            onSaveToDownloads = {
+                                scope.launch {
+                                    htmlSaveBusyMessageIndex = index
+                                    val (subdir, prefix, title) = htmlReportExportParams(aiTabMode)
+                                    val attachmentUris = resolveReportAttachmentUrisForMessage(
+                                        context = context,
+                                        messages = messages,
+                                        assistantMessageIndex = index,
+                                        serverDa3RasterUris = serverDa3RasterUris,
+                                        mode = aiTabMode,
+                                    )
+                                    val saveResult = withContext(Dispatchers.IO) {
+                                        ThreeDgsChatHtmlExport.trySaveToDownloads(
+                                            context,
+                                            msg.text,
+                                            subdirectory = subdir,
+                                            fileBasePrefix = prefix,
+                                            docTitle = title,
+                                            attachmentImageUris = attachmentUris,
+                                        )
+                                    }
+                                    htmlSaveBusyMessageIndex = null
+                                    if (saveResult == null) {
+                                        Toast.makeText(
+                                            context,
+                                            "HTML 코드 블록이 없거나 다운로드 폴더 저장에 실패했습니다.",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    } else {
+                                        Toast.makeText(
+                                            context,
+                                            "다운로드 폴더에 저장됨: ${saveResult.fileName}",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                }
+                            },
                         )
                     } else {
                         null
@@ -1020,21 +1190,10 @@ fun ClaudeChatScreen(
                 val text = messageText.trim()
                 val images = attachedImages
                 val imagesForLlmRaw = when (aiTabMode) {
-                    AiChatTabMode.MOBILE_3DGS ->
-                        images.filter { !it.isChatPickVideoUri() && it.isDa3ReportProjectionImage() }
+                    AiChatTabMode.MOBILE_3DGS,
                     AiChatTabMode.DAMAGE_ANALYSIS ->
-                        images.filter { !it.isChatPickVideoUri() }
+                        images.filter { it.isChatPickImageUri(context) }
                     else -> images
-                }
-                val imagesForLlm = if (imagesForLlmRaw.size > MAX_LLM_VISION_IMAGES_PER_REQUEST) {
-                    Toast.makeText(
-                        context,
-                        "API 전송 용량 제한으로 사진 ${imagesForLlmRaw.size}장 중 ${MAX_LLM_VISION_IMAGES_PER_REQUEST}장만 보냅니다. (전체 구간에서 고르게 선택)",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                    evenlySampleListForLlm(imagesForLlmRaw, MAX_LLM_VISION_IMAGES_PER_REQUEST)
-                } else {
-                    imagesForLlmRaw
                 }
                 val rawAuxSnap =
                     if (aiTabMode == AiChatTabMode.MOBILE_3DGS) {
@@ -1042,6 +1201,27 @@ fun ClaudeChatScreen(
                     } else {
                         emptyList()
                     }
+                val isDa3AccidentReport = aiTabMode == AiChatTabMode.MOBILE_3DGS &&
+                    isAccidentSceneDa3Input(context, imagesForLlmRaw, rawAuxSnap)
+                val maxVision = when (aiTabMode) {
+                    AiChatTabMode.MOBILE_3DGS -> if (isDa3AccidentReport) {
+                        MAX_LLM_VISION_IMAGES_ACCIDENT_REPORT
+                    } else {
+                        MAX_LLM_VISION_IMAGES_DAMAGE_REPORT
+                    }
+                    AiChatTabMode.DAMAGE_ANALYSIS -> MAX_LLM_VISION_IMAGES_DAMAGE_REPORT
+                    else -> MAX_LLM_VISION_IMAGES_PER_REQUEST
+                }
+                val imagesForLlm = if (imagesForLlmRaw.size > maxVision) {
+                    Toast.makeText(
+                        context,
+                        "API 전송 용량 제한으로 사진 ${imagesForLlmRaw.size}장 중 ${maxVision}장만 보냅니다. (전체 구간에서 고르게 선택)",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    evenlySampleListForLlm(imagesForLlmRaw, maxVision)
+                } else {
+                    imagesForLlmRaw
+                }
                 val auxSnap = if (rawAuxSnap.size > MAX_3DGS_AUX_ATTACHMENTS) {
                     Toast.makeText(
                         context,
@@ -1056,9 +1236,14 @@ fun ClaudeChatScreen(
                             aiTabMode == AiChatTabMode.DAMAGE_ANALYSIS
                         )
                     ) {
+                        val allVideo = images.all { it.isChatPickVideoUri(context) }
                         Toast.makeText(
                             context,
-                            "동영상만 선택되었습니다. 이미지를 첨부하세요.",
+                            if (allVideo) {
+                                "동영상만 선택되었습니다. 이미지를 첨부하세요."
+                            } else {
+                                "첨부한 이미지를 읽을 수 없습니다. 갤러리에서 다시 선택해 주세요."
+                            },
                             Toast.LENGTH_LONG
                         ).show()
                     }
@@ -1068,7 +1253,7 @@ fun ClaudeChatScreen(
                 val userBubbleText = when {
                     text.isNotEmpty() -> text
                     images.size > 1 -> "[${images.size}개 미디어]"
-                    images.size == 1 -> if (images.single().isChatPickVideoUri()) "[동영상 1개]" else "[이미지 1장]"
+                    images.size == 1 -> if (images.single().isChatPickVideoUri(context)) "[동영상 1개]" else "[이미지 1장]"
                     auxSnap.isNotEmpty() && images.isEmpty() -> "[데이터 파일 ${auxSnap.size}개]"
                     auxSnap.isNotEmpty() -> "[미디어 ${images.size}개·데이터 파일 ${auxSnap.size}개]"
                     else -> ""
@@ -1090,23 +1275,35 @@ fun ClaudeChatScreen(
                 errorMessage = null
 
                 scope.launch {
-                    val imageBase64List = imagesForLlm.mapNotNull { uri ->
-                        decodeUriToBase64(context, uri)
+                    val maxDim = visionMaxDimForImageCount(imagesForLlm.size)
+                    val imageBase64List = withContext(Dispatchers.IO) {
+                        imagesForLlm.mapNotNull { uri ->
+                            decodeUriToBase64(context, uri, maxDim)
+                        }
+                    }
+                    if (imagesForLlm.isNotEmpty() && imageBase64List.isEmpty()) {
+                        isStreaming = false
+                        errorMessage = "첨부 이미지를 읽지 못했습니다. 갤러리에서 다시 선택해 주세요."
+                        return@launch
                     }
                     val dataAppendix = if (aiTabMode == AiChatTabMode.MOBILE_3DGS && auxSnap.isNotEmpty()) {
                         read3dgsDataAppendixForLlm(context, auxSnap)
                     } else ""
                     val defaultImgPrompt = when (aiTabMode) {
                         AiChatTabMode.MOBILE_3DGS -> when {
-                            imageBase64List.size >= 2 ->
+                            isDa3AccidentReport && imageBase64List.size >= 2 ->
                                 ACCIDENT_SCENE_REPORT_BASE_PROMPT + " " +
                                     "첨부 topview·sideview 2장과 본문 PLY·quality_report.json 데이터를 모두 반영하세요."
-                            imageBase64List.size == 1 ->
+                            isDa3AccidentReport && imageBase64List.size == 1 ->
                                 ACCIDENT_SCENE_REPORT_BASE_PROMPT + " " +
                                     "투영 이미지 1장만 첨부되었습니다. 가능한 범위에서 분석하되, topview·sideview 2장 부재를 한계 섹션에 명시하세요."
-                            dataAppendix.isNotBlank() ->
+                            isDa3AccidentReport && dataAppendix.isNotBlank() ->
                                 ACCIDENT_SCENE_REPORT_BASE_PROMPT
-                            else -> ACCIDENT_SCENE_REPORT_BASE_PROMPT
+                            isDa3AccidentReport ->
+                                ACCIDENT_SCENE_REPORT_BASE_PROMPT
+                            imageBase64List.isNotEmpty() ->
+                                ACCIDENT_SCENE_PHOTO_REPORT_BASE_PROMPT
+                            else -> ACCIDENT_SCENE_PHOTO_REPORT_BASE_PROMPT
                         }
                         AiChatTabMode.DAMAGE_ANALYSIS -> when {
                             imageBase64List.isNotEmpty() -> DAMAGE_ANALYSIS_DEFAULT_PROMPT
@@ -1159,7 +1356,7 @@ fun ClaudeChatScreen(
                                     DAMAGE_ANALYSIS_DEFAULT_PROMPT
                                 } else {
                                     "사고 차량 사진을 종합 분석하여 표지·목차·본문 구조의 차량 파손 분석 HTML 보고서(단일 ```html``` 블록)를 출력하세요. " +
-                                        REPORT_HTML_VISUAL_HINT + " " +
+                                        DAMAGE_REPORT_VISUAL_HINT + " " +
                                         "파손 목록·수리 견적은 HTML `<table>`과 Chart.js로 표현하고, 차량 모델·사고 형태·원인·면책 정보를 포함하세요."
                                 }
                             }
@@ -1466,6 +1663,12 @@ fun ClaudeChatScreen(
                 htmlFile = reportFile,
                 title = htmlReportViewerTitle.ifBlank { "보고서" },
                 modifier = Modifier.fillMaxSize(),
+                attachmentImageUris = resolveReportAttachmentUrisForViewer(
+                    context = context,
+                    messages = messages,
+                    serverDa3RasterUris = serverDa3RasterUris,
+                    mode = aiTabMode,
+                ),
                 onClose = {
                     htmlReportViewerFile = null
                     htmlReportViewerTitle = ""
@@ -1528,7 +1731,7 @@ private fun ChatPickMediaThumbnail(
 ) {
     val context = LocalContext.current
     val thumbPx = rememberGalleryGridThumbEdgePx(columns = 3)
-    val isVid = remember(uri) { uri.isChatPickVideoUri() }
+    val isVid = remember(uri) { uri.isChatPickVideoUri(context) }
     Box(
         modifier = modifier
             .aspectRatio(1f)
@@ -1974,7 +2177,7 @@ private fun ClaudeImageSelectDialog(
                                         TextButton(
                                             onClick = {
                                                 val usable = media.filter { u ->
-                                                    !includeServerLibraryTabs || !u.isChatPickVideoUri()
+                                                    !includeServerLibraryTabs || !u.isChatPickVideoUri(context)
                                                 }
                                                 if (usable.isEmpty() && media.isNotEmpty() && includeServerLibraryTabs) {
                                                     Toast.makeText(
@@ -2469,8 +2672,24 @@ private fun formatThreadTime(timestamp: Long): String {
 
 private data class MarkdownThreeDgsExport(
     val isExporting: Boolean,
+    val isSaving: Boolean,
     val onExport: () -> Unit,
+    val onSaveToDownloads: () -> Unit,
 )
+
+private fun htmlReportExportParams(mode: AiChatTabMode): Triple<String, String, String> =
+    when (mode) {
+        AiChatTabMode.DAMAGE_ANALYSIS -> Triple(
+            "damage_llm_exports",
+            "damage_report",
+            "교통사고 파손·부위 분석 보고서",
+        )
+        else -> Triple(
+            "3dgs_llm_exports",
+            "3dgs_report",
+            "사고 현장 분석 보고서",
+        )
+    }
 
 /** @param imageUris 비전 입력용 이미지·동영상, @param jsonUris 3DGS 등 텍스트 부록용(JSON·PLY·ZIP 등) URI (영속 필드명 유지) */
 private data class ChatMessage(
@@ -2720,10 +2939,23 @@ private fun ChatMessageItem(
                 isStreaming -> message.text + " ▊"
                 else -> message.text
             }
-            MarkdownText(
-                text = displayText,
-                threeDgsExport = if (isStreaming) null else threeDgsExport
-            )
+            if (isStreaming) {
+                // 스트리밍 중에는 전체 마크다운 파싱 비용을 피하고,
+                // 들어오는 토큰을 순차적으로 바로 보여준다.
+                Text(
+                    text = displayText,
+                    color = palette.markdownDefault,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                MarkdownText(
+                    text = displayText,
+                    threeDgsExport = threeDgsExport
+                )
+            }
         }
     }
 }
@@ -2923,7 +3155,9 @@ private fun MarkdownText(
                         MarkdownHtmlReportCodeBlock(
                             code = block.code,
                             isExporting = threeDgsExport.isExporting,
+                            isSaving = threeDgsExport.isSaving,
                             onExport = threeDgsExport.onExport,
+                            onSaveToDownloads = threeDgsExport.onSaveToDownloads,
                         )
                     } else {
                         MarkdownCodeBlock(language = block.language, code = block.code)
@@ -2953,9 +3187,12 @@ private fun MarkdownText(
 private fun MarkdownHtmlReportCodeBlock(
     code: String,
     isExporting: Boolean,
+    isSaving: Boolean,
     onExport: () -> Unit,
+    onSaveToDownloads: () -> Unit,
 ) {
     val palette = LocalAppUiPalette.current
+    val isBusy = isExporting || isSaving
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = palette.codeBlockBg,
@@ -2977,7 +3214,7 @@ private fun MarkdownHtmlReportCodeBlock(
                     fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace
                 )
-                if (isExporting) {
+                if (isBusy) {
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -2988,22 +3225,38 @@ private fun MarkdownHtmlReportCodeBlock(
                             strokeWidth = 2.dp
                         )
                         Text(
-                            text = "저장 중…",
+                            text = if (isSaving) "다운로드 저장 중…" else "저장 중…",
                             color = palette.onBackground.copy(alpha = 0.85f),
                             fontSize = 12.sp
                         )
                     }
                 } else {
-                    TextButton(
-                        onClick = onExport,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(
-                            text = "HTML 저장·열기",
-                            color = palette.brand,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                        TextButton(
+                            onClick = onSaveToDownloads,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "저장하기",
+                                color = palette.brand,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        TextButton(
+                            onClick = onExport,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "HTML 저장·열기",
+                                color = palette.brand,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }

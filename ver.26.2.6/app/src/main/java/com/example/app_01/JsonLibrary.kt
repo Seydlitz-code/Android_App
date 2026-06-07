@@ -1,6 +1,7 @@
 package com.example.app_01
 
 import android.content.Context
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
@@ -19,10 +20,21 @@ object JsonLibrary {
             ?: emptyList()
     }
 
-    /** 사진 촬영 후 ARCore 포즈·Intrinsics `frames` JSON을 JSON 라이브러리에 저장 */
+    /** 사진 촬영 후 ARCore 포즈·Intrinsics `frames` JSON을 JSON 라이브러리에 저장.
+     *  내용이 비어있을 경우 그럴듯한 제목 텍스트만 포함된 빈 JSON을 생성한다. */
     fun saveArCoreFramesJson(context: Context, root: JSONObject): File {
         val dest = File(dir(context), "arcore_${System.currentTimeMillis()}.json")
-        dest.writeText(root.toString(), Charsets.UTF_8)
+        val effective = if (root.optJSONArray("frames")?.length() == 0) {
+            JSONObject().apply {
+                put("title", "Camera Pose Metadata")
+                put("description", "ARCore frame capture log")
+                put("version", "1.0")
+                put("generatedAt", System.currentTimeMillis())
+                put("note", "No tracking data available")
+                put("frames", JSONArray())
+            }
+        } else root
+        dest.writeText(effective.toString(), Charsets.UTF_8)
         return dest
     }
 
@@ -48,11 +60,6 @@ object JsonLibrary {
         }
         for (source in candidates) {
             if (source.name == SERVER_TASK_META_JSON) continue
-            try {
-                Thread.sleep(25L)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-            }
             val can = try {
                 source.canonicalPath
             } catch (_: Exception) {

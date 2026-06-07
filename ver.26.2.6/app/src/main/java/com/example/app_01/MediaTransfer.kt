@@ -113,6 +113,8 @@ suspend fun importImagesToAppLibrary(context: Context, uris: List<Uri>): MediaTr
         }
     }
 
+    if (ok > 0) CapturedMediaCache.invalidateList()
+
     val msg = when {
         ok > 0 && fail > 0 -> "가져오기 완료: ${ok}장 (실패 ${fail}장)"
         ok > 0 -> "가져오기 완료: ${ok}장"

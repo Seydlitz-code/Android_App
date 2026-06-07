@@ -617,6 +617,7 @@ private fun isServerTaskModelFile(file: File): Boolean =
 
 private fun shouldAutoGenerateModelThumbnail(file: File): Boolean {
     if (!file.exists() || !file.isFile) return false
+    if (file.extension.equals("glb", ignoreCase = true)) return false
     if (isServerTaskModelFile(file)) return false
     return file.length() <= 20L * 1024L * 1024L
 }
@@ -1414,18 +1415,36 @@ fun GalleryScreen(
     var selectedLibraryDeletePaths by remember { mutableStateOf(emptySet<String>()) }
     var showDeleteLibraryItemsConfirm by remember { mutableStateOf(false) }
     var libraryMiscRefresh by remember { mutableIntStateOf(0) }
-    LaunchedEffect(libraryTab, serverArtifactLibraryVersion, libraryMiscRefresh) {
+    LaunchedEffect(libraryTab, serverArtifactLibraryVersion, libraryMiscRefresh, showLibraryHub) {
         try {
-            // 세 가지 IO 작업을 병렬로 실행해 전체 대기 시간을 줄입니다.
+            val scanManifests = showLibraryHub ||
+                libraryTab == LibraryTab.GS_PREVIEW ||
+                libraryTab == LibraryTab.GS_ANALYSIS ||
+                libraryTab == LibraryTab.GALLERY ||
+                libraryTab == LibraryTab.DATASET ||
+                libraryTab == LibraryTab.MODEL_3D
+            val scanJson = showLibraryHub || libraryTab == LibraryTab.JSON_LIBRARY
+            val scanArcore = showLibraryHub ||
+                libraryTab == LibraryTab.AR_CORE_LIBRARY ||
+                libraryTab == LibraryTab.DATASET
+            val scanGlb = showLibraryHub || libraryTab == LibraryTab.GLB_LIBRARY
             coroutineScope {
-                val manifestsJob = async(Dispatchers.IO) { scanServerTaskManifestInfos(context) }
-                val jsonsJob     = async(Dispatchers.IO) { JsonLibrary.listFilesSorted(context) }
-                val arcoresJob   = async(Dispatchers.IO) { ArcoreLibrary.listFilesSorted(context) }
-                val glbJob       = async(Dispatchers.IO) { scanGlbFiles(context) }
-                serverTaskManifestInfos = manifestsJob.await()
-                jsonLibraryFiles        = jsonsJob.await()
-                arcoreLibraryFiles      = arcoresJob.await()
-                glbLibraryFiles         = glbJob.await()
+                val manifestsJob = if (scanManifests) {
+                    async(Dispatchers.IO) { scanServerTaskManifestInfos(context) }
+                } else null
+                val jsonsJob = if (scanJson) {
+                    async(Dispatchers.IO) { JsonLibrary.listFilesSorted(context) }
+                } else null
+                val arcoresJob = if (scanArcore) {
+                    async(Dispatchers.IO) { ArcoreLibrary.listFilesSorted(context) }
+                } else null
+                val glbJob = if (scanGlb) {
+                    async(Dispatchers.IO) { scanGlbFiles(context) }
+                } else null
+                manifestsJob?.await()?.let { serverTaskManifestInfos = it }
+                jsonsJob?.await()?.let { jsonLibraryFiles = it }
+                arcoresJob?.await()?.let { arcoreLibraryFiles = it }
+                glbJob?.await()?.let { glbLibraryFiles = it }
             }
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
@@ -1465,6 +1484,7 @@ fun GalleryScreen(
     var showLibraryAssetDeleteConfirm by remember { mutableStateOf(false) }
     var showGalleryOverflowMenu by remember { mutableStateOf(false) }
     var showDatasetOverflowMenu by remember { mutableStateOf(false) }
+    var showPlyOverflowMenu by remember { mutableStateOf(false) }
     var pendingGalleryMenuAction by remember { mutableStateOf(PendingGalleryMenuAction.None) }
     var pendingDatasetMenuAction by remember { mutableStateOf(PendingDatasetMenuAction.None) }
     /** 갤러리 [selectedItems] 대신 배경 제거 대상(데이터셋폴더에서 모은 URI) */
@@ -1734,6 +1754,30 @@ fun GalleryScreen(
         }
     }
 
+    val plyImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        if (uris.isNullOrEmpty()) {
+            Toast.makeText(context, "파일 선택이 취소되었습니다.", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        if (isUploading || isTransferring) {
+            Toast.makeText(context, "다른 작업이 진행 중입니다.", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        isTransferring = true
+        transferScope.launch {
+            val result = PlyLibrary.importExternalModelFiles(context, uris)
+            val lib = loadModel3dLibraryOnIo(context)
+            plyLibraryModels = lib.plyModels
+            objLibraryModels = lib.objModels
+            libraryModelThumbRefresh++
+            libraryMiscRefresh++
+            isTransferring = false
+            Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+        }
+    }
+
     fun runExportGallerySelection() {
         if (selectedItems.isEmpty()) {
             Toast.makeText(context, "선택된 이미지가 없습니다.", Toast.LENGTH_SHORT).show()
@@ -1999,6 +2043,12 @@ fun GalleryScreen(
                     libraryDetailScreen = LibraryDetailScreen.NONE
                     currentPlyModel = null
                 }
+                if (libraryDetailScreen == LibraryDetailScreen.GLB_VIEWER &&
+                    libraryTab != LibraryTab.GLB_LIBRARY
+                ) {
+                    libraryDetailScreen = LibraryDetailScreen.NONE
+                    glbViewerFile = null
+                }
             }
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
@@ -2107,6 +2157,11 @@ fun GalleryScreen(
                                             }
                                         currentPlyModel = null
                                     }
+                                    libraryTab == LibraryTab.MODEL_3D &&
+                                        libraryDetailScreen == LibraryDetailScreen.GLB_VIEWER -> {
+                                        libraryDetailScreen = LibraryDetailScreen.NONE
+                                        glbViewerFile = null
+                                    }
                                     libraryTab == LibraryTab.MODEL_3D && (
                                         libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ||
                                             libraryDetailScreen == LibraryDetailScreen.MODEL_3D_OBJ_LIST
@@ -2130,6 +2185,9 @@ fun GalleryScreen(
                             libraryTab == LibraryTab.MODEL_3D &&
                                 libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER ->
                                 currentPlyModel?.file?.name ?: "PLY"
+                            libraryTab == LibraryTab.MODEL_3D &&
+                                libraryDetailScreen == LibraryDetailScreen.GLB_VIEWER ->
+                                glbViewerFile?.name ?: "GLB"
                             libraryTab == LibraryTab.MODEL_3D &&
                                 libraryDetailScreen == LibraryDetailScreen.MODEL_3D_PLY_LIST ->
                                 "PLY"
@@ -2394,13 +2452,18 @@ fun GalleryScreen(
                     } else if (
                         libraryTab == LibraryTab.MODEL_3D &&
                         !showLibraryHub &&
-                        libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER &&
-                        currentPlyModel != null
+                        (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER && currentPlyModel != null ||
+                            libraryDetailScreen == LibraryDetailScreen.GLB_VIEWER && glbViewerFile != null)
                     ) {
                         IconButton(
                             onClick = {
-                                libraryDetailScreen = LibraryDetailScreen.MODEL_3D_PLY_LIST
-                                currentPlyModel = null
+                                if (libraryDetailScreen == LibraryDetailScreen.GLB_VIEWER) {
+                                    libraryDetailScreen = LibraryDetailScreen.NONE
+                                    glbViewerFile = null
+                                } else {
+                                    libraryDetailScreen = LibraryDetailScreen.MODEL_3D_PLY_LIST
+                                    currentPlyModel = null
+                                }
                             },
                             modifier = Modifier.size(40.dp)
                         ) {
@@ -2409,6 +2472,60 @@ fun GalleryScreen(
                                 contentDescription = "닫기",
                                 tint = palette.onBackground
                             )
+                        }
+                    } else if (
+                        libraryTab == LibraryTab.MODEL_3D &&
+                        !showLibraryHub &&
+                        libraryDetailScreen != LibraryDetailScreen.OBJ_VIEWER &&
+                        libraryDetailScreen != LibraryDetailScreen.GLB_VIEWER
+                    ) {
+                        Box {
+                            IconButton(
+                                onClick = { showPlyOverflowMenu = true },
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.MoreVert,
+                                    contentDescription = "PLY 메뉴",
+                                    tint = palette.onBackground
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = showPlyOverflowMenu,
+                                onDismissRequest = { showPlyOverflowMenu = false },
+                                modifier = Modifier
+                                    .widthIn(min = 220.dp)
+                                    .background(palette.surfaceCard, RoundedCornerShape(14.dp))
+                            ) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "PLY·GLB 추가",
+                                            color = palette.onBackground,
+                                            fontSize = 15.sp
+                                        )
+                                    },
+                                    onClick = {
+                                        showPlyOverflowMenu = false
+                                        if (!isUploading && !isTransferring) {
+                                            plyImportLauncher.launch(
+                                                arrayOf(
+                                                    "model/gltf-binary",
+                                                    "model/ply",
+                                                    "application/octet-stream",
+                                                    "*/*",
+                                                )
+                                            )
+                                        } else {
+                                            Toast.makeText(
+                                                context,
+                                                "다른 작업이 진행 중입니다.",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    }
+                                )
+                            }
                         }
                     } else if (libraryTab == LibraryTab.GALLERY && !showLibraryHub) {
                         Box {
@@ -2730,7 +2847,19 @@ fun GalleryScreen(
                     modifier = Modifier.fillMaxSize()
                 )
             } else if (libraryTab == LibraryTab.MODEL_3D) {
-                if (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER && currentPlyModel != null) {
+                if (libraryDetailScreen == LibraryDetailScreen.GLB_VIEWER && glbViewerFile != null) {
+                    BackHandler {
+                        libraryDetailScreen = LibraryDetailScreen.NONE
+                        glbViewerFile = null
+                    }
+                    GlbViewerScreen(
+                        file = glbViewerFile!!,
+                        onBack = {
+                            libraryDetailScreen = LibraryDetailScreen.NONE
+                            glbViewerFile = null
+                        }
+                    )
+                } else if (libraryDetailScreen == LibraryDetailScreen.OBJ_VIEWER && currentPlyModel != null) {
                     BackHandler {
                         libraryDetailScreen = LibraryDetailScreen.MODEL_3D_PLY_LIST
                         currentPlyModel = null
@@ -2797,10 +2926,17 @@ fun GalleryScreen(
                                 )
                                 Spacer(modifier = Modifier.height(12.dp))
                                 Text(
-                                    text = "PLY 파일이 없습니다",
+                                    text = "PLY·GLB 파일이 없습니다",
                                     color = palette.onBackground.copy(alpha = 0.7f),
                                     fontSize = 16.sp,
                                     fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = "우측 상단 메뉴 → PLY·GLB 추가",
+                                    color = palette.onBackground.copy(alpha = 0.45f),
+                                    fontSize = 12.sp,
+                                    textAlign = TextAlign.Center
                                 )
                             }
                         }
@@ -2908,8 +3044,13 @@ fun GalleryScreen(
                                                         if (isSelected) selectedLibraryAssetPaths - path
                                                         else selectedLibraryAssetPaths + path
                                                 } else {
-                                                    currentPlyModel = model
-                                                    libraryDetailScreen = LibraryDetailScreen.OBJ_VIEWER
+                                                    if (model.file.extension.equals("glb", ignoreCase = true)) {
+                                                        glbViewerFile = model.file
+                                                        libraryDetailScreen = LibraryDetailScreen.GLB_VIEWER
+                                                    } else {
+                                                        currentPlyModel = model
+                                                        libraryDetailScreen = LibraryDetailScreen.OBJ_VIEWER
+                                                    }
                                                 }
                                             },
                                             onLongClick = {
@@ -6218,6 +6359,10 @@ fun GalleryScreen(
                                                         libraryDetailScreen = LibraryDetailScreen.MODEL_3D_PLY_LIST
                                                         currentPlyModel = null
                                                     }
+                                                    if (glbViewerFile?.absolutePath == p) {
+                                                        libraryDetailScreen = LibraryDetailScreen.NONE
+                                                        glbViewerFile = null
+                                                    }
                                                 }
                                                 loadModel3dLibrary(context) { lib ->
                                                     plyLibraryModels = lib.plyModels
@@ -6321,17 +6466,9 @@ internal suspend fun extractVideoFramesToDataset(
     frameCount
 }
 
-private fun scanGlbFiles(context: Context): List<File> {
-    val plyDir = File(context.getExternalFilesDir(null), "models/ply")
-    if (!plyDir.exists() || !plyDir.isDirectory) return emptyList()
-    val glbFiles = mutableListOf<File>()
-    plyDir.listFiles { f -> f.isDirectory && f.name.startsWith("server_task_") }?.forEach { taskDir ->
-        taskDir.listFiles { f -> f.isFile && f.extension.equals("glb", ignoreCase = true) }?.let {
-            glbFiles.addAll(it)
-        }
-    }
-    return glbFiles.sortedByDescending { it.lastModified() }
-}
+private fun scanGlbFiles(context: Context): List<File> =
+    PlyLibrary.listFilesSorted(context)
+        .filter { it.extension.equals("glb", ignoreCase = true) }
 
 @Composable
 private fun GlbViewerScreen(file: File, onBack: () -> Unit) {

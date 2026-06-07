@@ -364,18 +364,18 @@ private suspend fun runBatchedArcoreMetadataSave(
             if (photoFiles.size == 1) {
                 val f = photoFiles[0]
                 val frameJo = map[f.name]
-                if (frameJo == null || frameJo.optString("trackingState") != "TRACKING") {
-                    failures++
-                } else {
+                val rootJson = if (frameJo != null && frameJo.optString("trackingState") == "TRACKING") {
                     val frameAligned = JSONObject(frameJo.toString()).apply {
                         put("filename", "img_000000.jpg")
                     }
-                    val rootJson = JSONObject().put("frames", JSONArray().put(frameAligned))
-                    runCatching {
-                        JsonLibrary.saveArCoreFramesJson(context, rootJson)
-                        ArcoreLibrary.savePhotoAndPosesZip(context, f, rootJson.toString())
-                    }.onFailure { failures++ }
+                    JSONObject().put("frames", JSONArray().put(frameAligned))
+                } else {
+                    JSONObject().put("frames", JSONArray())
                 }
+                runCatching {
+                    JsonLibrary.saveArCoreFramesJson(context, rootJson)
+                    ArcoreLibrary.savePhotoAndPosesZip(context, f, rootJson.toString())
+                }.onFailure { failures++ }
             } else {
                 val successfulFrames = linkedMapOf<String, JSONObject>()
                 for (f in photoFiles) {
@@ -401,9 +401,7 @@ private suspend fun runBatchedArcoreMetadataSave(
                     imgIdx++
                 }
                     val rootJson = JSONObject().put("frames", allFrames)
-                    if (allFrames.length() > 0) {
-                        JsonLibrary.saveArCoreFramesJson(context, rootJson)
-                    }
+                    JsonLibrary.saveArCoreFramesJson(context, rootJson)
                     ArcoreLibrary.saveContinuousBurstArcoreZip(
                         context,
                         filesInZip,
@@ -890,7 +888,7 @@ fun CameraScreen(
                                 }
                             }
                         }
-                        delay(1000) // 1초 간격
+                        delay(200) // 0.2초 간격 (5회/초)
                     }
                 }
             }
@@ -900,7 +898,7 @@ fun CameraScreen(
         if (captureMode == CaptureMode.VIDEO && isRecording && isDatasetCollectionEnabled) {
             if (currentPitchIndex < pitchTargets.size) {
                 while (isRecording) {
-                    delay(500) // 딜레이 단축 (반응성 향상)
+                    delay(200) // 0.2초 간격 (5회/초)
                     val targetPitch = currentTargetPitchState.value
                     val pitchNow = effectivePitchDegreesState.value
                     val isAligned =

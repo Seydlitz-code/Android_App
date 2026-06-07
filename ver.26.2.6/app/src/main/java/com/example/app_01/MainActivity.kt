@@ -1,6 +1,7 @@
 package com.example.app_01
 
 import android.Manifest
+import android.app.Application
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
@@ -707,9 +708,8 @@ fun CameraApp(modifier: Modifier = Modifier) {
                     }
                 },
                 onGalleryUpdated = {
-                    galleryScope.launch(Dispatchers.IO) {
-                        val images = loadCapturedMediaSync(context)
-                        withContext(Dispatchers.Main) {
+                    galleryScope.launch {
+                        refreshCapturedImages(context, invalidateCache = true) { images ->
                             capturedImages = images
                             if (images.isNotEmpty()) lastCapturedImageUri = images.first()
                         }
@@ -775,9 +775,8 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                 }
                             },
                             onImageDeleted = {
-                                galleryScope.launch(Dispatchers.IO) {
-                                    val images = loadCapturedMediaSync(context)
-                                    withContext(Dispatchers.Main) {
+                                galleryScope.launch {
+                                    refreshCapturedImages(context, invalidateCache = true) { images ->
                                         capturedImages = images
                                         if (images.isNotEmpty()) {
                                             lastCapturedImageUri = images.first()
@@ -884,9 +883,8 @@ fun CameraApp(modifier: Modifier = Modifier) {
                         ClaudeChatScreen(
                             galleryImages = capturedImages,
                             onGalleryUpdated = {
-                                galleryScope.launch(Dispatchers.IO) {
-                                    val images = loadCapturedMediaSync(context)
-                                    withContext(Dispatchers.Main) {
+                                galleryScope.launch {
+                                    refreshCapturedImages(context, invalidateCache = true) { images ->
                                         capturedImages = images
                                         if (images.isNotEmpty()) lastCapturedImageUri = images.first()
                                     }
@@ -910,9 +908,9 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                         lastCapturedImageUri = lastCapturedImageUri,
                                         onImageCaptured = { uri ->
                                             lastCapturedImageUri = uri
-                                            galleryScope.launch(Dispatchers.IO) {
-                                                val images = loadCapturedMediaSync(context)
-                                                withContext(Dispatchers.Main) {
+                                            CapturedMediaCache.invalidateList()
+                                            galleryScope.launch {
+                                                refreshCapturedImages(context) { images ->
                                                     capturedImages = images
                                                     if (images.isNotEmpty()) {
                                                         lastCapturedImageUri = images.first()
@@ -922,9 +920,9 @@ fun CameraApp(modifier: Modifier = Modifier) {
                                         },
                                         onVideoCaptured = { uri ->
                                             lastCapturedImageUri = uri
-                                            galleryScope.launch(Dispatchers.IO) {
-                                                val images = loadCapturedMediaSync(context)
-                                                withContext(Dispatchers.Main) {
+                                            CapturedMediaCache.invalidateList()
+                                            galleryScope.launch {
+                                                refreshCapturedImages(context) { images ->
                                                     capturedImages = images
                                                     if (images.isNotEmpty()) {
                                                         lastCapturedImageUri = images.first()
@@ -3712,23 +3710,11 @@ internal fun deleteAiCadArtifactsForStl(stlFile: File): Boolean {
 /**
  * 서버 파이프라인 결과는 [plyRoot]/server_task_{taskId}/아래에 PLY가 저장된다.
  * 기존 로직은 ply 루트의 파일만 나열해 서버 작업 PLY가 라이브러리에 안 보였음 → 1단계 하위 폴더까지 포함.
+ * 사용자 가져오기 PLY·GLB([PlyLibrary.importedDir])도 포함합니다.
  */
-private fun collectPlyFilesForLibrary(plyRoot: File): List<File> {
-    val out = ArrayList<File>()
-    val top = plyRoot.listFiles() ?: return out
-    for (entry in top) {
-        when {
-            entry.isFile && entry.name.endsWith(".ply", ignoreCase = true) -> out.add(entry)
-            entry.isDirectory -> {
-                val sub = entry.listFiles() ?: continue
-                for (f in sub) {
-                    if (f.isFile && f.name.endsWith(".ply", ignoreCase = true)) out.add(f)
-                }
-            }
-        }
-    }
-    return out.distinctBy { it.absolutePath }.sortedByDescending { it.lastModified() }
-}
+private fun collectPlyFilesForLibrary(plyRoot: File): List<File> =
+    PlyLibrary.collectModelFilesRecursive(plyRoot)
+        .sortedByDescending { it.lastModified() }
 
 private fun displayNameForPlyLibraryEntry(plyFile: File, plyRoot: File): String {
     val base = plyFile.nameWithoutExtension
@@ -3863,26 +3849,23 @@ internal fun loadCapturedMediaSync(context: Context): List<Uri> {
         return emptyList()
     }
 
+    val fingerprint = computeCapturedMediaFingerprint(mediaDir)
+    CapturedMediaCache.getCachedUrisIfValid(fingerprint)?.let { return it }
+
     val datasetsRoot = File(mediaDir, "datasets").absolutePath
-    val entries = mediaDir.walkTopDown()
+    val entries = ArrayList<Pair<Uri, Long>>(fingerprint.fileCount.coerceAtLeast(16))
+    mediaDir.walkTopDown()
         .onEnter { dir ->
             dir == mediaDir || !skipGallerySubtreeDirName(dir.name)
         }
-        .filter { file ->
-            file.isFile &&
-                (file.name.endsWith(".jpg", ignoreCase = true) ||
-                    file.name.endsWith(".jpeg", ignoreCase = true) ||
-                    file.name.endsWith(".png", ignoreCase = true) ||
-                    file.name.endsWith(".webp", ignoreCase = true) ||
-                    file.name.endsWith(".heic", ignoreCase = true) ||
-                    file.name.endsWith(".heif", ignoreCase = true) ||
-                    file.name.endsWith(".mp4", ignoreCase = true)) &&
-                !file.absolutePath.startsWith(datasetsRoot)
+        .forEach { file ->
+            if (!isCapturedGalleryMediaFile(file, datasetsRoot)) return@forEach
+            entries.add(Uri.fromFile(file) to CapturedMediaCache.mediaSortTimeMillisCached(file))
         }
-        .map { file -> Uri.fromFile(file) to mediaSortTimeMillis(file) }
-        .toList()
 
-    return entries.sortedByDescending { it.second }.map { it.first }
+    val uris = entries.sortedByDescending { it.second }.map { it.first }
+    CapturedMediaCache.storeUris(fingerprint, uris)
+    return uris
 }
 
 /** 앱 내 갤러리 스캔 결과 중 이미지 파일만 (동영상 제외). Mobile 3DGS 이미지 선택 등에 사용 */
@@ -4111,7 +4094,7 @@ internal suspend fun uploadZipAndRunPipeline(
     val uploadStartMs = System.currentTimeMillis()
     /** UI는 post만 하고 IO 코루틴은 대기하지 않음(백그라운드에서 메인 지연 시 폴링이 멈추지 않도록). */
     val mainHandler = Handler(Looper.getMainLooper())
-    val appCtx = context.applicationContext
+    val appCtx = context.applicationContext as Application
     var lastShownProgress = 0
 
     fun emitProgress(p: Int, msg: String) {
@@ -4317,7 +4300,7 @@ internal suspend fun uploadZipAndRunPipeline(
         if (gsViewerUrl.isNullOrBlank()) {
             android.util.Log.i("uploadZipAndRunPipeline", "Launching background GS poller+drainer — pipeline returns immediately")
             val capturedTaskId = taskId
-            kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+            appCtx.appCoroutineScope().launch {
                 var pollCount = 0
                 var foundUrl: String? = null
                 while (pollCount < 120 && foundUrl == null) {
@@ -4914,6 +4897,42 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
     var geminiKey by remember {
         mutableStateOf(LlmApiKeyStore.getValueForEditing(context, LlmProvider.GEMINI))
     }
+    var opencodeGoKey by remember {
+        mutableStateOf(LlmApiKeyStore.getValueForEditing(context, LlmProvider.OPENCODE_GO))
+    }
+
+    var claudeModel by remember {
+        mutableStateOf(LlmApiKeyStore.getSelectedModel(context, LlmProvider.CLAUDE))
+    }
+    var openaiModel by remember {
+        mutableStateOf(LlmApiKeyStore.getSelectedModel(context, LlmProvider.OPENAI))
+    }
+    var geminiModel by remember {
+        mutableStateOf(LlmApiKeyStore.getSelectedModel(context, LlmProvider.GEMINI))
+    }
+    var opencodeGoModel by remember {
+        mutableStateOf(LlmApiKeyStore.getSelectedModel(context, LlmProvider.OPENCODE_GO))
+    }
+
+    var testResult by remember { mutableStateOf<String?>(null) }
+    var isTesting by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
+
+    val selectedModelId = when (selectedProvider) {
+        LlmProvider.CLAUDE -> claudeModel
+        LlmProvider.OPENAI -> openaiModel
+        LlmProvider.GEMINI -> geminiModel
+        LlmProvider.OPENCODE_GO -> opencodeGoModel
+    }
+
+    val onModelChange: (String) -> Unit = { v ->
+        when (selectedProvider) {
+            LlmProvider.CLAUDE -> claudeModel = v
+            LlmProvider.OPENAI -> openaiModel = v
+            LlmProvider.GEMINI -> geminiModel = v
+            LlmProvider.OPENCODE_GO -> opencodeGoModel = v
+        }
+    }
 
     BackHandler { onBack() }
 
@@ -4921,22 +4940,26 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
         LlmProvider.CLAUDE -> "Anthropic (클로드) API 키"
         LlmProvider.OPENAI -> "OpenAI (GPT) API 키"
         LlmProvider.GEMINI -> "Google AI (제미나이) API 키"
+        LlmProvider.OPENCODE_GO -> "Opencode GO API 키"
     }
     val keyPlaceholder = when (selectedProvider) {
         LlmProvider.CLAUDE -> "sk-ant-api03-…"
         LlmProvider.OPENAI -> "sk-…"
         LlmProvider.GEMINI -> "AIza…"
+        LlmProvider.OPENCODE_GO -> "op-…"
     }
     val keyValue = when (selectedProvider) {
         LlmProvider.CLAUDE -> claudeKey
         LlmProvider.OPENAI -> openaiKey
         LlmProvider.GEMINI -> geminiKey
+        LlmProvider.OPENCODE_GO -> opencodeGoKey
     }
     val onKeyChange: (String) -> Unit = { v ->
         when (selectedProvider) {
             LlmProvider.CLAUDE -> claudeKey = v
             LlmProvider.OPENAI -> openaiKey = v
             LlmProvider.GEMINI -> geminiKey = v
+            LlmProvider.OPENCODE_GO -> opencodeGoKey = v
         }
     }
 
@@ -4963,66 +4986,135 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
                 )
             }
             Text(
-                text = "LLM API 키",
+                text = "LLM API 키 설정",
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
                 color = palette.onBackground
             )
         }
         Spacer(modifier = Modifier.height(16.dp))
+
+        // ── 제공자 선택 드롭다운 ──
+        var providerMenuExpanded by remember { mutableStateOf(false) }
         Text(
-            text = "AI 메뉴에서 사용할 LLM을 선택한 뒤 해당 API 키를 입력하세요. 기본값은 local.properties의 claude_api_key·openai_api_key·gemini_api_key(빌드 시 주입)입니다. 필드를 비우고 저장하면 해당 제공자는 빌드 기본 키를 사용합니다.",
-            color = palette.onBackgroundMuted,
-            fontSize = 14.sp,
-            lineHeight = 20.sp
-        )
-        Spacer(modifier = Modifier.height(20.dp))
-        Text(
-            text = "AI 메뉴에 사용할 제공자",
+            text = "LLM API 키 선택 드롭다운 UI",
             color = palette.onBackground,
             fontSize = 14.sp,
             fontWeight = FontWeight.Medium
         )
         Spacer(modifier = Modifier.height(8.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            FilterChip(
-                selected = selectedProvider == LlmProvider.CLAUDE,
-                onClick = { selectedProvider = LlmProvider.CLAUDE },
-                label = { Text("클로드", fontSize = 13.sp) },
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = palette.brand,
-                    selectedLabelColor = palette.onBrand,
-                    containerColor = palette.chipUnselectedBg,
-                    labelColor = palette.chipUnselectedLabel
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .border(1.dp, palette.onBackground.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+                    .clickable { providerMenuExpanded = true }
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = providerDisplayName(selectedProvider),
+                    color = palette.onBackground,
+                    fontSize = 15.sp
                 )
-            )
-            FilterChip(
-                selected = selectedProvider == LlmProvider.OPENAI,
-                onClick = { selectedProvider = LlmProvider.OPENAI },
-                label = { Text("GPT", fontSize = 13.sp) },
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = palette.brand,
-                    selectedLabelColor = palette.onBrand,
-                    containerColor = palette.chipUnselectedBg,
-                    labelColor = palette.chipUnselectedLabel
+                Icon(
+                    imageVector = Icons.Filled.ArrowDropDown,
+                    contentDescription = "제공자 선택",
+                    tint = palette.onBackground.copy(alpha = 0.7f)
                 )
-            )
-            FilterChip(
-                selected = selectedProvider == LlmProvider.GEMINI,
-                onClick = { selectedProvider = LlmProvider.GEMINI },
-                label = { Text("제미나이", fontSize = 13.sp) },
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = palette.brand,
-                    selectedLabelColor = palette.onBrand,
-                    containerColor = palette.chipUnselectedBg,
-                    labelColor = palette.chipUnselectedLabel
-                )
-            )
+            }
+            DropdownMenu(
+                expanded = providerMenuExpanded,
+                onDismissRequest = { providerMenuExpanded = false },
+                modifier = Modifier.background(palette.surfaceCard)
+            ) {
+                listOf(
+                    LlmProvider.CLAUDE to "Claude",
+                    LlmProvider.OPENAI to "GPT",
+                    LlmProvider.GEMINI to "Gemini",
+                    LlmProvider.OPENCODE_GO to "Opencode GO",
+                ).forEach { (provider, label) ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                label,
+                                color = palette.onBackground,
+                                fontSize = 14.sp,
+                                fontWeight = if (provider == selectedProvider) FontWeight.Bold else FontWeight.Normal
+                            )
+                        },
+                        onClick = {
+                            selectedProvider = provider
+                            providerMenuExpanded = false
+                        }
+                    )
+                }
+            }
         }
+
         Spacer(modifier = Modifier.height(20.dp))
+
+        // ── 모델 선택 드롭다운 ──
+        var modelMenuExpanded by remember { mutableStateOf(false) }
+        val currentModels = LlmModels.modelsFor(selectedProvider)
+        Text(
+            text = "해당 LLM 내 모델 선택 드롭다운",
+            color = palette.onBackground,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .border(1.dp, palette.onBackground.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+                    .clickable { modelMenuExpanded = true }
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = LlmModels.displayNameFor(selectedProvider, selectedModelId),
+                    color = palette.onBackground,
+                    fontSize = 15.sp
+                )
+                Icon(
+                    imageVector = Icons.Filled.ArrowDropDown,
+                    contentDescription = "모델 선택",
+                    tint = palette.onBackground.copy(alpha = 0.7f)
+                )
+            }
+            DropdownMenu(
+                expanded = modelMenuExpanded,
+                onDismissRequest = { modelMenuExpanded = false },
+                modifier = Modifier.background(palette.surfaceCard)
+            ) {
+                currentModels.forEach { model ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                model.displayName,
+                                color = palette.onBackground,
+                                fontSize = 14.sp,
+                                fontWeight = if (model.apiId == selectedModelId) FontWeight.Bold else FontWeight.Normal
+                            )
+                        },
+                        onClick = {
+                            onModelChange(model.apiId)
+                            modelMenuExpanded = false
+                        }
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        // ── API 키 입력 구역 ──
         OutlinedTextField(
             value = keyValue,
             onValueChange = onKeyChange,
@@ -5044,7 +5136,58 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
                 unfocusedPlaceholderColor = Color.LightGray
             )
         )
-        Spacer(modifier = Modifier.height(28.dp))
+
+        if (selectedProvider == LlmProvider.OPENCODE_GO) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "서버 주소는 Opencode GO 공식 엔드포인트로 자동 연결됩니다. API 키만 입력하세요.",
+                color = palette.onBackground.copy(alpha = 0.65f),
+                fontSize = 12.sp,
+                lineHeight = 16.sp
+            )
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        // ── 연결 확인 ──
+        val canTest = !isTesting && keyValue.isNotBlank()
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(24.dp))
+                .background(if (canTest) palette.brand else palette.chatComposerPillInactive)
+                .clickable(enabled = canTest) {
+                    isTesting = true
+                    testResult = null
+                    coroutineScope.launch {
+                        val result = ClaudeChatClient.testConnection(selectedProvider)
+                        testResult = if (result.first) "[성공] ${result.second}" else "[실패] ${result.second}"
+                        isTesting = false
+                    }
+                }
+                .padding(vertical = 14.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = if (isTesting) "연결 테스트 중..." else "연결 확인",
+                color = palette.onBrand,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        testResult?.let { result ->
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = result,
+                color = if (result.startsWith("[성공]")) Color(0xFF4CAF50) else Color(0xFFF44336),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -5055,7 +5198,7 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
                 border = BorderStroke(1.dp, palette.divider),
                 modifier = Modifier.weight(1f)
             ) {
-                Text("닫기")
+                Text("취소")
             }
             Button(
                 onClick = {
@@ -5064,7 +5207,12 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
                         selectedProvider,
                         claudeKey,
                         openaiKey,
-                        geminiKey
+                        geminiKey,
+                        opencodeGoKey,
+                        claudeModel,
+                        openaiModel,
+                        geminiModel,
+                        opencodeGoModel
                     )
                     onBack()
                 },
@@ -5078,6 +5226,13 @@ fun LlmApiKeySettingsScreen(onBack: () -> Unit) {
             }
         }
     }
+}
+
+private fun providerDisplayName(provider: LlmProvider): String = when (provider) {
+    LlmProvider.CLAUDE -> "Claude"
+    LlmProvider.OPENAI -> "GPT"
+    LlmProvider.GEMINI -> "Gemini"
+    LlmProvider.OPENCODE_GO -> "Opencode GO"
 }
 
 @Composable
